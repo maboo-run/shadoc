@@ -13,7 +13,7 @@ if tar -tf "$archive_file" | grep -Eq '(^|/)AGENTS\.md$|^docs(/|$)|^learning-rec
   exit 1
 fi
 
-for required_file in README.md LICENSE .goreleaser.yml .github/workflows/ci.yml .github/workflows/package.yml .github/workflows/release.yml; do
+for required_file in README.md README_EN.md LICENSE .goreleaser.yml .github/workflows/ci.yml .github/workflows/package.yml .github/workflows/release.yml; do
   if ! git -C "$repository_root" ls-files --error-unmatch "$required_file" >/dev/null 2>&1; then
     continue
   fi

@@ -1,6 +1,10 @@
 # 影刻 · Shadoc
 
 <p align="center">
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
+</p>
+
+<p align="center">
   <img src="web/public/shadoc-icon.png" alt="Shadoc icon" width="120" height="120">
 </p>
 
