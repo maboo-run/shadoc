@@ -8,12 +8,12 @@ trap 'rm -f "$archive_file"' EXIT HUP INT TERM
 
 git -C "$repository_root" archive --worktree-attributes --format=tar HEAD > "$archive_file"
 
-if tar -tf "$archive_file" | grep -Eq '(^|/)AGENTS\.md$|^docs(/|$)'; then
+if tar -tf "$archive_file" | grep -Eq '(^|/)AGENTS\.md$|^docs(/|$)|^learning-records(/|$)'; then
   printf 'private contributor files leaked into the public export\n' >&2
   exit 1
 fi
 
-for required_file in README.md LICENSE .github/workflows/ci.yml .github/workflows/release.yml; do
+for required_file in README.md LICENSE .goreleaser.yml .github/workflows/ci.yml .github/workflows/package.yml .github/workflows/release.yml; do
   if ! git -C "$repository_root" ls-files --error-unmatch "$required_file" >/dev/null 2>&1; then
     continue
   fi

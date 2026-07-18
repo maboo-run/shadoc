@@ -1,9 +1,11 @@
-.PHONY: test test-release-scripts build release verify-release-version verify-release-artifacts web test-e2e verify-release
+.PHONY: test test-release-scripts build release package-snapshot goreleaser-check verify-release-version verify-release-artifacts web test-e2e verify-release
 VERSION ?= 0.1.0
+GORELEASER ?= goreleaser
 web:
 	pnpm --filter shadoc-web build
 test-release-scripts:
 	sh -n scripts/install.sh
+	sh -n scripts/prepare-release-artifacts.sh
 	sh -n scripts/validate-release-version.sh
 	sh -n scripts/test-public-export.sh
 	./scripts/test-release-version.sh
@@ -35,7 +37,22 @@ release: verify-release-version build
 	cp LICENSE dist/LICENSE
 	cd dist && shasum -a 256 shadoc_linux_amd64 shadoc_linux_arm64 shadoc_darwin_amd64 shadoc_darwin_arm64 shadoc-agent-linux-amd64 shadoc-agent-linux-arm64 shadoc-agent-darwin-amd64 shadoc-agent-darwin-arm64 shadoc-agent-windows-amd64.exe shadoc-agent-windows-arm64.exe install.sh LICENSE > SHA256SUMS
 	$(MAKE) verify-release-artifacts
+goreleaser-check:
+	$(GORELEASER) check
+package-snapshot:
+	$(GORELEASER) release --snapshot --clean --skip=publish
+	sh scripts/prepare-release-artifacts.sh
+	$(MAKE) verify-release-artifacts
 verify-release-artifacts:
+	@for artifact in \
+		shadoc_linux_amd64 shadoc_linux_arm64 \
+		shadoc_darwin_amd64 shadoc_darwin_arm64 \
+		shadoc-agent-linux-amd64 shadoc-agent-linux-arm64 \
+		shadoc-agent-darwin-amd64 shadoc-agent-darwin-arm64 \
+		shadoc-agent-windows-amd64.exe shadoc-agent-windows-arm64.exe \
+		install.sh LICENSE SHA256SUMS; do \
+		test -f "dist/$$artifact" || { echo "missing release artifact: $$artifact" >&2; exit 1; }; \
+	done
 	cd dist && shasum -a 256 -c SHA256SUMS
 test-e2e: build
 	go test -tags=e2e ./tests/e2e -v

@@ -1,0 +1,74 @@
+name: package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.goreleaser.yml'
+      - '.github/workflows/package.yml'
+      - 'Makefile'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'scripts/install.sh'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: snapshot artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.24.x
+          cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Build snapshot with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --snapshot --clean --skip=publish
+      - name: Verify snapshot artifacts
+        run: |
+          sh scripts/prepare-release-artifacts.sh
+          make verify-release-artifacts
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: shadoc-snapshot-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/shadoc_linux_amd64
+            dist/shadoc_linux_arm64
+            dist/shadoc_darwin_amd64
+            dist/shadoc_darwin_arm64
+            dist/shadoc-agent-linux-amd64
+            dist/shadoc-agent-linux-arm64
+            dist/shadoc-agent-darwin-amd64
+            dist/shadoc-agent-darwin-arm64
+            dist/shadoc-agent-windows-amd64.exe
+            dist/shadoc-agent-windows-arm64.exe
+            dist/install.sh
+            dist/LICENSE
+            dist/SHA256SUMS

@@ -64,15 +64,31 @@ jobs:
         run: |
           make test
           go test -race ./...
-      - name: Build release artifacts
-        run: make release VERSION="$VERSION"
+      - name: Build release artifacts with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --clean --skip=publish
+      - name: Verify release artifacts
+        run: |
+          sh scripts/prepare-release-artifacts.sh
+          make verify-release-artifacts
 
       - name: Attest release artifacts
         uses: actions/attest@v4
         with:
           subject-path: |
-            dist/shadoc_*
-            dist/shadoc-agent-*
+            dist/shadoc_linux_amd64
+            dist/shadoc_linux_arm64
+            dist/shadoc_darwin_amd64
+            dist/shadoc_darwin_arm64
+            dist/shadoc-agent-linux-amd64
+            dist/shadoc-agent-linux-arm64
+            dist/shadoc-agent-darwin-amd64
+            dist/shadoc-agent-darwin-arm64
+            dist/shadoc-agent-windows-amd64.exe
+            dist/shadoc-agent-windows-arm64.exe
             dist/install.sh
             dist/LICENSE
             dist/SHA256SUMS

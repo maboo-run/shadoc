@@ -1,0 +1,81 @@
+version: 2
+
+project_name: shadoc
+
+before:
+  hooks:
+    - pnpm --filter shadoc-web build
+
+builds:
+  - id: shadoc
+    main: ./cmd/restic-control
+    binary: shadoc
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.applicationVersion={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+  - id: shadoc-agent
+    main: ./cmd/restic-control-agent
+    binary: shadoc-agent
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.applicationVersion={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: shadoc-binaries
+    ids:
+      - shadoc
+    formats:
+      - binary
+    name_template: "shadoc_{{ .Os }}_{{ .Arch }}"
+  - id: shadoc-agent-binaries
+    ids:
+      - shadoc-agent
+    formats:
+      - binary
+    name_template: "shadoc-agent-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+  extra_files:
+    - glob: ./scripts/install.sh
+      name_template: install.sh
+    - glob: ./LICENSE
+
+release:
+  github:
+    owner: maboo-run
+    name: shadoc
+  name_template: "Shadoc {{ .Version }}"
+  extra_files:
+    - glob: ./scripts/install.sh
+      name_template: install.sh
+    - glob: ./LICENSE
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
