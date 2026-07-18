@@ -1,0 +1,39 @@
+name: 缺陷报告
+description: 报告可以稳定复现的问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请先删除日志中的凭据、主机名、用户名和内部路径。安全漏洞请使用私密安全报告。
+  - type: input
+    id: version
+    attributes:
+      label: Shadoc 版本
+      placeholder: 例如 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 控制服务平台
+      options: [Linux amd64, Linux arm64, macOS amd64, macOS arm64]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为与复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 已脱敏诊断信息
+      description: 不要粘贴密码、令牌、私钥或未经检查的完整日志。
