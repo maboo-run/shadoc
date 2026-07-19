@@ -51,7 +51,12 @@ func run(parent context.Context) error {
 	rsyncProgram := flag.String("rsync", compatibleEnv("SHADOC_AGENT_RSYNC", "RESTIC_CONTROL_AGENT_RSYNC", "rsync"), "rsync executable")
 	interval := flag.Duration("poll-interval", time.Second, "heartbeat and assignment polling interval")
 	allowedRoots := flag.String("allowed-roots", compatibleEnv("SHADOC_AGENT_ALLOWED_ROOTS", "RESTIC_CONTROL_AGENT_ALLOWED_ROOTS", ""), "comma-separated absolute roots available to directory browsing and creation")
+	showVersion := flag.Bool("version", false, "print Agent version")
 	flag.Parse()
+	if *showVersion {
+		_, err := fmt.Fprintln(os.Stdout, applicationVersion)
+		return err
+	}
 	if *serviceURL == "" || *agentID == "" {
 		return errors.New("--service and --id are required")
 	}

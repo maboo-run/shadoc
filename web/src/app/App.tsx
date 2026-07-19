@@ -886,8 +886,12 @@ function AgentPage({
   const [upgradeTarget, setUpgradeTarget] = useState<Record<string, unknown> | null>(null);
   const [resticTarget, setResticTarget] = useState<Record<string, unknown> | null>(null);
   const [toolProbeTarget, setToolProbeTarget] = useState<Record<string, unknown> | null>(null);
-  const [latestResticVersion, setLatestResticVersion] = useState("");
+  const [latestResticVersion, setLatestResticVersion] = useState<string | undefined>(undefined);
   const [resticOperationAgentID, setResticOperationAgentID] = useState("");
+  const [upgradeOperationAgentID, setUpgradeOperationAgentID] = useState("");
+  const [toolProbeOperationAgentID, setToolProbeOperationAgentID] = useState("");
+  const [heartbeatOperationAgentID, setHeartbeatOperationAgentID] = useState("");
+  const [heartbeatProbeStarting, setHeartbeatProbeStarting] = useState(false);
   const [revoking, setRevoking] = useState(false);
   const [deployDialog, setDeployDialog] = useState(false);
   const [remoteHosts, setRemoteHosts] = useState<Array<Record<string, unknown>>>([]);
@@ -901,12 +905,14 @@ function AgentPage({
   const upgrade = useOperation(api);
   const resticInstall = useOperation(api);
   const toolProbe = useOperation(api);
+  const heartbeatProbe = useOperation(api);
   const reloadRef = useRef(reload);
   const lastRemovalRefresh = useRef("");
   const handledDeployment = useRef("");
   const handledUpgrade = useRef("");
   const handledResticInstall = useRef("");
   const handledToolProbe = useRef("");
+  const handledHeartbeatProbe = useRef("");
   const deployDialogRef = useRef<HTMLFormElement>(null);
   useModalFocus(deployDialogRef, () => setDeployDialog(false), deployDialog);
   const deploymentWasRedeploy = useRef(false);
@@ -925,12 +931,17 @@ function AgentPage({
   }, [api]);
   useEffect(() => {
     let active = true;
+    let attempts = 0;
     const load = () => {
+      attempts += 1;
+      const attempt = attempts;
       void api.action("/api/restic/versions").then((value) => {
         const versions = (value as { versions?: unknown }).versions;
-        if (active && Array.isArray(versions)) setLatestResticVersion(String(versions[0] ?? ""));
+        if (!active || !Array.isArray(versions)) return;
+        const latest = String(versions[0] ?? "");
+        if (latest || attempt > 1) setLatestResticVersion(latest);
       }).catch(() => {
-        if (active) setLatestResticVersion("");
+        if (active && attempt > 1) setLatestResticVersion("");
       });
     };
     load();
@@ -1034,6 +1045,20 @@ function AgentPage({
   useEffect(() => {
     if (toolProbe.error) setMessage(toolProbe.error);
   }, [toolProbe.error]);
+  useEffect(() => {
+    const operation = heartbeatProbe.operation;
+    if (!operation || !["success", "failed", "cancelled"].includes(operation.status)) return;
+    const key = `${operation.id}:${operation.status}`;
+    if (handledHeartbeatProbe.current === key) return;
+    handledHeartbeatProbe.current = key;
+    if (operation.status === "success") setMessage(t("Agent 主动心跳探测完成，新的心跳已验证"));
+    else if (operation.status === "failed") setMessage(operation.errorSummary || t("Agent 主动心跳探测失败"));
+    else setMessage(t("Agent 主动心跳探测已取消"));
+    void reloadRef.current();
+  }, [heartbeatProbe.operation?.id, heartbeatProbe.operation?.status]);
+  useEffect(() => {
+    if (heartbeatProbe.error) setMessage(heartbeatProbe.error);
+  }, [heartbeatProbe.error]);
 
   function openDeployment(agent?: Record<string, unknown>) {
     const isRedeploy = Boolean(agent?.uninstalledAt);
@@ -1064,6 +1089,7 @@ function AgentPage({
   }
   async function confirmAgentUpgrade(agent: Record<string, unknown>) {
     setUpgradeTarget(null);
+    setUpgradeOperationAgentID(String(agent.id));
     setMessage(t("Agent 托管升级已开始"));
     await upgrade.start(`/api/agents/${encodeURIComponent(String(agent.id))}/upgrade`, {});
   }
@@ -1075,8 +1101,20 @@ function AgentPage({
   }
   async function confirmAgentToolProbe(agent: Record<string, unknown>) {
     setToolProbeTarget(null);
+    setToolProbeOperationAgentID(String(agent.id));
     setMessage(t("Agent 工具重新探测已开始"));
     await toolProbe.start(`/api/agents/${encodeURIComponent(String(agent.id))}/tools/reprobe`, {});
+  }
+  async function probeAgentHeartbeat(agent: Record<string, unknown>) {
+    if (heartbeatProbeStarting || heartbeatProbe.active) return;
+    setHeartbeatOperationAgentID(String(agent.id));
+    setHeartbeatProbeStarting(true);
+    setMessage(t("Agent 主动心跳探测已开始"));
+    try {
+      await heartbeatProbe.start(`/api/agents/${encodeURIComponent(String(agent.id))}/heartbeat/probe`, {});
+    } finally {
+      setHeartbeatProbeStarting(false);
+    }
   }
   return <>
     <header className="page-header"><div><h1>{t("Agent 节点")}</h1><p>{t(pageDescription("Agent 节点"))}</p></div>
@@ -1095,8 +1133,6 @@ function AgentPage({
       <button className="text-button" type="button" onClick={() => void onNavigate("Agent 服务")}>{t("Agent 服务设置")}</button>
     </div>
     {!agentService?.running && <p className="field-hint">{t("请先在 Agent 服务设置中启用服务，再生成令牌或执行远程部署。")}</p>}
-    <OperationFeedback operation={upgrade} locale={locale} hideTerminal />
-    <OperationFeedback operation={toolProbe} locale={locale} hideTerminal />
     <Toast message={message} locale={locale} onClose={() => setMessage("")} />
     {deployDialog && <ModalPortal>
       <form ref={deployDialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="agent-deploy-title" onSubmit={(event) => {
@@ -1144,7 +1180,10 @@ function AgentPage({
       timeZone={timeZone}
       currentServiceURL={String(agentService?.serviceUrl ?? "")}
       latestResticVersion={latestResticVersion}
-      busy={revoking || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active}
+      busy={revoking || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active || heartbeatProbeStarting || heartbeatProbe.active}
+      upgradeOperation={upgradeOperationAgentID ? { agentId: upgradeOperationAgentID, operation: upgrade } : undefined}
+      toolProbeOperation={toolProbeOperationAgentID ? { agentId: toolProbeOperationAgentID, operation: toolProbe } : undefined}
+      heartbeatOperation={heartbeatOperationAgentID ? { agentId: heartbeatOperationAgentID, operation: heartbeatProbe, starting: heartbeatProbeStarting } : undefined}
       resticOperation={resticOperationAgentID ? {
         agentId: resticOperationAgentID,
         active: resticInstall.active,
@@ -1157,12 +1196,13 @@ function AgentPage({
       onUpgrade={setUpgradeTarget}
       onInstallRestic={setResticTarget}
       onReprobeTools={setToolProbeTarget}
+      onProbeHeartbeat={(agent) => void probeAgentHeartbeat(agent)}
       onRedeploy={openDeployment}
       onRemove={setActionTarget}
     />
     {actionTarget && <AgentActionDialog agent={actionTarget} active={revoking || uninstall.active} locale={locale} onClose={() => setActionTarget(null)} onConfirm={() => void confirmAgentAction(actionTarget)} />}
     {upgradeTarget && <AgentUpgradeDialog agent={upgradeTarget} active={upgrade.active} locale={locale} onClose={() => setUpgradeTarget(null)} onConfirm={() => void confirmAgentUpgrade(upgradeTarget)} />}
-    {resticTarget && <AgentResticInstallDialog agent={resticTarget} targetVersion={latestResticVersion} active={resticInstall.active} locale={locale} onClose={() => setResticTarget(null)} onConfirm={() => void confirmAgentResticInstall(resticTarget)} />}
+    {resticTarget && <AgentResticInstallDialog agent={resticTarget} targetVersion={latestResticVersion ?? ""} active={resticInstall.active} locale={locale} onClose={() => setResticTarget(null)} onConfirm={() => void confirmAgentResticInstall(resticTarget)} />}
     {toolProbeTarget && <AgentToolProbeDialog agent={toolProbeTarget} active={toolProbe.active} locale={locale} onClose={() => setToolProbeTarget(null)} onConfirm={() => void confirmAgentToolProbe(toolProbeTarget)} />}
   </>;
 }
@@ -1974,6 +2014,8 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
   const [targetKind, setTargetKind] = useState<"local" | "agent">("local");
   const [agentID, setAgentID] = useState("");
   const [dbSnapshot, setDbSnapshot] = useState("");
+  const [databaseRestoreMode, setDatabaseRestoreMode] = useState<"database" | "dump-file">("database");
+  const [dumpFileDirectory, setDumpFileDirectory] = useState("");
   const [connection, setConnection] = useState("");
   const [connectionMode, setConnectionMode] = useState<"saved" | "temporary">("saved");
   const [saveTemporaryConnection, setSaveTemporaryConnection] = useState(false);
@@ -1983,12 +2025,14 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
   const [temporaryPort, setTemporaryPort] = useState(3306);
   const [temporaryUsername, setTemporaryUsername] = useState("");
   const [temporaryPassword, setTemporaryPassword] = useState("");
-  const [temporaryRestoreProgram, setTemporaryRestoreProgram] = useState("/usr/bin/mysql");
-  const [temporaryAdminProgram, setTemporaryAdminProgram] = useState("/usr/bin/mysql");
+  const [temporaryAdvanced, setTemporaryAdvanced] = useState(false);
+  const [temporaryRestoreProgram, setTemporaryRestoreProgram] = useState("");
+  const [temporaryAdminProgram, setTemporaryAdminProgram] = useState("");
+  const [temporaryCreateProgram, setTemporaryCreateProgram] = useState("");
   const [database, setDatabase] = useState("");
   const [preparedDatabaseConnection, setPreparedDatabaseConnection] = useState("");
   const [confirmation, setConfirmation] = useState<Record<string, any> | null>(null);
-  const [confirmationKind, setConfirmationKind] = useState<"directory" | "database" | "">("");
+  const [confirmationKind, setConfirmationKind] = useState<"directory" | "database" | "dump-file" | "">("");
   const [password, setPassword] = useState("");
   const operation = useOperation(api);
   const handledRestore = useRef("");
@@ -2036,7 +2080,7 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
     };
   }, [api, view]);
   useEffect(() => {
-    setSnapshots([]); setDirSnapshot(""); setDbSnapshot(""); setSelectedIncludes([]); invalidate();
+    setSnapshots([]); setDirSnapshot(""); setDbSnapshot(""); setDatabaseRestoreMode("database"); setDumpFileDirectory(""); setSelectedIncludes([]); invalidate();
     if (!repo) return;
     let active = true;
     setLoading(true); setError("");
@@ -2066,7 +2110,7 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
   }, [operation.error]);
   const databaseSnapshots = snapshots.filter((item) => JSON.stringify(item.tags ?? []).includes("rc:source=database"));
   const directorySnapshots = snapshots.filter((item) => !databaseSnapshots.includes(item));
-  const authorizeAndStart = async (kind: "directory" | "database", payload: Record<string, unknown>) => {
+  const authorizeAndStart = async (kind: "directory" | "database" | "dump-file", payload: Record<string, unknown>) => {
     if (!confirmation?.confirmationId || confirmationKind !== kind) return;
     try {
       await api.action(`/api/restores/${String(confirmation.confirmationId)}/authorize`, { password });
@@ -2087,6 +2131,7 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
   const directorySourcePath = String((directorySnapshot?.paths as unknown[] | undefined)?.[0] ?? "");
   const snapshotContentsCacheKey = JSON.stringify([repo, dirSnapshot, directorySourcePath]);
   const directoryPayload = { snapshotId: dirSnapshot, target: dirTarget, includes: selectedIncludes, targetKind, agentId: targetKind === "agent" ? agentID : "" };
+  const dumpFilePayload = { snapshotId: dbSnapshot, target: dumpFileDirectory };
   if (view === "browse" && dirSnapshot) return <>
     <header className="page-header"><div><button className="text-button restore-back" type="button" onClick={() => setView("restore")}>← {t("返回恢复设置")}</button><h1>{t("浏览快照内容")}</h1><p>{t("进入文件夹并选择要恢复的目录或文件。")}</p></div></header>
     <section className="content-section snapshot-secondary-page"><SnapshotBrowser api={api} repositoryID={repo} snapshotID={dirSnapshot} sourcePath={directorySourcePath} snapshots={directorySnapshots.map((item) => ({ id: String(item.id), time: String(item.time ?? ""), paths: (item.paths as string[] | undefined) ?? [] }))} cachedPage={snapshotContentsCache[snapshotContentsCacheKey]} onPageChange={(page) => setSnapshotContentsCache((current) => cacheSnapshotContentsPage(current, snapshotContentsCacheKey, page))} selectedIncludes={selectedIncludes} onSelectedIncludesChange={(value) => { setSelectedIncludes(value); invalidate(); }} locale={locale} /></section>
@@ -2167,15 +2212,25 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
         </form>
       </section>}
       {!loading && restoreKind === "database" && <section className="restore-step-card restore-target-step">
-        <div className="restore-step-heading"><span aria-hidden="true">2</span><div><h2>{t("恢复数据库到新库或空库")}</h2><p>{t("目标必须是新建数据库或已确认的空数据库。")}</p></div></div>
+        <div className="restore-step-heading"><span aria-hidden="true">2</span><div><h2>{t("恢复数据库快照")}</h2><p>{t("选择直接导入数据库，或生成完整 dump 文件。")}</p></div></div>
         <form
           className="form-grid restore-workflow-form"
           onSubmit={async (e) => {
             e.preventDefault();
             try {
+              if (databaseRestoreMode === "dump-file") {
+                const value = await api.action(`/api/repositories/${repo}/restore-dump-file/preflight`, dumpFilePayload);
+                setConfirmation(value as Record<string, any>); setConfirmationKind("dump-file"); setError(""); setPreflightMessage(t("dump 文件恢复预检通过，请继续确认恢复信息。"));
+                return;
+              }
               let selectedConnection = connection;
               if (connectionMode === "temporary") {
-                const payload = { name: temporaryName, engine: temporaryEngine, purpose: "restore", network: "tcp", host: temporaryHost, port: temporaryPort, socketPath: "", username: temporaryUsername, password: temporaryPassword, tls: { mode: "preferred" }, toolPaths: { restore: temporaryRestoreProgram, admin: temporaryAdminProgram, create: temporaryAdminProgram } };
+                const toolPaths = {
+                  ...(temporaryRestoreProgram ? { restore: temporaryRestoreProgram } : {}),
+                  ...(temporaryAdminProgram ? { admin: temporaryAdminProgram } : {}),
+                  ...(temporaryCreateProgram ? { create: temporaryCreateProgram } : {}),
+                };
+                const payload = { name: temporaryName, engine: temporaryEngine, purpose: "restore", network: "tcp", host: temporaryHost, port: temporaryPort, socketPath: "", username: temporaryUsername, password: temporaryPassword, tls: { mode: "preferred" }, ...(Object.keys(toolPaths).length ? { toolPaths } : {}) };
                 const created = await api.action(saveTemporaryConnection ? "/api/database-connections" : "/api/database-connections/temporary", payload) as Record<string, unknown>;
                 selectedConnection = String(created.id ?? "");
                 if (!selectedConnection) throw new Error("数据库连接创建后未返回 ID");
@@ -2196,6 +2251,12 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
           }}
         >
           <fieldset className="full-field">
+            <legend>{t("恢复方式")}</legend>
+            <label><input type="radio" name="database-restore-mode" checked={databaseRestoreMode === "database"} onChange={() => { setDatabaseRestoreMode("database"); invalidate(); }} /> {t("直接恢复到数据库")}</label>
+            <label><input type="radio" name="database-restore-mode" checked={databaseRestoreMode === "dump-file"} onChange={() => { setDatabaseRestoreMode("dump-file"); invalidate(); }} /> {t("恢复为 dump 文件")}</label>
+          </fieldset>
+          {databaseRestoreMode === "database" ? <>
+          <fieldset className="full-field">
             <legend>{t("恢复凭据来源")}</legend>
             <label><input type="radio" name="database-credential-mode" checked={connectionMode === "saved"} disabled={!connections.length} onChange={() => { setConnectionMode("saved"); invalidate(); }} /> {t("使用已保存恢复连接")}</label>
             <label><input type="radio" name="database-credential-mode" checked={connectionMode === "temporary"} onChange={() => { setConnectionMode("temporary"); invalidate(); }} /> {t("本次使用临时凭据")}</label>
@@ -2208,13 +2269,20 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
               </select>
             </label> : <>
               <label>{t("临时连接名称")}<input value={temporaryName} onChange={(event) => { setTemporaryName(event.target.value); invalidate(); }} required /></label>
-              <label>{t("数据库类型")}<select value={temporaryEngine} onChange={(event) => { const engine = event.target.value; setTemporaryEngine(engine); setTemporaryPort(engine === "mysql" ? 3306 : 5432); setTemporaryRestoreProgram(engine === "mysql" ? "/usr/bin/mysql" : "/usr/bin/psql"); setTemporaryAdminProgram(engine === "mysql" ? "/usr/bin/mysql" : "/usr/bin/psql"); invalidate(); }}><option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option></select></label>
+              <label>{t("数据库类型")}<select value={temporaryEngine} onChange={(event) => { const engine = event.target.value; setTemporaryEngine(engine); setTemporaryPort(engine === "mysql" ? 3306 : 5432); invalidate(); }}><option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option></select></label>
               <label>{t("数据库地址")}<input value={temporaryHost} onChange={(event) => { setTemporaryHost(event.target.value); invalidate(); }} required /></label>
               <label>{t("端口")}<input type="number" min="1" max="65535" value={temporaryPort} onChange={(event) => { setTemporaryPort(Number(event.target.value)); invalidate(); }} required /></label>
               <label>{t("数据库用户名")}<input value={temporaryUsername} onChange={(event) => { setTemporaryUsername(event.target.value); invalidate(); }} required /></label>
               <label>{t("数据库密码")}<input type="password" autoComplete="new-password" value={temporaryPassword} onChange={(event) => { setTemporaryPassword(event.target.value); invalidate(); }} required /></label>
-              <label>{t("恢复客户端路径")}<input value={temporaryRestoreProgram} onChange={(event) => setTemporaryRestoreProgram(event.target.value)} required /></label>
-              <label>{t("管理客户端路径")}<input value={temporaryAdminProgram} onChange={(event) => setTemporaryAdminProgram(event.target.value)} required /></label>
+              <details className="full-field database-advanced-settings" open={temporaryAdvanced} onToggle={(event) => setTemporaryAdvanced(event.currentTarget.open)}>
+                <summary>{t("高级设置")}</summary>
+                <p className="field-hint">{t("临时恢复通常不需要填写客户端路径。控制服务会先从系统 PATH 自动探测，只有探测不到时才需要填写。")}</p>
+                <div className="form-grid nested-form-grid">
+                  <label>{t("恢复客户端路径")}<input value={temporaryRestoreProgram} onChange={(event) => setTemporaryRestoreProgram(event.target.value)} /></label>
+                  <label>{t("管理客户端路径")}<input value={temporaryAdminProgram} onChange={(event) => setTemporaryAdminProgram(event.target.value)} /></label>
+                  {temporaryEngine === "postgresql" && <label>{t("createdb 客户端路径")}<input value={temporaryCreateProgram} onChange={(event) => setTemporaryCreateProgram(event.target.value)} /></label>}
+                </div>
+              </details>
               <label className="full-field"><input type="checkbox" checked={saveTemporaryConnection} onChange={(event) => setSaveTemporaryConnection(event.target.checked)} /> {t("另存为长期恢复连接")}</label>
               <p className="field-hint full-field">{t("未勾选时，凭据只在秘密库中短期保存，并在本次恢复结束或清理确认完成后删除。")}</p>
             </>}
@@ -2224,6 +2292,12 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
           </label>
           <div className="full-field restore-preflight-bar"><span className="restore-step-number" aria-hidden="true">3</span><div><strong>{t("只读预检")}</strong><small>{t("预检不会写入恢复目标。")}</small></div><button className="primary-button" type="submit" disabled={!repo || !dbSnapshot || !database || operation.active || (connectionMode === "saved" ? !connection : !temporaryName || !temporaryHost || !temporaryUsername || !temporaryPassword)}>{t("执行数据库只读预检")}</button></div>
           {confirmationKind === "database" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始数据库恢复")} locale={locale} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("database", { snapshotId: dbSnapshot, connectionId: preparedDatabaseConnection || connection, database })} />}
+          </> : <>
+            <label className="full-field">{t("dump 文件输出目录")}<input value={dumpFileDirectory} onChange={(event) => { setDumpFileDirectory(event.target.value); invalidate(); }} required /></label>
+            <p className="field-hint full-field">{t("输出目录必须已存在；不能覆盖其中同名文件；恢复完成后自动生成完整的 .sql 或 .dump 文件。")}</p>
+            <div className="full-field restore-preflight-bar"><span className="restore-step-number" aria-hidden="true">3</span><div><strong>{t("只读预检")}</strong><small>{t("预检不会写入恢复目标。")}</small></div><button className="primary-button" type="submit" disabled={!repo || !dbSnapshot || !dumpFileDirectory || operation.active}>{t("执行 dump 文件只读预检")}</button></div>
+            {confirmationKind === "dump-file" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始 dump 文件恢复")} locale={locale} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("dump-file", dumpFilePayload)} />}
+          </>}
         </form>
       </section>}
       </div>
@@ -2302,6 +2376,7 @@ function RestoreConfirmation({ confirmation, password, setPassword, label, local
   const dialogRef = useRef<HTMLDivElement>(null);
   const downloadLimit = Number(confirmation?.summary?.downloadKiBPerSecond ?? 0);
   const policySource = String(confirmation?.summary?.resourcePolicySource ?? "");
+  const restoreTarget = typeof confirmation?.summary?.target === "string" ? confirmation.summary.target : "";
   useModalFocus(dialogRef, onClose);
   return <ModalPortal>
     <div ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="restore-confirmation-title">
@@ -2314,6 +2389,7 @@ function RestoreConfirmation({ confirmation, password, setPassword, label, local
             ? `Effective download limit: ${new Intl.NumberFormat(locale).format(downloadLimit)} KiB/s${policySource === "task" ? " (from the bound task)" : ""}`
             : `有效下载限速：${new Intl.NumberFormat(locale).format(downloadLimit)} KiB/s${policySource === "task" ? "（来自绑定任务）" : ""}`
           : t("有效下载限速：不额外限制")}</p>
+        {restoreTarget && <p>{t("恢复目标：")}<code>{restoreTarget}</code></p>}
         <label>{t("当前管理员密码")}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
       </div>
       <footer>
@@ -3022,6 +3098,10 @@ function ResourceDialog({
   const [databaseEngine, setDatabaseEngine] = useState(String(initial?.engine ?? "mysql"));
   const [databasePurpose, setDatabasePurpose] = useState(String(initial?.purpose ?? "backup"));
   const [databaseNetwork, setDatabaseNetwork] = useState(String(initial?.network ?? "tcp"));
+  const [databaseAdvanced, setDatabaseAdvanced] = useState(false);
+  const [databaseTesting, setDatabaseTesting] = useState(false);
+  const [databaseTestMessage, setDatabaseTestMessage] = useState("");
+  const [databaseTestSucceeded, setDatabaseTestSucceeded] = useState(false);
   const [generatedSSHKey, setGeneratedSSHKey] = useState(!initial);
   const visibleFields = resourceFields(name).filter((field) => {
     if (name === "远程主机" && !initial && generatedSSHKey && field.name === "privateKey") return false;
@@ -3032,6 +3112,77 @@ function ResourceDialog({
     if (["restore", "create"].includes(field.name)) return databasePurpose === "restore";
     return true;
   });
+  const advancedDatabaseFieldNames = new Set(["tlsCA", "tlsClientCert", "tlsClientKey", "tlsServerName", "dump", "restore", "admin", "create"]);
+  const databaseFields = visibleFields.filter((field) => !advancedDatabaseFieldNames.has(field.name));
+  const advancedDatabaseFields = visibleFields.filter((field) => advancedDatabaseFieldNames.has(field.name));
+  const renderField = (field: Field) => (
+    <label key={field.name} className={`${field.full ? "full-field " : ""}${name === "远程主机" && field.name === "hostFingerprint" ? "host-key-field" : ""}`}>
+      {t(field.label)}
+      {name === "远程主机" && field.name === "hostFingerprint" && <span className="field-hint">{t("由“获取并核对主机密钥”自动填入；请核对指纹。")}</span>}
+      {field.kind === "select" ? (
+        <select
+          name={field.name}
+          {...(["engine", "purpose", "network"].includes(field.name) && name === "数据库实例" ? { value: field.name === "engine" ? databaseEngine : field.name === "purpose" ? databasePurpose : databaseNetwork, onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+            if (field.name === "engine") {
+              setDatabaseEngine(event.target.value);
+              const port = formRef.current?.elements.namedItem("port") as HTMLInputElement | null;
+              if (port) port.value = event.target.value === "postgresql" ? "5432" : "3306";
+            }
+            if (field.name === "purpose") setDatabasePurpose(event.target.value);
+            if (field.name === "network") setDatabaseNetwork(event.target.value);
+            if (name === "数据库实例") setDatabaseTestMessage("");
+          }} : { defaultValue: initialFieldValue(field, initial) })}
+        >
+          {field.options?.map((option) => (
+            <option key={option} value={option}>
+              {t(localizedOption(option))}
+            </option>
+          ))}
+        </select>
+      ) : field.kind === "textarea" ? (
+        <textarea
+          name={field.name}
+          aria-label={name === "远程主机" && field.name === "hostFingerprint" ? t("known_hosts 固定主机密钥行") : undefined}
+          readOnly={name === "远程主机" && field.name === "hostFingerprint"}
+          required={field.required && !initial}
+          defaultValue={initialFieldValue(field, initial)}
+        />
+      ) : (
+        <input
+          name={field.name}
+          type={field.kind ?? "text"}
+          required={field.required && !initial}
+          defaultValue={initialFieldValue(field, initial)}
+          onChange={name === "数据库实例" ? () => setDatabaseTestMessage("") : undefined}
+        />
+      )}
+    </label>
+  );
+  const testDatabaseConnection = () => {
+    const form = formRef.current;
+    if (!form || databaseTesting || !form.reportValidity()) return;
+    setDatabaseTesting(true);
+    setDatabaseTestMessage("");
+    const payload = buildPayload("数据库实例", new FormData(form));
+    if (initial?.id) payload.id = String(initial.id);
+    void api.action("/api/database-connections/test", payload)
+      .then((value) => {
+        const result = value as { ok?: boolean; preflight?: { serverVersion?: string; error?: string } };
+        const ok = result.ok === true;
+        setDatabaseTestSucceeded(ok);
+        if (ok) {
+          const version = result.preflight?.serverVersion;
+          setDatabaseTestMessage(`${t("连接成功")}${version ? ` · ${t("服务端版本")} ${version}` : ""}`);
+        } else {
+          setDatabaseTestMessage(result.preflight?.error || t("连接测试失败"));
+        }
+      })
+      .catch((cause) => {
+        setDatabaseTestSucceeded(false);
+        setDatabaseTestMessage(cause instanceof Error ? cause.message : t("连接测试失败"));
+      })
+      .finally(() => setDatabaseTesting(false));
+  };
   return (
     <ModalPortal>
       <form
@@ -3068,7 +3219,7 @@ function ResourceDialog({
         </header>
         {error && <p className="form-error">{error}</p>}
         {name === "数据库实例" && (
-          <p className="field-hint">{t("保存时会实际执行系统数据库客户端，验证客户端身份/版本、网络、TLS、认证和当前用途权限。失败配置仅保存为不可启用的草稿。备份期间的事务一致性与数据库业务写入协调仍由数据库管理员负责。")}</p>
+          <p className="field-hint">{t("测试连接使用内置 Go 驱动检查网络、TLS、认证和当前用途权限；保存时自动检查官方数据库客户端。实际备份和恢复仍使用官方客户端。失败配置仅保存为不可启用的草稿。")}</p>
         )}
         <div className="form-grid">
           {name === "远程主机" && !initial && <fieldset className="full-field ssh-key-mode">
@@ -3079,48 +3230,16 @@ function ResourceDialog({
             </div>
             {generatedSSHKey && <p className="field-hint">{t("私钥只加密保存在本机秘密库中，不会显示或导出。")}</p>}
           </fieldset>}
-          {visibleFields.map((field) => (
-            <label key={field.name} className={`${field.full ? "full-field " : ""}${name === "远程主机" && field.name === "hostFingerprint" ? "host-key-field" : ""}`}>
-              {t(field.label)}
-              {name === "远程主机" && field.name === "hostFingerprint" && <span className="field-hint">{t("由“获取并核对主机密钥”自动填入；请核对指纹。")}</span>}
-              {field.kind === "select" ? (
-                <select
-                  name={field.name}
-                  {...(["engine", "purpose", "network"].includes(field.name) && name === "数据库实例" ? { value: field.name === "engine" ? databaseEngine : field.name === "purpose" ? databasePurpose : databaseNetwork, onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-                    if (field.name === "engine") {
-                      setDatabaseEngine(event.target.value);
-                      const port = formRef.current?.elements.namedItem("port") as HTMLInputElement | null;
-                      if (port) port.value = event.target.value === "postgresql" ? "5432" : "3306";
-                    }
-                    if (field.name === "purpose") setDatabasePurpose(event.target.value);
-                    if (field.name === "network") setDatabaseNetwork(event.target.value);
-                  }} : { defaultValue: initialFieldValue(field, initial) })}
-                >
-                  {field.options?.map((option) => (
-                    <option key={option} value={option}>
-                      {t(localizedOption(option))}
-                    </option>
-                  ))}
-                </select>
-              ) : field.kind === "textarea" ? (
-                <textarea
-                  name={field.name}
-                  aria-label={name === "远程主机" && field.name === "hostFingerprint" ? t("known_hosts 固定主机密钥行") : undefined}
-                  readOnly={name === "远程主机" && field.name === "hostFingerprint"}
-                  required={field.required && !initial}
-                  defaultValue={initialFieldValue(field, initial)}
-                />
-              ) : (
-                <input
-                  name={field.name}
-                  type={field.kind ?? "text"}
-                  required={field.required && !initial}
-                  defaultValue={initialFieldValue(field, initial)}
-                />
-              )}
-            </label>
-          ))}
+          {name === "数据库实例" ? <>
+            {databaseFields.map(renderField)}
+            <details className="full-field database-advanced-settings" open={databaseAdvanced} onToggle={(event) => setDatabaseAdvanced(event.currentTarget.open)}>
+              <summary>{t("高级设置")}</summary>
+              <p className="field-hint">{t("常用连接不需要修改这些选项。官方客户端路径会由 Service 自动探测；只有探测不到或需要修复旧路径时才需要填写。清空已填写路径后保存，会重新自动探测。")}</p>
+              <div className="form-grid nested-form-grid">{advancedDatabaseFields.map(renderField)}</div>
+            </details>
+          </> : visibleFields.map(renderField)}
           {name === "远程主机" && hostKeyMessage && <div className="full-field host-key-confirmation" role="status"><strong>{t("主机密钥已获取")}</strong><span>{hostKeyMessage}</span><p>{t("请通过云服务商控制台、服务器控制台或可信管理员核对该指纹后再保存。")}</p></div>}
+          {name === "数据库实例" && databaseTestMessage && <p className={`full-field database-test-message ${databaseTestSucceeded ? "database-test-success" : "warning-text"}`} role="status" aria-live="polite">{databaseTestMessage}</p>}
         </div>
         <footer>
           {name === "远程主机" && (
@@ -3159,6 +3278,11 @@ function ResourceDialog({
               }}
             >
               {t("获取并核对主机密钥")}
+            </button>
+          )}
+          {name === "数据库实例" && (
+            <button className="secondary-button" type="button" disabled={databaseTesting} onClick={testDatabaseConnection}>
+              {t(databaseTesting ? "测试中…" : "测试连接")}
             </button>
           )}
           <button className="secondary-button" type="button" onClick={onClose}>
@@ -3364,6 +3488,12 @@ function buildPayload(name: string, form: FormData): Record<string, unknown> {
     };
   if (name === "数据库实例") {
     const network = value("network");
+    const toolKeys = value("purpose") === "restore"
+      ? ["restore", "admin", "create"]
+      : ["dump", "admin"];
+    const toolPaths = Object.fromEntries(
+      toolKeys.map((key) => [key, value(key)] as const),
+    );
     return {
       name: value("name"),
       engine: value("engine"),
@@ -3381,12 +3511,7 @@ function buildPayload(name: string, form: FormData): Record<string, unknown> {
         clientKey: value("tlsClientKey"),
         serverName: value("tlsServerName"),
       },
-      toolPaths: {
-        dump: value("dump"),
-        restore: value("restore"),
-        admin: value("admin"),
-        create: value("create"),
-      },
+      toolPaths,
     };
   }
   if (name === "备份任务") {

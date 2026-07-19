@@ -68,58 +68,68 @@ type initializationStore interface {
 // Server is the complete public HTTP interface. Dependencies are injected so
 // HTTP behavior can be exercised without starting a process or opening ports.
 type Server struct {
-	mux                  *http.ServeMux
-	store                initializationStore
-	auth                 *auth.Manager
-	secrets              *secret.Manager
-	log                  *slog.Logger
-	runner               taskRunner
-	repositories         repositoryManager
-	probe                *compat.Probe
-	paths                compat.ToolPaths
-	installer            resticInstaller
-	selectRestic         func(string)
-	databaseRestore      databaseRestoreManager
-	databaseVerifier     databaseverify.Verifier
-	databaseEnumerator   databaseverify.Enumerator
-	localFilesystem      localFilesystemManager
-	protectionSetup      protectionSetupManager
-	ntfy                 *ntfy.Client
-	webhook              webhookPublisher
-	dataDir              string
-	background           context.Context
-	cancel               context.CancelFunc
-	jobs                 sync.WaitGroup
-	jobsMu               sync.Mutex
-	manualMu             sync.Mutex
-	manualRuns           map[string]string
-	closing              bool
-	setupToken           string
-	vault                vaultManager
-	lifecycle            lifecycleManager
-	operations           *operationruntime.Manager
-	applicationVersion   string
-	applicationReleases  applicationReleaseCatalog
-	applicationUpdater   applicationUpdateLauncher
-	applicationOps       applicationUpdateOperations
-	agents               *agentcontrol.Service
-	agentDeployer        agentDeployer
-	agentUninstaller     agentUninstaller
-	agentUpgrader        agentUpgrader
-	agentToolProber      agentToolProber
-	agentResticInstaller agentResticInstaller
-	agentService         agentServiceManager
-	agentRestore         agentDirectoryRestoreManager
-	repositoryCapacity   repositoryCapacityProber
-	taskPreviewer        taskScopePreviewer
-	alerts               *alerting.Service
-	controlPlane         controlPlaneRecoveryManager
-	restoreVerification  restoreVerificationManager
-	diagnostics          *diagnosticservice.Service
+	mux                       *http.ServeMux
+	store                     initializationStore
+	auth                      *auth.Manager
+	secrets                   *secret.Manager
+	log                       *slog.Logger
+	runner                    taskRunner
+	repositories              repositoryManager
+	probe                     *compat.Probe
+	paths                     compat.ToolPaths
+	compatibilityMu           sync.Mutex
+	compatibilityCache        compat.Report
+	compatibilityCached       bool
+	installer                 resticInstaller
+	selectRestic              func(string)
+	databaseRestore           databaseRestoreManager
+	dumpFileRestore           databaseDumpFileRestoreManager
+	databaseVerifier          databaseverify.Verifier
+	databaseTester            databaseverify.ConnectionTester
+	databaseBackupPreflighter databaseBackupPreflighter
+	databaseEnumerator        databaseverify.Enumerator
+	localFilesystem           localFilesystemManager
+	protectionSetup           protectionSetupManager
+	ntfy                      *ntfy.Client
+	webhook                   webhookPublisher
+	dataDir                   string
+	background                context.Context
+	cancel                    context.CancelFunc
+	jobs                      sync.WaitGroup
+	jobsMu                    sync.Mutex
+	manualMu                  sync.Mutex
+	manualRuns                map[string]string
+	closing                   bool
+	setupToken                string
+	vault                     vaultManager
+	lifecycle                 lifecycleManager
+	operations                *operationruntime.Manager
+	applicationVersion        string
+	applicationReleases       applicationReleaseCatalog
+	applicationUpdater        applicationUpdateLauncher
+	applicationOps            applicationUpdateOperations
+	agents                    *agentcontrol.Service
+	agentDeployer             agentDeployer
+	agentUninstaller          agentUninstaller
+	agentUpgrader             agentUpgrader
+	agentToolProber           agentToolProber
+	agentHeartbeatProber      agentHeartbeatProber
+	agentResticInstaller      agentResticInstaller
+	agentService              agentServiceManager
+	agentRestore              agentDirectoryRestoreManager
+	repositoryCapacity        repositoryCapacityProber
+	taskPreviewer             taskScopePreviewer
+	alerts                    *alerting.Service
+	controlPlane              controlPlaneRecoveryManager
+	restoreVerification       restoreVerificationManager
+	diagnostics               *diagnosticservice.Service
 }
 
 type taskRunner interface {
 	Run(context.Context, string, string, string) (store.RunRecord, error)
+}
+type databaseBackupPreflighter interface {
+	PreflightDatabaseBackup(context.Context, string) error
 }
 type agentDeployer interface {
 	Deploy(context.Context, agentdeploy.DeployRequest, agentdeploy.StageReporter) (agentdeploy.DeployResult, error)
@@ -132,6 +142,9 @@ type agentUpgrader interface {
 }
 type agentToolProber interface {
 	ReprobeTools(context.Context, string, agentdeploy.StageReporter) (agentdeploy.ToolProbeResult, error)
+}
+type agentHeartbeatProber interface {
+	ProbeHeartbeat(context.Context, string, agentdeploy.StageReporter) (agentdeploy.HeartbeatProbeResult, error)
 }
 type agentResticInstaller interface {
 	InstallRestic(context.Context, agenttool.InstallRequest, agenttool.StageReporter) (agenttool.InstallResult, error)
@@ -199,6 +212,12 @@ type databaseRestoreManager interface {
 type databaseRestorePreflighter interface {
 	Preflight(context.Context, dbrestore.Request) (dbrestore.PreflightResult, error)
 }
+type databaseDumpFileRestoreManager interface {
+	Restore(context.Context, dbrestore.DumpFileRequest) error
+}
+type databaseDumpFileRestorePreflighter interface {
+	Preflight(context.Context, dbrestore.DumpFileRequest) (dbrestore.DumpFilePreflightResult, error)
+}
 type resticInstaller interface {
 	Versions(context.Context) ([]string, error)
 	Install(context.Context, string) (string, error)
@@ -241,38 +260,43 @@ type applicationUpdateOperations interface {
 	ActiveApplicationUpdate(context.Context) (store.OperationRecord, error)
 }
 type Runtime struct {
-	Runner               taskRunner
-	Repositories         repositoryManager
-	Paths                compat.ToolPaths
-	Installer            resticInstaller
-	SelectRestic         func(string)
-	DatabaseRestore      databaseRestoreManager
-	DatabaseVerifier     databaseverify.Verifier
-	DatabaseEnumerator   databaseverify.Enumerator
-	LocalFilesystem      localFilesystemManager
-	ProtectionSetup      protectionSetupManager
-	Ntfy                 *ntfy.Client
-	Webhook              webhookPublisher
-	DataDir              string
-	SetupToken           string
-	Vault                vaultManager
-	Lifecycle            lifecycleManager
-	ApplicationVersion   string
-	ApplicationReleases  applicationReleaseCatalog
-	ApplicationUpdater   applicationUpdateLauncher
-	Agents               *agentcontrol.Service
-	AgentDeployer        agentDeployer
-	AgentUninstaller     agentUninstaller
-	AgentUpgrader        agentUpgrader
-	AgentToolProber      agentToolProber
-	AgentResticInstaller agentResticInstaller
-	AgentService         agentServiceManager
-	AgentRestore         agentDirectoryRestoreManager
-	RepositoryCapacity   repositoryCapacityProber
-	TaskPreviewer        taskScopePreviewer
-	Alerts               *alerting.Service
-	ControlPlane         controlPlaneRecoveryManager
-	RestoreVerification  restoreVerificationManager
+	Runner                    taskRunner
+	Repositories              repositoryManager
+	Paths                     compat.ToolPaths
+	Compatibility             compat.Report
+	Installer                 resticInstaller
+	SelectRestic              func(string)
+	DatabaseRestore           databaseRestoreManager
+	DumpFileRestore           databaseDumpFileRestoreManager
+	DatabaseVerifier          databaseverify.Verifier
+	DatabaseTester            databaseverify.ConnectionTester
+	DatabaseBackupPreflighter databaseBackupPreflighter
+	DatabaseEnumerator        databaseverify.Enumerator
+	LocalFilesystem           localFilesystemManager
+	ProtectionSetup           protectionSetupManager
+	Ntfy                      *ntfy.Client
+	Webhook                   webhookPublisher
+	DataDir                   string
+	SetupToken                string
+	Vault                     vaultManager
+	Lifecycle                 lifecycleManager
+	ApplicationVersion        string
+	ApplicationReleases       applicationReleaseCatalog
+	ApplicationUpdater        applicationUpdateLauncher
+	Agents                    *agentcontrol.Service
+	AgentDeployer             agentDeployer
+	AgentUninstaller          agentUninstaller
+	AgentUpgrader             agentUpgrader
+	AgentToolProber           agentToolProber
+	AgentHeartbeatProber      agentHeartbeatProber
+	AgentResticInstaller      agentResticInstaller
+	AgentService              agentServiceManager
+	AgentRestore              agentDirectoryRestoreManager
+	RepositoryCapacity        repositoryCapacityProber
+	TaskPreviewer             taskScopePreviewer
+	Alerts                    *alerting.Service
+	ControlPlane              controlPlaneRecoveryManager
+	RestoreVerification       restoreVerificationManager
 }
 
 func New(s *store.Store) *Server {
@@ -295,12 +319,19 @@ func NewWithRuntime(s *store.Store, manager *auth.Manager, secrets *secret.Manag
 		panic("initialize operation runtime: " + err.Error())
 	}
 	verifier := runtime.DatabaseVerifier
+	tester := runtime.DatabaseTester
 	tempRoot := os.TempDir()
 	if runtime.DataDir != "" {
 		tempRoot = filepath.Join(runtime.DataDir, "tmp")
 	}
 	if verifier == nil {
-		verifier = databaseverify.SystemVerifier{Executor: command.OSExecutor{}, TempRoot: tempRoot}
+		verifier = databaseverify.SystemVerifier{
+			Executor: command.OSExecutor{},
+			Native:   databaseverify.NativeTester{Now: time.Now},
+		}
+	}
+	if tester == nil {
+		tester = databaseverify.NativeTester{Now: time.Now}
 	}
 	enumerator := runtime.DatabaseEnumerator
 	if enumerator == nil {
@@ -311,26 +342,31 @@ func NewWithRuntime(s *store.Store, manager *auth.Manager, secrets *secret.Manag
 		alertService = alerting.New(s, time.Now)
 	}
 	srv := &Server{
-		mux:                http.NewServeMux(),
-		store:              s,
-		auth:               manager,
-		secrets:            secrets,
-		log:                slog.Default(),
-		runner:             runtime.Runner,
-		repositories:       runtime.Repositories,
-		probe:              compat.NewProbe(command.OSExecutor{}),
-		paths:              runtime.Paths,
-		installer:          runtime.Installer,
-		selectRestic:       runtime.SelectRestic,
-		databaseRestore:    runtime.DatabaseRestore,
-		databaseVerifier:   verifier,
-		databaseEnumerator: enumerator,
-		localFilesystem:    runtime.LocalFilesystem,
-		protectionSetup:    runtime.ProtectionSetup,
-		ntfy:               runtime.Ntfy,
-		webhook:            runtime.Webhook,
-		dataDir:            runtime.DataDir,
-		background:         background, cancel: cancel,
+		mux:                       http.NewServeMux(),
+		store:                     s,
+		auth:                      manager,
+		secrets:                   secrets,
+		log:                       slog.Default(),
+		runner:                    runtime.Runner,
+		repositories:              runtime.Repositories,
+		probe:                     compat.NewProbe(command.OSExecutor{}),
+		paths:                     runtime.Paths,
+		compatibilityCache:        runtime.Compatibility,
+		compatibilityCached:       runtime.Compatibility.Findings != nil,
+		installer:                 runtime.Installer,
+		selectRestic:              runtime.SelectRestic,
+		databaseRestore:           runtime.DatabaseRestore,
+		dumpFileRestore:           runtime.DumpFileRestore,
+		databaseVerifier:          verifier,
+		databaseTester:            tester,
+		databaseBackupPreflighter: runtime.DatabaseBackupPreflighter,
+		databaseEnumerator:        enumerator,
+		localFilesystem:           runtime.LocalFilesystem,
+		protectionSetup:           runtime.ProtectionSetup,
+		ntfy:                      runtime.Ntfy,
+		webhook:                   runtime.Webhook,
+		dataDir:                   runtime.DataDir,
+		background:                background, cancel: cancel,
 		manualRuns:           make(map[string]string),
 		setupToken:           runtime.SetupToken,
 		vault:                runtime.Vault,
@@ -345,6 +381,7 @@ func NewWithRuntime(s *store.Store, manager *auth.Manager, secrets *secret.Manag
 		agentUninstaller:     runtime.AgentUninstaller,
 		agentUpgrader:        runtime.AgentUpgrader,
 		agentToolProber:      runtime.AgentToolProber,
+		agentHeartbeatProber: runtime.AgentHeartbeatProber,
 		agentResticInstaller: runtime.AgentResticInstaller,
 		agentService:         runtime.AgentService,
 		agentRestore:         runtime.AgentRestore,
@@ -464,6 +501,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agents/{id}/uninstall", s.uninstallAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/upgrade", s.upgradeAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/tools/reprobe", s.reprobeAgentTools)
+	s.mux.HandleFunc("POST /api/agents/{id}/heartbeat/probe", s.probeAgentHeartbeat)
 	s.mux.HandleFunc("POST /api/agents/{id}/restic/install", s.installAgentRestic)
 	s.mux.HandleFunc("POST /api/agents/{id}/filesystem/browse", s.browseAgentFilesystem)
 	s.mux.HandleFunc("POST /api/agents/{id}/filesystem/directories", s.createAgentDirectory)
@@ -499,6 +537,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/repositories/{id}", s.updateRepository)
 	s.mux.HandleFunc("DELETE /api/repositories/{id}", s.deleteRepository)
 	s.mux.HandleFunc("GET /api/database-connections", s.listDatabaseConnections)
+	s.mux.HandleFunc("POST /api/database-connections/test", s.testDatabaseConnection)
 	s.mux.HandleFunc("POST /api/database-connections", s.createDatabaseConnection)
 	s.mux.HandleFunc("POST /api/database-connections/temporary", s.createTemporaryDatabaseConnection)
 	s.mux.HandleFunc("GET /api/database-connections/{id}", s.getDatabaseConnection)
@@ -510,6 +549,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	s.mux.HandleFunc("PUT /api/tasks/{id}", s.updateTask)
 	s.mux.HandleFunc("POST /api/tasks/{id}/preview", s.previewTaskScope)
+	s.mux.HandleFunc("POST /api/tasks/{id}/database-backup-preflight", s.preflightDatabaseBackup)
 	s.mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	s.mux.HandleFunc("GET /api/tasks/{id}/restore-verification-policy", s.getRestoreVerificationPolicy)
 	s.mux.HandleFunc("DELETE /api/tasks/{id}/restore-verification-policy", s.deleteRestoreVerificationPolicy)
@@ -563,6 +603,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repositories/{id}/restore-directory/preflight", s.preflightDirectoryRestore)
 	s.mux.HandleFunc("POST /api/repositories/{id}/restore-database", s.restoreDatabase)
 	s.mux.HandleFunc("POST /api/repositories/{id}/restore-database/preflight", s.preflightDatabaseRestore)
+	s.mux.HandleFunc("POST /api/repositories/{id}/restore-dump-file", s.restoreDumpFile)
+	s.mux.HandleFunc("POST /api/repositories/{id}/restore-dump-file/preflight", s.preflightDumpFileRestore)
 	s.mux.HandleFunc("POST /api/restores/{id}/authorize", s.authorizeRestore)
 	s.mux.HandleFunc("GET /api/ntfy", s.getNtfy)
 	s.mux.HandleFunc("POST /api/ntfy", s.saveNtfy)
@@ -2256,6 +2298,53 @@ func (s *Server) restoreDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"operationId": record.ID, "status": record.Status})
 }
 
+func (s *Server) restoreDumpFile(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	if s.dumpFileRestore == nil {
+		writeError(w, http.StatusServiceUnavailable, "数据库 dump 文件恢复器尚未配置")
+		return
+	}
+	var input dbrestore.DumpFileRequest
+	if decodeJSON(r, &input) != nil {
+		writeError(w, http.StatusBadRequest, "恢复参数无效")
+		return
+	}
+	input.RepositoryID = r.PathValue("id")
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	resourcePolicy, _, resourceErr := resources.EffectiveRepositoryResources(r.Context(), input.RepositoryID)
+	if resourceErr != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取恢复资源策略")
+		return
+	}
+	input.DownloadKiBPerSecond = resourcePolicy.DownloadKiBPerSecond
+	if input.ConfirmationID == "" {
+		writeError(w, http.StatusConflict, "请先完成恢复预检和管理员密码确认")
+		return
+	}
+	if _, err := resources.ConsumeRestoreConfirmation(r.Context(), input.ConfirmationID, username, dumpFileRestoreFingerprint(input), time.Now().UTC()); err != nil {
+		writeError(w, http.StatusConflict, "恢复预检已过期、已使用或请求内容已变化")
+		return
+	}
+	record, err := s.operations.Start(operationruntime.StartRequest{
+		Kind: "database_dump_file_restore", Actor: username, RepositoryID: input.RepositoryID,
+		SnapshotID: input.SnapshotID, Target: redactFilesystemTarget(input.TargetDirectory), Detail: map[string]any{"targetDirectory": redactFilesystemTarget(input.TargetDirectory), "downloadKiBPerSecond": input.DownloadKiBPerSecond},
+	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
+		_ = reporter.Stage("restoring", map[string]any{"preflight": "inline", "downloadKiBPerSecond": input.DownloadKiBPerSecond})
+		return s.dumpFileRestore.Restore(ctx, input)
+	})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "无法启动数据库 dump 文件恢复："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"operationId": record.ID, "status": record.Status})
+}
+
 func (s *Server) deleteTemporaryDatabaseConnection(ctx context.Context, actor, id, reason string) {
 	if !strings.HasPrefix(id, "temporary-dbconn_") || s.secrets == nil {
 		return
@@ -2316,11 +2405,71 @@ func (s *Server) preflightDatabaseRestore(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, record)
 }
 
+func (s *Server) preflightDumpFileRestore(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	preflighter, ok := s.dumpFileRestore.(databaseDumpFileRestorePreflighter)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "数据库 dump 文件恢复预检不可用")
+		return
+	}
+	var input dbrestore.DumpFileRequest
+	if decodeJSON(r, &input) != nil {
+		writeError(w, http.StatusBadRequest, "恢复参数无效")
+		return
+	}
+	input.RepositoryID = r.PathValue("id")
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	resourcePolicy, resourceBound, resourceErr := resources.EffectiveRepositoryResources(r.Context(), input.RepositoryID)
+	if resourceErr != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取恢复资源策略")
+		return
+	}
+	input.DownloadKiBPerSecond = resourcePolicy.DownloadKiBPerSecond
+	result, err := preflighter.Preflight(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "数据库 dump 文件恢复预检失败："+err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	record := store.RestoreConfirmation{
+		ID: newID("restore_confirmation"), Actor: username, Kind: "database_dump_file_restore", Fingerprint: dumpFileRestoreFingerprint(input),
+		Summary: map[string]any{
+			"repositoryId": input.RepositoryID, "snapshotId": input.SnapshotID, "metadata": result.Metadata,
+			"target": redactFilesystemTarget(result.Target), "behavior": result.Behavior,
+			"downloadKiBPerSecond": input.DownloadKiBPerSecond, "resourcePolicySource": restoreResourcePolicySource(resourceBound),
+		},
+		CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+	}
+	if err := resources.CreateRestoreConfirmation(r.Context(), record); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法保存恢复预检")
+		return
+	}
+	s.appendSemanticAudit(r.Context(), username, "restore.preflight", "repository", input.RepositoryID, map[string]any{"confirmationId": record.ID, "kind": "database_dump_file", "snapshotId": input.SnapshotID, "target": redactFilesystemTarget(result.Target), "downloadKiBPerSecond": input.DownloadKiBPerSecond})
+	writeJSON(w, http.StatusOK, record)
+}
+
 func databaseRestoreFingerprint(input dbrestore.Request) string {
 	input.ConfirmationID = ""
 	encoded, _ := json.Marshal(struct {
 		Request              dbrestore.Request `json:"request"`
 		DownloadKiBPerSecond int               `json:"downloadKiBPerSecond"`
+	}{Request: input, DownloadKiBPerSecond: input.DownloadKiBPerSecond})
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+func dumpFileRestoreFingerprint(input dbrestore.DumpFileRequest) string {
+	input.ConfirmationID = ""
+	input.TargetDirectory = filepath.Clean(strings.TrimSpace(input.TargetDirectory))
+	encoded, _ := json.Marshal(struct {
+		Request              dbrestore.DumpFileRequest `json:"request"`
+		DownloadKiBPerSecond int                       `json:"downloadKiBPerSecond"`
 	}{Request: input, DownloadKiBPerSecond: input.DownloadKiBPerSecond})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
@@ -2482,7 +2631,7 @@ func (s *Server) installRestic(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		_ = reporter.Stage("activating", nil)
-		s.paths.Restic = path
+		s.setResticPath(path)
 		if s.selectRestic != nil {
 			s.selectRestic(path)
 		}
@@ -2931,7 +3080,15 @@ func (s *Server) compatibility(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) compatibilityReport(ctx context.Context) compat.Report {
+	s.compatibilityMu.Lock()
+	if s.compatibilityCached {
+		report := s.compatibilityCache
+		s.compatibilityMu.Unlock()
+		return report
+	}
 	paths := s.paths
+	s.compatibilityMu.Unlock()
+
 	if paths.Restic == "" {
 		paths.Restic, _ = exec.LookPath("restic")
 	}
@@ -2947,7 +3104,23 @@ func (s *Server) compatibilityReport(ctx context.Context) compat.Report {
 	if paths.PostgresRestore == "" {
 		paths.PostgresRestore, _ = exec.LookPath("pg_restore")
 	}
-	return compat.Merge(compat.System(s.dataDir), s.probe.Tools(ctx, paths))
+	report := compat.Merge(compat.System(s.dataDir), s.probe.Tools(ctx, paths))
+	s.compatibilityMu.Lock()
+	if !s.compatibilityCached {
+		s.compatibilityCache = report
+		s.compatibilityCached = true
+	}
+	report = s.compatibilityCache
+	s.compatibilityMu.Unlock()
+	return report
+}
+
+func (s *Server) setResticPath(path string) {
+	s.compatibilityMu.Lock()
+	s.paths.Restic = path
+	s.compatibilityCache = compat.Report{}
+	s.compatibilityCached = false
+	s.compatibilityMu.Unlock()
 }
 
 func (s *Server) exportDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -3921,15 +4094,18 @@ func (p maintenancePolicyRequest) policy(repositoryID string, defaultCatchUp int
 }
 
 type createRepositoryRequest struct {
-	Name              string                    `json:"name"`
-	Engine            domain.EngineKind         `json:"engine"`
-	Kind              domain.RepositoryKind     `json:"kind"`
-	RemoteHostID      string                    `json:"remoteHostId"`
-	Path              string                    `json:"path"`
-	Password          string                    `json:"password"`
-	PasswordConfirmed bool                      `json:"passwordConfirmed"`
-	Maintenance       *maintenancePolicyRequest `json:"maintenance,omitempty"`
-	S3                *s3RepositoryRequest      `json:"s3,omitempty"`
+	Name              string                `json:"name"`
+	Engine            domain.EngineKind     `json:"engine"`
+	Kind              domain.RepositoryKind `json:"kind"`
+	RemoteHostID      string                `json:"remoteHostId"`
+	Path              string                `json:"path"`
+	Password          string                `json:"password"`
+	PasswordConfirmed bool                  `json:"passwordConfirmed"`
+	// ConnectionMode is a UI-only field kept for compatibility with older
+	// embedded pages. It is intentionally not persisted or used by the API.
+	ConnectionMode string                    `json:"connectionMode,omitempty"`
+	Maintenance    *maintenancePolicyRequest `json:"maintenance,omitempty"`
+	S3             *s3RepositoryRequest      `json:"s3,omitempty"`
 }
 
 type s3RepositoryRequest struct {
@@ -4198,6 +4374,7 @@ func (s *Server) listRepositories(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDatabaseConnectionRequest struct {
+	ID         string                   `json:"id,omitempty"`
 	Name       string                   `json:"name"`
 	Engine     domain.DatabaseEngine    `json:"engine"`
 	Purpose    domain.ConnectionPurpose `json:"purpose"`
@@ -4209,6 +4386,133 @@ type createDatabaseConnectionRequest struct {
 	Password   string                   `json:"password"`
 	TLS        domain.TLSConfig         `json:"tls"`
 	ToolPaths  map[string]string        `json:"toolPaths"`
+}
+
+type databaseConnectionTestResponse struct {
+	OK        bool                     `json:"ok"`
+	Status    string                   `json:"status"`
+	Preflight domain.DatabasePreflight `json:"preflight"`
+}
+
+func databaseConnectionFromRequest(input createDatabaseConnectionRequest, id string, now time.Time) domain.DatabaseConnection {
+	return domain.DatabaseConnection{
+		ID: id, Name: input.Name, Engine: input.Engine, Purpose: input.Purpose,
+		Network: input.Network, Host: input.Host, Port: input.Port, SocketPath: input.SocketPath,
+		Username: input.Username, TLS: input.TLS, ToolPaths: input.ToolPaths, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func mergeDatabaseToolPaths(previous, incoming map[string]string) map[string]string {
+	merged := make(map[string]string, len(previous)+len(incoming))
+	for key, value := range previous {
+		if value != "" {
+			merged[key] = value
+		}
+	}
+	for key, value := range incoming {
+		if value != "" {
+			merged[key] = value
+		} else {
+			// An explicitly submitted empty field means "return to automatic
+			// discovery". This lets the editor repair a stale or invalid path
+			// instead of silently preserving it from the previous connection.
+			delete(merged, key)
+		}
+	}
+	return merged
+}
+
+func (s *Server) testDatabaseConnection(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	var input createDatabaseConnectionRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式无效")
+		return
+	}
+
+	var previous domain.DatabaseConnection
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	if input.ID != "" {
+		items, err := resources.ListDatabaseConnections(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "无法读取数据库连接")
+			return
+		}
+		for _, candidate := range items {
+			if candidate.ID == input.ID {
+				previous = candidate
+				break
+			}
+		}
+		if previous.ID == "" {
+			writeError(w, http.StatusNotFound, "数据库连接不存在")
+			return
+		}
+	}
+
+	connection := databaseConnectionFromRequest(input, input.ID, time.Now().UTC())
+	if connection.ID == "" {
+		connection.ID = newID("dbconn-test")
+	}
+	if previous.ID != "" {
+		connection.CreatedAt = previous.CreatedAt
+	}
+	if previous.ID != "" && previous.Purpose != connection.Purpose && input.Password == "" {
+		writeError(w, http.StatusUnprocessableEntity, "更改连接用途时必须重新输入密码")
+		return
+	}
+	previousToolPaths := previous.ToolPaths
+	if previous.ID != "" && previous.Engine != connection.Engine {
+		previousToolPaths = nil
+	}
+	connection.ToolPaths = mergeDatabaseToolPaths(previousToolPaths, connection.ToolPaths)
+	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
+
+	password := input.Password
+	var storedPassword []byte
+	if password == "" {
+		if previous.ID == "" || s.secrets == nil {
+			writeError(w, http.StatusUnprocessableEntity, "请输入数据库密码")
+			return
+		}
+		execution, err := resources.LoadDatabaseConnectionExecution(r.Context(), previous.ID)
+		if err != nil {
+			writeCRUDOperationError(w, err)
+			return
+		}
+		storedPassword, err = s.secrets.Get(r.Context(), execution.PasswordSecretID, "database-"+string(previous.Purpose)+"-password")
+		if err != nil {
+			writeError(w, http.StatusLocked, "无法读取数据库凭据，请解锁秘密库")
+			return
+		}
+		defer clear(storedPassword)
+		password = string(storedPassword)
+	}
+	if err := connection.Validate(); err != nil || password == "" {
+		writeError(w, http.StatusUnprocessableEntity, "数据库连接配置无效")
+		return
+	}
+	tester := s.databaseTester
+	if tester == nil {
+		tester = databaseverify.NativeTester{Now: time.Now}
+	}
+	verification := tester.Test(r.Context(), connection, password)
+	if verification.CheckedAt.IsZero() {
+		verification.CheckedAt = time.Now().UTC()
+	}
+	preflight := domain.DatabasePreflight{CheckedAt: verification.CheckedAt, ServerVersion: verification.ServerVersion, Error: verification.Error}
+	response := databaseConnectionTestResponse{OK: verification.Error == "", Status: "failed", Preflight: preflight}
+	if response.OK {
+		response.Status = "ready"
+	}
+	s.appendSemanticAudit(r.Context(), username, "database_connection.test", "database_connection", connection.ID, map[string]any{"status": response.Status, "serverVersion": preflight.ServerVersion, "error": preflight.Error})
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) createDatabaseConnection(w http.ResponseWriter, r *http.Request) {
@@ -4226,11 +4530,8 @@ func (s *Server) createDatabaseConnection(w http.ResponseWriter, r *http.Request
 		return
 	}
 	now := time.Now().UTC()
-	connection := domain.DatabaseConnection{
-		ID: newID("dbconn"), Name: input.Name, Engine: input.Engine, Purpose: input.Purpose,
-		Network: input.Network, Host: input.Host, Port: input.Port, SocketPath: input.SocketPath,
-		Username: input.Username, TLS: input.TLS, ToolPaths: input.ToolPaths, CreatedAt: now, UpdatedAt: now,
-	}
+	connection := databaseConnectionFromRequest(input, newID("dbconn"), now)
+	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
 	if err := connection.Validate(); err != nil || input.Password == "" {
 		writeError(w, http.StatusUnprocessableEntity, "数据库连接配置无效")
 		return
@@ -4276,7 +4577,8 @@ func (s *Server) createTemporaryDatabaseConnection(w http.ResponseWriter, r *htt
 	}
 	input.Purpose = domain.RestoreConnection
 	now := time.Now().UTC()
-	connection := domain.DatabaseConnection{ID: newID("temporary-dbconn"), Name: input.Name, Engine: input.Engine, Purpose: input.Purpose, Network: input.Network, Host: input.Host, Port: input.Port, SocketPath: input.SocketPath, Username: input.Username, TLS: input.TLS, ToolPaths: input.ToolPaths, CreatedAt: now, UpdatedAt: now}
+	connection := databaseConnectionFromRequest(input, newID("temporary-dbconn"), now)
+	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
 	if err := connection.Validate(); err != nil || input.Password == "" {
 		writeError(w, http.StatusUnprocessableEntity, "临时恢复连接配置无效")
 		return
@@ -4351,8 +4653,9 @@ func (s *Server) cleanupExpiredTemporaryDatabaseConnections(ctx context.Context,
 
 type taskMutationInput struct {
 	domain.Task
-	PreviewID            string `json:"previewId,omitempty"`
-	RsyncDeleteConfirmed bool   `json:"rsyncDeleteConfirmed,omitempty"`
+	PreviewID                        string `json:"previewId,omitempty"`
+	RsyncDeleteConfirmed             bool   `json:"rsyncDeleteConfirmed,omitempty"`
+	DatabaseBackupPreflightOperation string `json:"databaseBackupPreflightOperationId,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -4383,7 +4686,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "目录或 rsync 任务必须先保存为停用草稿并完成范围预览")
 		return
 	}
-	if err := validateTaskActivation(r.Context(), resources, task); err != nil {
+	if err := validateTaskActivationWithPreflight(r.Context(), resources, task, input.DatabaseBackupPreflightOperation); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -4423,6 +4726,63 @@ func (s *Server) previewTaskScope(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendSemanticAudit(r.Context(), username, "task.scope.preview", "task", preview.TaskID, map[string]any{"previewId": preview.ID, "fingerprint": preview.Fingerprint, "requiresDeleteConfirmation": preview.RequiresDeleteConfirmation, "truncated": preview.Summary["truncated"]})
 	writeJSON(w, http.StatusCreated, preview)
+}
+
+func (s *Server) preflightDatabaseBackup(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	if s.databaseBackupPreflighter == nil {
+		writeError(w, http.StatusServiceUnavailable, "数据库备份预检服务尚未配置")
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	taskID := r.PathValue("id")
+	task, err := loadTask(r.Context(), resources, taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取任务")
+		return
+	}
+	if task.EffectiveEngine() != domain.ResticEngine || task.Kind != domain.DatabaseTask || task.Database == nil {
+		writeError(w, http.StatusUnprocessableEntity, "只有本机 Restic 数据库任务支持备份预检")
+		return
+	}
+	if task.EffectiveExecutionTarget().Kind != execution.Local {
+		writeError(w, http.StatusUnprocessableEntity, "数据库备份预检必须在 Service 本机执行")
+		return
+	}
+	fingerprint, err := databaseBackupFingerprint(r.Context(), resources, task)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "无法计算数据库备份测试配置")
+		return
+	}
+	record, reused, err := s.operations.StartUnique("database-backup-preflight:"+taskID, operationruntime.StartRequest{
+		Kind: "database_backup_preflight", Actor: username, RepositoryID: task.RepositoryID, TaskID: taskID,
+		Detail: map[string]any{"fingerprint": fingerprint},
+	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
+		_ = reporter.Stage("preflighting_database_backup", nil)
+		if err := s.databaseBackupPreflighter.PreflightDatabaseBackup(ctx, taskID); err != nil {
+			return err
+		}
+		_ = reporter.Stage("database_backup_preflighted", nil)
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "无法启动数据库备份预检："+err.Error())
+		return
+	}
+	if !reused {
+		s.appendSemanticAudit(r.Context(), username, "task.database-backup-preflight.start", "task", taskID, map[string]any{"operationId": record.ID})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"operationId": record.ID, "status": record.Status, "kind": record.Kind, "reused": reused})
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
@@ -4820,6 +5180,42 @@ func (s *Server) reprobeAgentTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendSemanticAudit(r.Context(), username, "agent.tools.reprobe.start", "agent", agentID, map[string]any{
+		"operationId": record.ID,
+	})
+	writeJSON(w, http.StatusAccepted, map[string]string{"operationId": record.ID, "status": record.Status})
+}
+
+func (s *Server) probeAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	if s.agentHeartbeatProber == nil {
+		writeError(w, http.StatusServiceUnavailable, "Agent 主动心跳探测未启用")
+		return
+	}
+	agentID := strings.TrimSpace(r.PathValue("id"))
+	if agentID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "Agent ID 无效")
+		return
+	}
+	record, reused, err := s.operations.StartUnique("agent-management:"+agentID, operationruntime.StartRequest{
+		Kind: "agent_heartbeat_probe", Actor: username, Target: agentID,
+	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
+		_, err := s.agentHeartbeatProber.ProbeHeartbeat(ctx, agentID, func(stage string) {
+			_ = reporter.Stage(stage, nil)
+		})
+		return err
+	})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "无法启动 Agent 主动心跳探测："+err.Error())
+		return
+	}
+	if reused && record.Kind != "agent_heartbeat_probe" {
+		writeError(w, http.StatusConflict, "Agent 正在执行其他管理操作")
+		return
+	}
+	s.appendSemanticAudit(r.Context(), username, "agent.heartbeat.probe.start", "agent", agentID, map[string]any{
 		"operationId": record.ID,
 	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"operationId": record.ID, "status": record.Status})
@@ -5548,8 +5944,9 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input createRepositoryRequest
-	if decodeJSON(r, &input) != nil {
-		writeError(w, 400, "请求格式无效")
+	if err := decodeJSON(r, &input); err != nil {
+		s.log.Warn("invalid repository update request", "error", err)
+		writeError(w, 400, "请求格式无效；请刷新页面后重试，如仍失败请重启控制服务")
 		return
 	}
 	if input.Password != "" {
@@ -5569,7 +5966,11 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	item := domain.Repository{ID: r.PathValue("id"), Name: input.Name, Engine: input.Engine, Kind: input.Kind, RemoteHostID: input.RemoteHostID, Path: input.Path, Status: status, CreatedAt: created, UpdatedAt: time.Now().UTC()}
 	if item.Kind == "" {
-		item.Kind = domain.SFTPRepository
+		if previous.ID != "" {
+			item.Kind = previous.EffectiveKind()
+		} else {
+			item.Kind = domain.SFTPRepository
+		}
 	}
 	if item.Engine == "" && previous.ID != "" {
 		item.Engine = previous.EffectiveEngine()
@@ -5705,6 +6106,11 @@ func (s *Server) updateDatabaseConnection(w http.ResponseWriter, r *http.Request
 			found = true
 			previous = candidate
 			item.CreatedAt = candidate.CreatedAt
+			previousToolPaths := candidate.ToolPaths
+			if candidate.Engine != item.Engine {
+				previousToolPaths = nil
+			}
+			item.ToolPaths = mergeDatabaseToolPaths(previousToolPaths, item.ToolPaths)
 			if candidate.Purpose != item.Purpose && input.Password == "" {
 				writeError(w, 422, "更改连接用途时必须重新输入密码")
 				return
@@ -5720,6 +6126,7 @@ func (s *Server) updateDatabaseConnection(w http.ResponseWriter, r *http.Request
 		writeError(w, 422, "数据库连接配置无效")
 		return
 	}
+	item.ToolPaths = databaseverify.ResolveToolPaths(item)
 	verificationPassword := input.Password
 	if verificationPassword == "" {
 		execution, loadErr := s.resourceStore(w).LoadDatabaseConnectionExecution(r.Context(), item.ID)
@@ -5814,7 +6221,7 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "无法读取任务")
 		return
 	}
-	if err := validateTaskActivation(r.Context(), resources, item); err != nil {
+	if err := validateTaskActivationWithPreflight(r.Context(), resources, item, input.DatabaseBackupPreflightOperation); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -5866,6 +6273,10 @@ func loadTask(ctx context.Context, resources *store.Store, id string) (domain.Ta
 }
 
 func validateTaskActivation(ctx context.Context, resources *store.Store, task domain.Task) error {
+	return validateTaskActivationWithPreflight(ctx, resources, task, "")
+}
+
+func validateTaskActivationWithPreflight(ctx context.Context, resources *store.Store, task domain.Task, databasePreflightOperationID string) error {
 	if !task.Enabled {
 		return nil
 	}
@@ -5961,7 +6372,7 @@ func validateTaskActivation(ctx context.Context, resources *store.Store, task do
 		if connection.ID != task.Database.ConnectionID {
 			continue
 		}
-		if connection.Status != "ready" || connection.Preflight.CheckedAt.IsZero() || time.Since(connection.Preflight.CheckedAt) > 24*time.Hour {
+		if connection.Status != "ready" || connection.Preflight.CheckedAt.IsZero() || connection.Preflight.Error != "" {
 			return errors.New("数据库连接尚未通过有效预检；请先重新验证连接")
 		}
 		program := connection.ToolPaths["dump"]
@@ -5971,9 +6382,88 @@ func validateTaskActivation(ctx context.Context, resources *store.Store, task do
 		if connection.Purpose != domain.BackupConnection || !filepath.IsAbs(program) || statErr != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 || !filepath.IsAbs(admin) || adminErr != nil || adminInfo.IsDir() || adminInfo.Mode().Perm()&0o111 == 0 {
 			return errors.New("数据库导出工具不可执行；请先保存为草稿或修复工具路径")
 		}
+		if err := validateDatabaseBackupPreflight(ctx, resources, task, databasePreflightOperationID); err != nil {
+			return err
+		}
 		return nil
 	}
 	return errors.New("数据库备份连接不存在；请先保存为草稿")
+}
+
+func validateDatabaseBackupPreflight(ctx context.Context, resources *store.Store, task domain.Task, operationID string) error {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return errors.New("启用数据库备份前必须先完成一次数据库备份预检")
+	}
+	record, err := resources.Operation(ctx, operationID)
+	if err != nil || record.Kind != "database_backup_preflight" || record.Status != "success" || record.TaskID != task.ID {
+		return errors.New("数据库备份预检未成功或不属于当前任务")
+	}
+	fingerprint, err := databaseBackupFingerprint(ctx, resources, task)
+	if err != nil {
+		return errors.New("无法验证数据库备份预检配置")
+	}
+	if value, _ := record.Detail["fingerprint"].(string); value != fingerprint {
+		return errors.New("数据库任务配置已变化，请重新保存并完成数据库备份预检")
+	}
+	return nil
+}
+
+func databaseBackupFingerprint(ctx context.Context, resources *store.Store, task domain.Task) (string, error) {
+	if task.Database == nil {
+		return "", errors.New("database source is required")
+	}
+	taskExecution, err := resources.LoadTaskExecution(ctx, task.ID)
+	if err != nil {
+		return "", err
+	}
+	if taskExecution.DatabaseConnection == nil || taskExecution.DatabaseConnection.ID != task.Database.ConnectionID {
+		return "", errors.New("database connection is missing")
+	}
+	type repositoryIdentity struct {
+		ID              string                     `json:"id"`
+		Engine          domain.EngineKind          `json:"engine"`
+		Kind            domain.RepositoryKind      `json:"kind"`
+		RemoteHostID    string                     `json:"remoteHostId"`
+		Path            string                     `json:"path"`
+		S3              *domain.S3RepositoryConfig `json:"s3,omitempty"`
+		BackendSecretID string                     `json:"backendSecretId,omitempty"`
+		Status          string                     `json:"status"`
+		UpdatedAt       time.Time                  `json:"updatedAt"`
+	}
+	type hostIdentity struct {
+		ID              string    `json:"id"`
+		Host            string    `json:"host"`
+		Port            int       `json:"port"`
+		Username        string    `json:"username"`
+		HostFingerprint string    `json:"hostFingerprint"`
+		UpdatedAt       time.Time `json:"updatedAt"`
+	}
+	input := struct {
+		Engine                   domain.EngineKind         `json:"engine"`
+		Kind                     domain.TaskKind           `json:"kind"`
+		ExecutionTarget          execution.Target          `json:"executionTarget"`
+		Repository               repositoryIdentity        `json:"repository"`
+		Host                     hostIdentity              `json:"host"`
+		RepositoryPasswordSecret string                    `json:"repositoryPasswordSecret"`
+		PrivateKeySecret         string                    `json:"privateKeySecret"`
+		DatabasePasswordSecret   string                    `json:"databasePasswordSecret"`
+		Database                 domain.DatabaseSource     `json:"database"`
+		Resources                domain.ResourcePolicy     `json:"resources"`
+		Connection               domain.DatabaseConnection `json:"connection"`
+	}{
+		Engine: task.EffectiveEngine(), Kind: task.Kind, ExecutionTarget: task.EffectiveExecutionTarget(),
+		Repository:               repositoryIdentity{ID: taskExecution.Repository.ID, Engine: taskExecution.Repository.EffectiveEngine(), Kind: taskExecution.Repository.EffectiveKind(), RemoteHostID: taskExecution.Repository.RemoteHostID, Path: taskExecution.Repository.Path, S3: taskExecution.Repository.S3, BackendSecretID: taskExecution.Repository.BackendSecretID, Status: taskExecution.Repository.Status, UpdatedAt: taskExecution.Repository.UpdatedAt},
+		Host:                     hostIdentity{ID: taskExecution.Host.ID, Host: taskExecution.Host.Host, Port: taskExecution.Host.Port, Username: taskExecution.Host.Username, HostFingerprint: taskExecution.Host.HostFingerprint, UpdatedAt: taskExecution.Host.UpdatedAt},
+		RepositoryPasswordSecret: taskExecution.RepositoryPasswordSecretID, PrivateKeySecret: taskExecution.PrivateKeySecretID, DatabasePasswordSecret: taskExecution.DatabasePasswordSecretID,
+		Database: *task.Database, Resources: task.Resources, Connection: *taskExecution.DatabaseConnection,
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func validateAgentTaskEligibility(agent store.AgentRecord, requiredCapability string, now time.Time) error {

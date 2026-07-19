@@ -3,6 +3,7 @@ import { useModalFocus } from "./useModalFocus";
 import { StatusIndicator } from "./StatusIndicator";
 import { ModalPortal } from "./ModalPortal";
 import { Toast } from "./Toast";
+import { OperationFeedback, useOperation } from "./OperationFeedback";
 import {
   ProtectionPolicyEditor,
   defaultRetentionPolicy,
@@ -412,7 +413,7 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
             remoteHostId: kind === "sftp" ? value("remoteHostId") : "",
             path: value("path"),
             password: initial ? value("password") : password,
-            passwordConfirmed: initial || passwordConfirmed,
+			passwordConfirmed: Boolean(initial) || passwordConfirmed,
 			...(kind === "s3" ? { s3: {
 				endpoint: value("s3Endpoint"), bucket: value("s3Bucket"), region: value("s3Region"), prefix: value("s3Prefix"),
 				pathStyle: form.has("s3PathStyle"), accessKey: s3AccessKey, secretKey: s3SecretKey, credentialsConfirmed: s3CredentialsConfirmed,
@@ -818,7 +819,14 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
   const [scopeDirty, setScopeDirty] = useState(!initial?.id);
   const [deleteConfirmed, setDeleteConfirmed] = useState(Boolean(initialConfirmation?.deleteConfirmed));
   const [activationReviewOpen, setActivationReviewOpen] = useState(false);
-  const [operation, setOperation] = useState<"idle" | "saving" | "previewing">("idle");
+  const [operation, setOperation] = useState<"idle" | "saving" | "previewing" | "preflighting">("idle");
+  const databasePreflight = useOperation(api);
+  const [pendingDatabaseActivation, setPendingDatabaseActivation] = useState<{
+    taskID: string;
+    operationID: string;
+    payload: Record<string, unknown>;
+    taskName: string;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -998,6 +1006,39 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
     }
   };
 
+  useEffect(() => {
+    const pending = pendingDatabaseActivation;
+    const record = databasePreflight.operation;
+    if (!pending || !record || record.id !== pending.operationID || !["success", "failed", "cancelled", "cleanup_required"].includes(record.status)) return;
+    if (record.status !== "success") {
+      setPendingDatabaseActivation(null);
+      setOperation("idle");
+      setMessage(record.errorSummary || t(record.status === "cancelled" ? "操作已取消" : "数据库备份预检失败"));
+      return;
+    }
+    setOperation("saving");
+    void (async () => {
+      try {
+        await api.updateResource("tasks", pending.taskID, {
+          ...pending.payload,
+          enabled: true,
+          databaseBackupPreflightOperationId: pending.operationID,
+        });
+        await saveTaskSchedule(pending.taskID, pending.taskName);
+        setPendingDatabaseActivation(null);
+        setActivationReviewOpen(false);
+        await onSaved();
+      } catch (cause) {
+        setPendingDatabaseActivation(null);
+        setOperation("idle");
+        setMessage(cause instanceof Error ? cause.message : t("保存失败"));
+      }
+    })();
+    // The callback intentionally runs once for the terminal operation. The task
+    // payload is frozen before the real backup test starts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [databasePreflight.operation, pendingDatabaseActivation]);
+
   const previewScope = async (formElement: HTMLFormElement, reviewBeforeEnable = false) => {
     if (!formElement.reportValidity() || busy || !scopeTask) return;
     setOperation("previewing");
@@ -1049,6 +1090,19 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
         payload.previewId = preview.previewId;
         if (preview.requiresDeleteConfirmation) payload.rsyncDeleteConfirmed = true;
       }
+	  if (engine === "restic" && kind === "database" && enabled) {
+		const taskName = String(new FormData(formElement).get("name") ?? "");
+		const draftPayload = buildPayload(formElement, false);
+		const currentID = await persist(draftPayload, taskID);
+		if (!currentID) throw new Error(t("任务已保存，但响应中缺少任务 ID"));
+		setTaskID(currentID);
+		await onDraftSaved();
+		setOperation("preflighting");
+		const accepted = await databasePreflight.start(`/api/tasks/${encodeURIComponent(currentID)}/database-backup-preflight`, {});
+		if (!accepted) throw new Error(t("无法启动数据库备份预检"));
+		setPendingDatabaseActivation({ taskID: currentID, operationID: accepted.operationId, payload, taskName });
+		return;
+	  }
       const currentID = await persist(payload, taskID);
       await saveTaskSchedule(currentID, String(new FormData(formElement).get("name") ?? ""));
       setActivationReviewOpen(false);
@@ -1205,6 +1259,7 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
             {!connections.length && !loading && <span className="field-hint warning-text">{t("请先创建用途为“备份”的数据库连接")}</span>}
           </label>
           <label className="full-field">{t("逻辑数据库名")}<input name="database" defaultValue={String(initialDatabase?.database ?? "")} placeholder={t("例如 gitea")} required /></label>
+          <p className="field-hint full-field">{t("启用数据库任务前会自动执行一次轻量备份预检，不会创建数据库备份快照；预检失败时任务保持停用草稿。")}</p>
         </>}
         {engine === "restic" && <>
           <ProtectionPolicyEditor
@@ -1263,9 +1318,10 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
           const form = event.currentTarget.form;
           if (form) void previewScope(form);
         }}>{operation === "previewing" ? t("正在生成范围预览…") : previewButtonLabel}</button>}
-        <button className="primary-button" type="submit" disabled={dependencyBlocked || busy}>{t(operation === "saving" ? "正在保存…" : "保存任务")}</button>
+        <button className="primary-button" type="submit" disabled={dependencyBlocked || busy}>{t(operation === "saving" ? "正在保存…" : operation === "preflighting" ? "正在执行数据库备份预检…" : engine === "restic" && kind === "database" && enabled ? "预检并启用" : "保存任务")}</button>
       </footer>
     </form>
+    {databasePreflight.operation && <OperationFeedback operation={databasePreflight} locale={locale} persistTerminal compact />}
     {activationReviewOpen && preview && <ModalPortal>
       <div ref={activationReviewDialogRef} className="dialog task-scope-review-dialog" role="dialog" aria-modal="true" aria-labelledby="task-scope-review-title">
         <header><div><h2 id="task-scope-review-title">{t("确认任务范围")}</h2><p>{t("范围预览不会启用任务；确认后才会启用。")}</p></div></header>

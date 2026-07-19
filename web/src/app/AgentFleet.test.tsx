@@ -2,8 +2,37 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AgentFleet } from "./AgentFleet";
+import type { OperationController } from "./OperationFeedback";
 
 describe("Agent fleet health", () => {
+  it("keeps Agent upgrade progress inside only the affected Agent record", () => {
+    const operation = {
+      operation: { id: "op-upgrade", kind: "agent_upgrade", status: "running", stage: "staging_agent_upgrade" },
+      active: true,
+      error: "",
+    } as unknown as OperationController;
+    render(<AgentFleet
+      agents={[
+        { id: "agent-a", status: "online", runtimeStatus: "running", platform: "linux/amd64" },
+        { id: "agent-b", status: "online", runtimeStatus: "running", platform: "linux/amd64" },
+      ]}
+      remoteHosts={[]}
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy
+      upgradeOperation={{ agentId: "agent-b", operation }}
+      onUpgrade={vi.fn()}
+      onRedeploy={vi.fn()}
+      onRemove={vi.fn()}
+    />);
+
+    const firstAgent = screen.getByText("agent-a").closest("article");
+    const affectedAgent = screen.getByText("agent-b").closest("article");
+    expect(firstAgent).not.toHaveTextContent("正在暂存新 Agent 程序");
+    expect(affectedAgent).toHaveTextContent("正在暂存新 Agent 程序");
+  });
+
   it("keeps managed Restic progress inside only the affected Agent record", async () => {
     const user = userEvent.setup();
     const onCancelRestic = vi.fn();
@@ -37,6 +66,7 @@ describe("Agent fleet health", () => {
     const onUpgrade = vi.fn();
     const onInstallRestic = vi.fn();
     const onReprobeTools = vi.fn();
+    const onProbeHeartbeat = vi.fn();
     render(<AgentFleet
       agents={[{
         id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", taskEligible: true,
@@ -55,6 +85,7 @@ describe("Agent fleet health", () => {
       onUpgrade={onUpgrade}
       onInstallRestic={onInstallRestic}
       onReprobeTools={onReprobeTools}
+      onProbeHeartbeat={onProbeHeartbeat}
       onRedeploy={vi.fn()}
       onRemove={vi.fn()}
     />);
@@ -84,6 +115,39 @@ describe("Agent fleet health", () => {
     expect(onInstallRestic).toHaveBeenCalledWith(expect.objectContaining({ id: "agent-a" }));
     await user.click(screen.getByRole("button", { name: "重新探测工具" }));
     expect(onReprobeTools).toHaveBeenCalledWith(expect.objectContaining({ id: "agent-a" }));
+    await user.click(screen.getByRole("button", { name: "主动探测心跳" }));
+    expect(onProbeHeartbeat).toHaveBeenCalledWith(expect.objectContaining({ id: "agent-a" }));
+  });
+
+  it("shows heartbeat probing on the action button without an inline operation row", async () => {
+    const user = userEvent.setup();
+    const operation = {
+      operation: { id: "op-heartbeat", kind: "agent_heartbeat_probe", status: "running", stage: "restarting_agent_for_heartbeat" },
+      active: true,
+      error: "",
+    } as unknown as OperationController;
+    render(<AgentFleet
+      agents={[{ id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64" }]}
+      remoteHosts={[]}
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy={false}
+      heartbeatOperation={{ agentId: "agent-a", operation }}
+      onProbeHeartbeat={vi.fn()}
+      onUpgrade={vi.fn()}
+      onRedeploy={vi.fn()}
+      onRemove={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "agent-a 查看详情" }));
+
+    const button = screen.getByRole("button", { name: "探测中…" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button).toHaveClass("agent-heartbeat-button-probing");
+    expect(button.querySelector(".agent-heartbeat-spinner")).not.toBeNull();
+    expect(screen.queryByText("正在重启 Agent 以主动探测心跳")).not.toBeInTheDocument();
   });
 
   it("omits no-action Restic and Service health confirmations", async () => {
@@ -168,6 +232,7 @@ describe("Agent fleet health", () => {
       locale="zh-CN"
       timeZone="Asia/Shanghai"
       currentServiceURL="https://control.internal:9443"
+      latestResticVersion=""
       busy={false}
       onUpgrade={vi.fn()}
       onInstallRestic={vi.fn()}

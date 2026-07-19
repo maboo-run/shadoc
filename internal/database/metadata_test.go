@@ -73,6 +73,13 @@ func TestConnectorsPrepareCredentialBoundMetadataCommands(t *testing.T) {
 	}
 }
 
+func TestMySQLPreferredTLSUsesThePortableClientDefault(t *testing.T) {
+	args := mysqlTLSArgs(Connection{TLSMode: "preferred"})
+	if len(args) != 0 {
+		t.Fatalf("preferred TLS args=%v; expected the client default", args)
+	}
+}
+
 func TestParseMetadataRejectsIncompleteOrUnknownOutput(t *testing.T) {
 	for _, test := range []struct {
 		engine Engine

@@ -375,6 +375,13 @@ func (m *Manager) ReprobeTools(ctx context.Context, agentID string, report agent
 	return m.upgrader.ReprobeTools(ctx, agentID, report)
 }
 
+func (m *Manager) ProbeHeartbeat(ctx context.Context, agentID string, report agentdeploy.StageReporter) (agentdeploy.HeartbeatProbeResult, error) {
+	if m == nil || m.upgrader == nil {
+		return agentdeploy.HeartbeatProbeResult{}, errors.New("Agent heartbeat prober is unavailable")
+	}
+	return m.upgrader.ProbeHeartbeat(ctx, agentID, report)
+}
+
 func (m *Manager) Close(ctx context.Context) error {
 	m.configureMu.Lock()
 	defer m.configureMu.Unlock()

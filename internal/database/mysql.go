@@ -140,7 +140,14 @@ func mysqlTLSArgs(connection Connection) []string {
 	if mode == "VERIFY_FULL" {
 		mode = "VERIFY_IDENTITY"
 	}
-	args := []string{"--ssl-mode=" + mode}
+	// PREFERRED is the default for the MySQL command-line clients. Omitting
+	// --ssl-mode for this mode also keeps the command compatible with MariaDB
+	// clients and older MySQL clients, which use the legacy --ssl options and
+	// exit with status 2 for the newer --ssl-mode flag.
+	args := []string{}
+	if mode != "PREFERRED" {
+		args = append(args, "--ssl-mode="+mode)
+	}
 	if connection.TLSCA != "" {
 		args = append(args, "--ssl-ca="+connection.TLSCA)
 	}

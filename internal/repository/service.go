@@ -796,6 +796,103 @@ func (s *Service) Dump(ctx context.Context, id, snapshotID, filename string, dow
 	_, err = s.runner.Execute(ctx, restic.Operation{Kind: restic.DumpSnapshot, Repository: repo, Arguments: args, Output: output})
 	return err
 }
+
+// ValidateExistingDirectoryTarget validates a local output directory without
+// creating it. Dump-file restore intentionally accepts an existing directory;
+// the file created inside it is checked separately.
+func ValidateExistingDirectoryTarget(target string) (string, error) {
+	target = filepath.Clean(strings.TrimSpace(target))
+	if target == "." || target == string(filepath.Separator) || !filepath.IsAbs(target) || strings.ContainsAny(target, "\x00\r\n") {
+		return "", errors.New("restore dump output directory must be an absolute path")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errors.New("restore dump output directory must already exist")
+		}
+		return "", fmt.Errorf("inspect restore dump output directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("restore dump output target must be a directory")
+	}
+	return target, nil
+}
+
+// ValidateNewFileTarget validates a local file target without creating it.
+// Restore-to-file uses a non-existing path so a mistaken restore cannot
+// overwrite an unrelated dump or other user data.
+func ValidateNewFileTarget(target string) (string, error) {
+	target = filepath.Clean(strings.TrimSpace(target))
+	if target == "." || target == string(filepath.Separator) || !filepath.IsAbs(target) || strings.ContainsAny(target, "\x00\r\n") {
+		return "", errors.New("restore file target must be an absolute path")
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return "", errors.New("restore file target must not already exist")
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect restore file target: %w", err)
+	}
+	parentInfo, err := os.Stat(filepath.Dir(target))
+	if err != nil || !parentInfo.IsDir() {
+		return "", errors.New("restore file target parent must be an existing directory")
+	}
+	return target, nil
+}
+
+// RestoreDumpFile materializes one database dump from a Restic snapshot. It
+// writes to a 0600 staging file in the destination directory, then publishes
+// it with a no-overwrite hard-link commit so a concurrent target creation is
+// never replaced.
+func (s *Service) RestoreDumpFile(ctx context.Context, id, snapshotID, filename, target string, downloadKiBPerSecond int) error {
+	if !safeSnapshotID(snapshotID) || !safeDumpFilename(filename) {
+		return errors.New("snapshot and dump filename are invalid")
+	}
+	if downloadKiBPerSecond < 0 {
+		return errors.New("download limit cannot be negative")
+	}
+	return s.locked(ctx, id, func() error {
+		cleanTarget, err := ValidateNewFileTarget(target)
+		if err != nil {
+			return err
+		}
+		parent := filepath.Dir(cleanTarget)
+		staging, err := os.CreateTemp(parent, "."+filepath.Base(cleanTarget)+".restic-control-dump-")
+		if err != nil {
+			return fmt.Errorf("create dump staging file: %w", err)
+		}
+		stagingPath := staging.Name()
+		removeStaging := true
+		defer func() {
+			_ = staging.Close()
+			if removeStaging {
+				_ = os.Remove(stagingPath)
+			}
+		}()
+		if err := staging.Chmod(0o600); err != nil {
+			return fmt.Errorf("secure dump staging file: %w", err)
+		}
+		if err := s.Dump(ctx, id, snapshotID, filename, downloadKiBPerSecond, staging); err != nil {
+			return fmt.Errorf("restore database dump: %w", err)
+		}
+		if err := staging.Sync(); err != nil {
+			return fmt.Errorf("flush restored dump: %w", err)
+		}
+		if err := staging.Close(); err != nil {
+			return fmt.Errorf("close restored dump: %w", err)
+		}
+		if err := os.Link(stagingPath, cleanTarget); err != nil {
+			return fmt.Errorf("publish restored dump: %w", err)
+		}
+		if err := os.Remove(stagingPath); err != nil {
+			return fmt.Errorf("remove dump staging file: %w", err)
+		}
+		removeStaging = false
+		return nil
+	})
+}
+
+func safeDumpFilename(filename string) bool {
+	return filename != "" && filepath.Base(filename) == filename && filename != "." && filename != ".." && !strings.ContainsAny(filename, "/\\\x00\r\n")
+}
 func (s *Service) RestoreDirectory(ctx context.Context, id, snapshotID, target string, includes []string, downloadKiBPerSecond int) error {
 	return s.locked(ctx, id, func() error {
 		return s.restoreDirectoryUnlocked(ctx, id, snapshotID, target, includes, downloadKiBPerSecond)

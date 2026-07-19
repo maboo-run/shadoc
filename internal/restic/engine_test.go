@@ -103,6 +103,21 @@ func TestEngineBacksUpDirectoryWithoutPuttingSecretsInArguments(t *testing.T) {
 	}
 }
 
+func TestEngineReportsMissingResticExecutableWithoutLeakingInternalPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "bin", "restic")
+	engine := New(missing, command.OSExecutor{}, t.TempDir())
+	_, err := engine.Execute(context.Background(), Operation{
+		Kind:       InitializeRepo,
+		Repository: Repository{Location: "/backup/repository", Password: "repository-secret"},
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "restic executable") {
+		t.Fatalf("missing executable error=%v", err)
+	}
+	if strings.Contains(err.Error(), missing) || strings.Contains(strings.ToLower(err.Error()), "no such file") {
+		t.Fatalf("missing executable error leaked internal detail: %v", err)
+	}
+}
+
 func TestEngineUsesOnlyFixedS3EnvironmentAndOptions(t *testing.T) {
 	recorder := &recordingExecutor{result: command.Result{ExitCode: 0, Stdout: `[]`}}
 	engine := New("/tools/restic", recorder, t.TempDir())

@@ -196,6 +196,9 @@ func (e *Engine) Execute(ctx context.Context, operation Operation) (Result, erro
 		result.Outcome = Partial
 		return result, nil
 	}
+	if processErr != nil && (errors.Is(processErr, os.ErrNotExist) || errors.Is(processErr, os.ErrPermission)) {
+		return result, errors.New("restic executable is missing or not executable; install Restic before repository operations")
+	}
 	if processErr != nil || processResult.ExitCode != 0 {
 		result.Outcome = Failure
 		return result, executionError{kind: operation.Kind, exitCode: processResult.ExitCode, stderr: processResult.Stderr, cause: processErr}

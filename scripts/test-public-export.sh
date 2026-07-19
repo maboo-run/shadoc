@@ -8,8 +8,15 @@ trap 'rm -f "$archive_file"' EXIT HUP INT TERM
 
 git -C "$repository_root" archive --worktree-attributes --format=tar HEAD > "$archive_file"
 
-if tar -tf "$archive_file" | grep -Eq '(^|/)AGENTS\.md$|^docs(/|$)|^learning-records(/|$)'; then
-  printf 'private contributor files leaked into the public export\n' >&2
+if tar -tf "$archive_file" | grep -Eq '(^|/)AGENTS\.md$|^docs(/|$)|^learning-records(/|$)|^\.hallmark(/|$)|^\.superpowers(/|$)|^\.agents(/|$)|^\.codex(/|$)|^\.claude(/|$)|^\.cursor(/|$)|^\.worktrees(/|$)|^lessons(/|$)|^reference(/|$)|^assets(/|$)|^RESOURCES\.md$|^design\.md$'; then
+  printf 'private or internal files leaked into the public export\n' >&2
+  exit 1
+fi
+
+if tar -tf "$archive_file" \
+  | grep -E '(^|/)\.env($|\.)|(^|/)(vault\.key|[^/]+\.(db|db-shm|db-wal|sqlite|sqlite3|pem|key|p12|pfx))$|^(dist|node_modules|data|tmp|agent-data|shadoc-data|\.shadoc-data)(/|$)|(^|/)(node_modules|\.pnpm-store|coverage)(/|$)' \
+  | grep -Ev '(^|/)\.env\.example$'; then
+  printf 'secret-bearing or generated files leaked into the public export\n' >&2
   exit 1
 fi
 

@@ -405,8 +405,8 @@ func (s *Service) validateDraftInput(ctx context.Context, draft Draft, items []C
 				return errors.New("database protection currently requires local service execution")
 			}
 			connection, ok := databaseConnectionByID(connections, item.Database.ConnectionID)
-			if !ok || connection.Purpose != domain.BackupConnection || connection.Status != "ready" || connection.Preflight.Error != "" || connection.Preflight.CheckedAt.IsZero() || connection.Preflight.CheckedAt.After(now) || now.Sub(connection.Preflight.CheckedAt) > 24*time.Hour {
-				return errors.New("database source requires a freshly verified backup connection")
+			if !ok || connection.Purpose != domain.BackupConnection || connection.Status != "ready" || connection.Preflight.Error != "" || connection.Preflight.CheckedAt.IsZero() || connection.Preflight.CheckedAt.After(now) {
+				return errors.New("database source requires a verified backup connection")
 			}
 		}
 		repository := domain.Repository{Name: item.RepositoryName, Kind: item.RepositoryKind, RemoteHostID: item.RemoteHostID, Path: item.RepositoryPath}

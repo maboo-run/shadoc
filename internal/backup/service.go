@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -44,10 +45,12 @@ type Service struct {
 	now              func() time.Time
 	repositoryLocker RepositoryLocker
 	metadataExecutor command.Executor
+	databaseExecutor command.Executor
 }
 
 func (s *Service) SetRepositoryLocker(locker RepositoryLocker)   { s.repositoryLocker = locker }
 func (s *Service) SetMetadataExecutor(executor command.Executor) { s.metadataExecutor = executor }
+func (s *Service) SetDatabaseExecutor(executor command.Executor) { s.databaseExecutor = executor }
 
 func New(s Store, secrets Secrets, runner Runner, mysql, postgres database.Connector, now func() time.Time) *Service {
 	if now == nil {
@@ -119,38 +122,9 @@ func (s *Service) execute(ctx context.Context, a store.TaskExecution) (restic.Re
 	if a.Repository.Status != "ready" && pendingPartial == "" {
 		return restic.Result{}, nil, fmt.Errorf("repository is not writable: %s", a.Repository.Status)
 	}
-	password, err := s.secrets.Get(ctx, a.RepositoryPasswordSecretID, "repository-password")
+	repository, sensitive, err := s.repositoryMaterial(ctx, a)
 	if err != nil {
-		return restic.Result{}, nil, err
-	}
-	sensitive := []string{string(password)}
-	repository := restic.Repository{Location: a.Repository.Path, Password: string(password)}
-	if a.Repository.EffectiveKind() == domain.S3Repository {
-		encoded, err := s.secrets.Get(ctx, a.Repository.BackendSecretID, s3backend.CredentialPurpose)
-		if err != nil {
-			return restic.Result{}, sensitive, err
-		}
-		credentials, err := s3backend.DecodeCredentials(encoded)
-		clear(encoded)
-		if err != nil {
-			return restic.Result{}, sensitive, err
-		}
-		sensitive = append(sensitive, credentials.AccessKey, credentials.SecretKey)
-		repository, err = s3backend.Material(a.Repository, string(password), credentials)
-		if err != nil {
-			return restic.Result{}, sensitive, err
-		}
-	}
-	if a.Repository.EffectiveKind() == domain.SFTPRepository {
-		if strings.TrimSpace(a.Host.HostFingerprint) == "" {
-			return restic.Result{}, sensitive, errors.New("SSH host key is not pinned")
-		}
-		key, err := s.secrets.Get(ctx, a.PrivateKeySecretID, "ssh-private-key")
-		if err != nil {
-			return restic.Result{}, sensitive, err
-		}
-		sensitive = append(sensitive, string(key))
-		repository = restic.Repository{Location: sftpLocation(a.Host, a.Repository.Path), Password: string(password), SSHPrivateKey: key, SSHPort: a.Host.Port, KnownHosts: []byte(a.Host.HostFingerprint)}
+		return restic.Result{}, sensitive, err
 	}
 	if pendingPartial != "" {
 		if _, err := s.restic.Execute(ctx, restic.Operation{Kind: restic.TagSnapshot, Repository: repository, Arguments: []string{"--add", "rc:protected-partial", pendingPartial}}); err != nil {
@@ -177,22 +151,65 @@ func (s *Service) execute(ctx context.Context, a store.TaskExecution) (restic.Re
 		}
 		return result, sensitive, err
 	}
-	if a.DatabaseConnection == nil {
+	return s.executeDatabase(ctx, a, repository, sensitive, nil, true)
+}
+
+func (s *Service) repositoryMaterial(ctx context.Context, a store.TaskExecution) (restic.Repository, []string, error) {
+	password, err := s.secrets.Get(ctx, a.RepositoryPasswordSecretID, "repository-password")
+	if err != nil {
+		return restic.Repository{}, nil, err
+	}
+	sensitive := []string{string(password)}
+	repository := restic.Repository{Location: a.Repository.Path, Password: string(password)}
+	if a.Repository.EffectiveKind() == domain.S3Repository {
+		encoded, err := s.secrets.Get(ctx, a.Repository.BackendSecretID, s3backend.CredentialPurpose)
+		if err != nil {
+			return restic.Repository{}, sensitive, err
+		}
+		credentials, err := s3backend.DecodeCredentials(encoded)
+		clear(encoded)
+		if err != nil {
+			return restic.Repository{}, sensitive, err
+		}
+		sensitive = append(sensitive, credentials.AccessKey, credentials.SecretKey)
+		repository, err = s3backend.Material(a.Repository, string(password), credentials)
+		if err != nil {
+			return restic.Repository{}, sensitive, err
+		}
+	}
+	if a.Repository.EffectiveKind() == domain.SFTPRepository {
+		if strings.TrimSpace(a.Host.HostFingerprint) == "" {
+			return restic.Repository{}, sensitive, errors.New("SSH host key is not pinned")
+		}
+		key, err := s.secrets.Get(ctx, a.PrivateKeySecretID, "ssh-private-key")
+		if err != nil {
+			return restic.Repository{}, sensitive, err
+		}
+		sensitive = append(sensitive, string(key))
+		repository = restic.Repository{Location: sftpLocation(a.Host, a.Repository.Path), Password: string(password), SSHPrivateKey: key, SSHPort: a.Host.Port, KnownHosts: []byte(a.Host.HostFingerprint)}
+	}
+	return repository, sensitive, nil
+}
+
+func (s *Service) executeDatabase(ctx context.Context, a store.TaskExecution, repository restic.Repository, sensitive []string, extraArguments []string, indexMetadata bool) (restic.Result, []string, error) {
+	if a.DatabaseConnection == nil || a.Task.Database == nil {
 		return restic.Result{}, sensitive, errors.New("database connection missing")
 	}
-	if a.DatabaseConnection.Status != "ready" || a.DatabaseConnection.Preflight.CheckedAt.IsZero() || time.Since(a.DatabaseConnection.Preflight.CheckedAt) > 24*time.Hour {
-		return restic.Result{}, sensitive, errors.New("database connection preflight is missing, failed, or expired")
+	if a.DatabaseConnection.Status != "ready" || a.DatabaseConnection.Preflight.CheckedAt.IsZero() || a.DatabaseConnection.Preflight.Error != "" {
+		return restic.Result{}, sensitive, errors.New("database connection preflight is missing or failed")
 	}
-	purpose := "database-backup-password"
-	dbPassword, err := s.secrets.Get(ctx, a.DatabasePasswordSecretID, purpose)
+	dbPassword, err := s.secrets.Get(ctx, a.DatabasePasswordSecretID, "database-backup-password")
 	if err != nil {
 		return restic.Result{}, sensitive, err
 	}
 	sensitive = append(sensitive, string(dbPassword))
-	connection := database.Connection{Engine: database.Engine(a.DatabaseConnection.Engine), Purpose: database.Backup, Network: database.Network(a.DatabaseConnection.Network), Host: a.DatabaseConnection.Host, Port: a.DatabaseConnection.Port, SocketPath: a.DatabaseConnection.SocketPath, Username: a.DatabaseConnection.Username, Password: string(dbPassword), DumpProgram: a.DatabaseConnection.ToolPaths["dump"], AdminProgram: a.DatabaseConnection.ToolPaths["admin"], TLSMode: a.DatabaseConnection.TLS.Mode, TLSCA: a.DatabaseConnection.TLS.CA, TLSClientCert: a.DatabaseConnection.TLS.ClientCert, TLSClientKey: a.DatabaseConnection.TLS.ClientKey, TLSServerName: a.DatabaseConnection.TLS.ServerName}
+	connection := databaseConnection(a, string(dbPassword))
 	connector := s.mysql
 	if connection.Engine == database.PostgreSQL {
 		connector = s.postgres
+	}
+	if connector == nil {
+		return restic.Result{}, sensitive, errors.New("database connector is unavailable")
 	}
 	prepared, metadata, err := connector.PrepareExport(ctx, connection, a.Task.Database.Database)
 	if err != nil {
@@ -229,18 +246,121 @@ func (s *Service) execute(ctx context.Context, a store.TaskExecution) (restic.Re
 		prepared.Cleanup()
 		return restic.Result{}, sensitive, err
 	}
-	var tags []string
+	tags := append([]string{}, extraArguments...)
 	for _, tag := range encodedTags {
 		tags = append(tags, "--tag", tag)
 	}
 	tags = append(tags, backupResourceArguments(a.Task.Resources, true)...)
 	result, err := s.restic.Execute(ctx, restic.Operation{Kind: restic.BackupCommand, Repository: repository, Command: &prepared.Spec, Filename: metadata.Filename, CommandCleanup: prepared.Cleanup, Arguments: tags})
-	if err == nil && result.Outcome == restic.Success && result.SnapshotID != "" {
+	if indexMetadata && err == nil && result.Outcome == restic.Success && result.SnapshotID != "" {
 		if indexErr := s.store.SaveSnapshotMetadata(ctx, a.Repository.ID, result.SnapshotID, metadata, s.now().UTC()); indexErr != nil {
 			return result, sensitive, fmt.Errorf("index database snapshot metadata: %w", indexErr)
 		}
 	}
 	return result, sensitive, err
+}
+
+// PreflightDatabaseBackup validates the logical export command without
+// copying table data or writing a Restic snapshot. It checks the repository
+// read path, then runs the official dump client in schema-only/no-data mode.
+func (s *Service) PreflightDatabaseBackup(ctx context.Context, taskID string) error {
+	a, err := s.store.LoadTaskExecution(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if a.Task.EffectiveEngine() != domain.ResticEngine || a.Task.Kind != domain.DatabaseTask || a.Task.Database == nil {
+		return errors.New("only Restic database tasks support a database backup preflight")
+	}
+	if a.Repository.Status != "ready" {
+		return fmt.Errorf("repository is not writable: %s", a.Repository.Status)
+	}
+	repository, sensitive, err := s.repositoryMaterial(ctx, a)
+	if err != nil {
+		return errors.New(safeError(err, sensitive...))
+	}
+	work := func() error {
+		if s.restic == nil {
+			return errors.New("Restic verifier is unavailable")
+		}
+		if _, err := s.restic.Execute(ctx, restic.Operation{Kind: restic.VerifyRepository, Repository: repository}); err != nil {
+			return fmt.Errorf("verify Restic repository: %w", err)
+		}
+		if a.DatabaseConnection == nil || a.DatabaseConnection.Status != "ready" || a.DatabaseConnection.Preflight.CheckedAt.IsZero() || a.DatabaseConnection.Preflight.Error != "" {
+			return errors.New("database connection preflight is missing or failed")
+		}
+		dbPassword, err := s.secrets.Get(ctx, a.DatabasePasswordSecretID, "database-backup-password")
+		if err != nil {
+			return err
+		}
+		sensitive = append(sensitive, string(dbPassword))
+		connection := databaseConnection(a, string(dbPassword))
+		connector := s.mysql
+		if connection.Engine == database.PostgreSQL {
+			connector = s.postgres
+		}
+		if connector == nil {
+			return errors.New("database connector is unavailable")
+		}
+		prepared, _, err := connector.PrepareExport(ctx, connection, a.Task.Database.Database)
+		if err != nil {
+			return err
+		}
+		defer prepared.Cleanup()
+		metadataConnector, ok := connector.(database.MetadataConnector)
+		if !ok {
+			return errors.New("database metadata preflight is unavailable")
+		}
+		probe, err := metadataConnector.PrepareMetadata(ctx, connection, a.Task.Database.Database, prepared.CredentialPath)
+		if err != nil {
+			return err
+		}
+		metadataExecutor := s.metadataExecutor
+		if metadataExecutor == nil {
+			metadataExecutor = command.OSExecutor{}
+		}
+		serverFacts, serverErr := metadataExecutor.Run(ctx, probe.Server)
+		if serverErr != nil || serverFacts.ExitCode != 0 {
+			return fmt.Errorf("query database snapshot metadata: %w", firstExecutionError(serverErr, serverFacts.Stderr))
+		}
+		clientFacts, clientErr := metadataExecutor.Run(ctx, probe.Client)
+		if clientErr != nil || clientFacts.ExitCode != 0 {
+			return fmt.Errorf("query database client version: %w", firstExecutionError(clientErr, clientFacts.Stderr))
+		}
+		if _, err := probe.Parse(serverFacts.Stdout, clientFacts.Stdout); err != nil {
+			return err
+		}
+		prepared.Spec.Args, err = database.PreflightDumpArguments(connection.Engine, prepared.Spec.Args)
+		if err != nil {
+			return err
+		}
+		executor := s.databaseExecutor
+		if executor == nil {
+			executor = s.metadataExecutor
+		}
+		if executor == nil {
+			executor = command.OSExecutor{}
+		}
+		prepared.Spec.Stdout = io.Discard
+		result, runErr := executor.Run(ctx, prepared.Spec)
+		if runErr != nil || result.ExitCode != 0 {
+			return fmt.Errorf("database export preflight failed: %w", firstExecutionError(runErr, result.Stderr))
+		}
+		return nil
+	}
+	if s.repositoryLocker != nil {
+		err = s.repositoryLocker.With(ctx, a.Repository.ID, work)
+	} else {
+		err = work()
+	}
+	if err != nil {
+		return errors.New(safeError(err, sensitive...))
+	}
+	return nil
+}
+
+func databaseConnection(a store.TaskExecution, password string) database.Connection {
+	toolPaths := database.ResolveToolPaths(*a.DatabaseConnection)
+	return database.Connection{Engine: database.Engine(a.DatabaseConnection.Engine), Purpose: database.Backup, Network: database.Network(a.DatabaseConnection.Network), Host: a.DatabaseConnection.Host, Port: a.DatabaseConnection.Port, SocketPath: a.DatabaseConnection.SocketPath, Username: a.DatabaseConnection.Username, Password: password, DumpProgram: toolPaths["dump"], AdminProgram: toolPaths["admin"], TLSMode: a.DatabaseConnection.TLS.Mode, TLSCA: a.DatabaseConnection.TLS.CA, TLSClientCert: a.DatabaseConnection.TLS.ClientCert, TLSClientKey: a.DatabaseConnection.TLS.ClientKey, TLSServerName: a.DatabaseConnection.TLS.ServerName}
 }
 
 func backupResourceArguments(policy domain.ResourcePolicy, includeCompression bool) []string {
@@ -258,11 +378,18 @@ func backupResourceArguments(policy domain.ResourcePolicy, includeCompression bo
 }
 
 func firstExecutionError(err error, stderr string) error {
+	diagnostic := strings.TrimSpace(stderr)
+	if len(diagnostic) > 8<<10 {
+		diagnostic = diagnostic[:8<<10] + "…"
+	}
 	if err != nil {
+		if diagnostic != "" {
+			return fmt.Errorf("%w: %s", err, diagnostic)
+		}
 		return err
 	}
-	if strings.TrimSpace(stderr) != "" {
-		return errors.New(strings.TrimSpace(stderr))
+	if diagnostic != "" {
+		return errors.New(diagnostic)
 	}
 	return errors.New("database metadata command failed")
 }

@@ -26,6 +26,7 @@ type UpgradeStorage interface {
 type UpgradeRemote interface {
 	Probe(context.Context) (Platform, error)
 	StageUpgrade(context.Context, []byte) error
+	VerifyStagedVersion(context.Context, Platform, string) error
 	ActivateUpgrade(context.Context, Platform) error
 	RollbackUpgrade(context.Context, Platform) error
 	FinalizeUpgrade(context.Context, Platform) error
@@ -65,6 +66,14 @@ type UpgradeResult struct {
 // been refreshed. Tool versions and capabilities are reported only by the
 // following authenticated heartbeat; they are never accepted from SSH output.
 type ToolProbeResult struct {
+	AgentID  string `json:"agentId"`
+	HostID   string `json:"hostId"`
+	Platform string `json:"platform"`
+}
+
+// HeartbeatProbeResult describes a managed Agent whose service was restarted
+// and whose next authenticated heartbeat was observed by the Service.
+type HeartbeatProbeResult struct {
 	AgentID  string `json:"agentId"`
 	HostID   string `json:"hostId"`
 	Platform string `json:"platform"`
@@ -164,6 +173,15 @@ func (s *UpgradeService) Upgrade(ctx context.Context, request UpgradeRequest, re
 		}
 		return result, fmt.Errorf("stage Agent upgrade: %w", err)
 	}
+	reportStage(report, "verifying_staged_agent_upgrade")
+	if err := remote.VerifyStagedVersion(ctx, platform, request.TargetVersion); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if cleanupErr := remote.FinalizeUpgrade(cleanupCtx, platform); cleanupErr != nil {
+			return result, fmt.Errorf("verify staged Agent upgrade: %v; clean partial Agent upgrade: %w", err, cleanupErr)
+		}
+		return result, fmt.Errorf("verify staged Agent upgrade: %w", err)
+	}
 	reportStage(report, "activating_agent_upgrade")
 	activatedAt := s.now().UTC()
 	if err := remote.ActivateUpgrade(ctx, platform); err != nil {
@@ -253,6 +271,72 @@ func (s *UpgradeService) ReprobeTools(ctx context.Context, agentID string, repor
 	}
 	reportStage(report, "agent_tool_probe_verified")
 	return ToolProbeResult{AgentID: agent.ID, HostID: host.ID, Platform: platform.OS + "/" + platform.Arch}, nil
+}
+
+// ProbeHeartbeat restarts a managed Agent after draining its active work and
+// waits for the next authenticated heartbeat. The restart still uses the
+// fixed platform command set; this operation does not claim tool capabilities.
+func (s *UpgradeService) ProbeHeartbeat(ctx context.Context, agentID string, report StageReporter) (result HeartbeatProbeResult, resultErr error) {
+	if s == nil || s.store == nil || s.secrets == nil || s.dialer == nil {
+		return result, errors.New("Agent heartbeat prober is not configured")
+	}
+	if !agentIDPattern.MatchString(agentID) {
+		return result, errors.New("valid Agent ID is required")
+	}
+	agent, host, err := s.findManagedAgent(ctx, agentID)
+	if err != nil {
+		return result, err
+	}
+	secretID, err := s.store.RemoteHostPrivateKeySecretID(ctx, host.ID)
+	if err != nil {
+		return result, err
+	}
+	privateKey, err := s.secrets.Get(ctx, secretID, "ssh-private-key")
+	if err != nil {
+		return result, err
+	}
+	defer clear(privateKey)
+
+	reportStage(report, "probing")
+	remote, err := s.dialer.Dial(ctx, Target{
+		Host: host.Host, Port: host.Port, Username: host.Username,
+		PrivateKey: privateKey, KnownHosts: host.HostFingerprint,
+	})
+	if err != nil {
+		return result, err
+	}
+	defer remote.Close()
+	platform, err := remote.Probe(ctx)
+	if err != nil {
+		return result, err
+	}
+
+	reportStage(report, "draining_agent")
+	if err := s.store.BeginAgentDrain(ctx, agent.ID, s.now().UTC()); err != nil {
+		return result, err
+	}
+	defer func() {
+		endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := s.store.EndAgentDrain(endCtx, agent.ID); err != nil && resultErr == nil {
+			resultErr = fmt.Errorf("resume Agent assignments: %w", err)
+		}
+	}()
+	if err := s.waitForDrain(ctx, agent.ID); err != nil {
+		return result, err
+	}
+
+	restartedAt := s.now().UTC()
+	reportStage(report, "restarting_agent_for_heartbeat")
+	if err := remote.Restart(ctx, platform); err != nil {
+		return result, err
+	}
+	reportStage(report, "waiting_for_agent_heartbeat")
+	if err := s.waitForHeartbeat(ctx, agent.ID, restartedAt); err != nil {
+		return result, err
+	}
+	reportStage(report, "agent_heartbeat_verified")
+	return HeartbeatProbeResult{AgentID: agent.ID, HostID: host.ID, Platform: platform.OS + "/" + platform.Arch}, nil
 }
 
 func (s *UpgradeService) findManagedAgent(ctx context.Context, agentID string) (store.AgentRecord, domain.RemoteHost, error) {

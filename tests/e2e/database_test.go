@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -145,6 +146,79 @@ func TestRealPostgreSQLBackupRestore(t *testing.T) {
 		t.Fatalf("non-empty PostgreSQL target err=%v", err)
 	}
 	recordCheck("real-postgresql", "passed", host+":"+portText)
+}
+
+func TestDatabaseBackupPreflightUsesDumpWithoutResticWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("database backup fixture uses a temporary POSIX client fixture")
+	}
+	resticPath := configuredProgram(t, "database-backup-preflight", "RESTIC_CONTROL_E2E_RESTIC", "restic")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	fixture := newDatabaseFixture(t, ctx, resticPath)
+	defer fixture.Close()
+
+	dump := writeExecutableFixture(t, filepath.Join(fixture.root, "mysqldump"), `#!/bin/sh
+case "$*" in
+  *--version*) printf 'mysqldump  Ver 8.4.5\n' ; exit 0 ;;
+esac
+printf 'CREATE TABLE items(id INT PRIMARY KEY);\nINSERT INTO items VALUES (1);\n'
+`)
+	admin := writeExecutableFixture(t, filepath.Join(fixture.root, "mysql"), `#!/bin/sh
+case "$*" in
+  *--version*) printf 'mysql  Ver 8.4.5\n' ; exit 0 ;;
+  *--execute*) printf '8.4.5\tutf8mb4\tutf8mb4_0900_ai_ci\n' ; exit 0 ;;
+esac
+exit 1
+`)
+	now := time.Now().UTC()
+	connectionID := fixture.addConnection(t, ctx, domain.DatabaseConnection{
+		ID: "mysql-test", Name: "fixture mysql", Engine: domain.MySQL, Purpose: domain.BackupConnection,
+		Network: domain.TCPNetwork, Host: "127.0.0.1", Port: 3306, Username: "backup", Status: "ready",
+		Preflight: domain.DatabasePreflight{CheckedAt: now, ClientVersion: "8.4.5", ServerVersion: "8.4.5"},
+		ToolPaths: map[string]string{"dump": dump, "admin": admin}, CreatedAt: now, UpdatedAt: now,
+	}, "fixture-password")
+	task := domain.Task{ID: "database-test-task", Name: "database test", Kind: domain.DatabaseTask, RepositoryID: "repo", Database: &domain.DatabaseSource{ConnectionID: connectionID, Database: "fixture"}, CreatedAt: now, UpdatedAt: now}
+	if err := fixture.store.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	service := backup.New(fixture.store, fixture.secrets, fixture.runner.engine, database.NewMySQL(fixture.tempRoot), database.NewPostgres(fixture.tempRoot), time.Now)
+	service.SetMetadataExecutor(fixture.executor)
+	if err := service.PreflightDatabaseBackup(ctx, task.ID); err != nil {
+		t.Fatalf("database backup preflight failed: %v", err)
+	}
+	snapshots, err := fixture.repo.Snapshots(ctx, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 0 {
+		t.Fatalf("test snapshot was not cleaned up: %+v", snapshots)
+	}
+	failingDump := writeExecutableFixture(t, filepath.Join(fixture.root, "mysqldump-failing"), `#!/bin/sh
+printf 'fixture dump failed\n' >&2
+exit 23
+`)
+	connections, err := fixture.store.ListDatabaseConnections(ctx)
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("connections=%+v err=%v", connections, err)
+	}
+	connections[0].ToolPaths["dump"] = failingDump
+	connections[0].UpdatedAt = time.Now().UTC()
+	if _, err := fixture.store.UpdateDatabaseConnection(ctx, connections[0], ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PreflightDatabaseBackup(ctx, task.ID); err == nil {
+		t.Fatal("database backup preflight accepted a failing dump client")
+	}
+	recordCheck("database-backup-preflight", "passed", "schema-only dump and read-only Restic verification passed without creating a snapshot")
+}
+
+func writeExecutableFixture(t *testing.T, path, content string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 type databaseFixture struct {

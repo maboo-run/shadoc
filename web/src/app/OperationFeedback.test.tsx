@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppAPI } from "./App";
-import { OperationFeedback, useOperation } from "./OperationFeedback";
+import { OperationFeedback, type OperationController, useOperation } from "./OperationFeedback";
 
 function Harness({ api }: { api: AppAPI }) {
   const operation = useOperation(api);
@@ -25,6 +25,42 @@ function AdoptHarness({ api }: { api: AppAPI }) {
 }
 
 describe("long operation feedback", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("keeps Agent terminal feedback compact, dismissible, and auto-hides successful results", () => {
+    vi.useFakeTimers();
+    const operation = {
+      operation: { id: "op-upgrade", kind: "agent_upgrade", status: "success", stage: "agent_upgrade_verified" },
+      active: false,
+      error: "",
+    } as unknown as OperationController;
+    render(<OperationFeedback operation={operation} compact autoDismissSuccess dismissibleTerminal />);
+
+    const message = screen.getByText("Agent 升级完成，新版本心跳已验证");
+    const feedback = message.closest(".operation-feedback") as HTMLElement;
+    expect(feedback).toHaveClass("operation-feedback-compact");
+    expect(within(feedback).getByRole("button", { name: "关闭" })).toBeVisible();
+
+    act(() => vi.advanceTimersByTime(4499));
+    expect(message).toBeVisible();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByText("Agent 升级完成，新版本心跳已验证")).not.toBeInTheDocument();
+  });
+
+  it("allows a terminal Agent diagnostic to be closed manually", () => {
+    const operation = {
+      operation: { id: "op-upgrade-failed", kind: "agent_upgrade", status: "failed", stage: "failed", errorSummary: "暂存程序版本不匹配" },
+      active: false,
+      error: "",
+    } as unknown as OperationController;
+    render(<OperationFeedback operation={operation} compact dismissibleTerminal />);
+
+    const message = screen.getByText("Agent 升级失败，系统已尝试恢复旧版本");
+    const feedback = message.closest(".operation-feedback") as HTMLElement;
+    fireEvent.click(within(feedback).getByRole("button", { name: "关闭" }));
+    expect(screen.queryByText("Agent 升级失败，系统已尝试恢复旧版本")).not.toBeInTheDocument();
+  });
+
   it("can adopt an operation accepted by a non-JSON upload request", async () => {
     const action = vi.fn(async () => ({ id: "op-upload", kind: "control_plane_import", status: "success", stage: "completed" }));
     render(<AdoptHarness api={{ action } as unknown as AppAPI} />);

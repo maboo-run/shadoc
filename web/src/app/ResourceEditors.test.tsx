@@ -4,6 +4,26 @@ import { describe, expect, it, vi } from "vitest";
 import { RepositoryEditor, TaskEditor } from "./ResourceEditors";
 
 describe("RepositoryEditor connection mode", () => {
+  it("submits a backend-compatible payload when editing a local repository", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (_payload: Record<string, unknown>) => undefined);
+    const api = {
+      listResource: async () => [],
+      createResource: async () => ({}),
+      updateResource: async () => undefined,
+      action: async (path: string) => path.endsWith("/maintenance-policy") ? { enabled: false } : {},
+      saveMaintenance: async () => undefined,
+    };
+    render(<RepositoryEditor api={api} initial={{ id: "repo-1", name: "数据库备份", engine: "restic", kind: "local", path: "/backup/db", status: "ready" }} onClose={() => undefined} onSubmit={onSubmit} />);
+
+    await user.click(await screen.findByRole("button", { name: "保存仓库" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: "数据库备份", engine: "restic", kind: "local", remoteHostId: "", path: "/backup/db",
+      password: "", passwordConfirmed: true,
+    });
+  });
+
   it("submits an existing repository for read-only connection without a maintenance policy", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(async (_payload: Record<string, unknown>) => undefined);
@@ -137,6 +157,45 @@ describe("TaskEditor health policy", () => {
 });
 
 describe("TaskEditor activation guidance", () => {
+  it("saves a disabled database draft, runs the backup preflight, and enables only after success", async () => {
+    const user = userEvent.setup();
+    const updateResource = vi.fn(async (_resource: string, _id: string, _payload: Record<string, unknown>) => undefined);
+    const onSaved = vi.fn(async () => undefined);
+    let polls = 0;
+    const api = {
+      listResource: async (resource: string) => {
+        if (resource === "repositories") return [{ id: "repo-db", name: "数据库仓库", engine: "restic", kind: "local", path: "/backup/db", status: "ready" }];
+        if (resource === "database-connections") return [{ id: "connection-db", name: "MySQL", engine: "mysql", purpose: "backup", host: "192.168.0.104" }];
+        return [];
+      },
+      createResource: async () => ({}),
+      updateResource,
+      action: async (path: string) => {
+        if (path === "/api/tasks/task-db/database-backup-preflight") return { operationId: "db-preflight-op", status: "queued", kind: "database_backup_preflight" };
+        if (path === "/api/operations/db-preflight-op") {
+          polls += 1;
+          return { id: "db-preflight-op", kind: "database_backup_preflight", status: polls > 1 ? "success" : "running", stage: polls > 1 ? "database_backup_preflighted" : "preflighting_database_backup" };
+        }
+        return {};
+      },
+      saveMaintenance: async () => undefined,
+    };
+    const initial = {
+      id: "task-db", name: "数据库备份", engine: "restic", kind: "database", repositoryId: "repo-db", enabled: false,
+      executionTarget: { kind: "local" }, database: { connectionId: "connection-db", database: "app" },
+      retention: {}, resources: { compression: "auto" }, health: { maxSuccessAgeHours: 48 },
+    };
+    render(<TaskEditor api={api} initial={initial} onClose={() => undefined} onDraftSaved={async () => undefined} onSaved={onSaved} />);
+
+    await user.selectOptions(await screen.findByLabelText("任务状态"), "true");
+    await user.click(screen.getByRole("button", { name: "预检并启用" }));
+
+    await waitFor(() => expect(updateResource).toHaveBeenCalledTimes(2), { timeout: 5000 });
+    expect(updateResource.mock.calls[0][2]).toMatchObject({ enabled: false });
+    expect(updateResource.mock.calls[1][2]).toMatchObject({ enabled: true, databaseBackupPreflightOperationId: "db-preflight-op" });
+    expect(onSaved).toHaveBeenCalledOnce();
+  });
+
   it("generates a scope preview and asks for confirmation when saving an unpreviewed task as enabled", async () => {
     const user = userEvent.setup();
     const updateResource = vi.fn(async () => undefined);

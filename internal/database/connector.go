@@ -70,6 +70,41 @@ type Connector interface {
 	PrepareExport(context.Context, Connection, string) (PreparedCommand, SnapshotMetadata, error)
 }
 
+// PreflightDumpArguments returns the fixed, engine-specific arguments used to
+// validate a logical export without copying table data or writing a Restic
+// snapshot. The caller must still use the prepared command and its cleanup.
+func PreflightDumpArguments(engine Engine, args []string) ([]string, error) {
+	result := append([]string(nil), args...)
+	switch engine {
+	case MySQL:
+		for index, argument := range result {
+			if argument != "--" {
+				continue
+			}
+			withFlag := make([]string, 0, len(result)+1)
+			withFlag = append(withFlag, result[:index]...)
+			withFlag = append(withFlag, "--no-data")
+			withFlag = append(withFlag, result[index:]...)
+			return withFlag, nil
+		}
+		return nil, errors.New("MySQL dump command is missing its database delimiter")
+	case PostgreSQL:
+		for index, argument := range result {
+			if argument != "--dbname" {
+				continue
+			}
+			withFlag := make([]string, 0, len(result)+1)
+			withFlag = append(withFlag, result[:index]...)
+			withFlag = append(withFlag, "--schema-only")
+			withFlag = append(withFlag, result[index:]...)
+			return withFlag, nil
+		}
+		return nil, errors.New("PostgreSQL dump command is missing its database option")
+	default:
+		return nil, fmt.Errorf("unsupported database engine %q", engine)
+	}
+}
+
 type PreparedMetadata struct {
 	Server command.Spec
 	Client command.Spec

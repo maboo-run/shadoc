@@ -50,6 +50,9 @@ const (
 	linuxUpgradeUploadCommand     = `umask 077; mkdir -p "$HOME/.local/bin"; cat > "$HOME/.local/bin/shadoc-agent.upgrade"; chmod 0700 "$HOME/.local/bin/shadoc-agent.upgrade"`
 	darwinUpgradeUploadCommand    = linuxUpgradeUploadCommand
 	windowsUpgradeUploadCommand   = `powershell.exe -NoProfile -NonInteractive -Command "$r=Join-Path $env:ProgramData 'shadoc-agent';New-Item -ItemType Directory -Force $r|Out-Null;$f=[IO.File]::Open((Join-Path $r 'shadoc-agent.upgrade.exe'),[IO.FileMode]::Create,[IO.FileAccess]::Write);[Console]::OpenStandardInput().CopyTo($f);$f.Close()"`
+	linuxStagedVersionCommand     = `set -eu; "$HOME/.local/bin/shadoc-agent.upgrade" --version`
+	darwinStagedVersionCommand    = linuxStagedVersionCommand
+	windowsStagedVersionCommand   = `powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop';$f=Join-Path $env:ProgramData 'shadoc-agent\shadoc-agent.upgrade.exe';if(!(Test-Path $f)){throw 'staged Agent binary is missing'};& $f --version;if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}"`
 	linuxUpgradeActivateCommand   = `set -eu; upgrade="$HOME/.local/bin/shadoc-agent.upgrade"; if [ -x "$HOME/.local/bin/shadoc-agent" ]; then active="$HOME/.local/bin/shadoc-agent"; service=shadoc-agent.service; else active="$HOME/.local/bin/restic-control-agent"; service=restic-control-agent.service; fi; previous="$active.previous"; test -x "$active"; test -x "$upgrade"; rm -f "$previous" "$active.failed"; mv "$active" "$previous"; mv "$upgrade" "$active"; if ! systemctl --user restart "$service"; then mv "$active" "$active.failed"; mv "$previous" "$active"; systemctl --user restart "$service"; exit 1; fi`
 	darwinUpgradeActivateCommand  = `set -eu; domain="gui/$(id -u)"; upgrade="$HOME/.local/bin/shadoc-agent.upgrade"; if [ -x "$HOME/.local/bin/shadoc-agent" ]; then active="$HOME/.local/bin/shadoc-agent"; plist="$HOME/Library/LaunchAgents/io.shadoc-agent.plist"; else active="$HOME/.local/bin/restic-control-agent"; plist="$HOME/Library/LaunchAgents/io.restic-control-agent.plist"; fi; previous="$active.previous"; test -x "$active"; test -x "$upgrade"; rm -f "$previous" "$active.failed"; mv "$active" "$previous"; mv "$upgrade" "$active"; launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true; if ! launchctl bootstrap "$domain" "$plist"; then mv "$active" "$active.failed"; mv "$previous" "$active"; launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true; launchctl bootstrap "$domain" "$plist"; exit 1; fi`
 	windowsUpgradeActivateCommand = `powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop';$newRoot=Join-Path $env:ProgramData 'shadoc-agent';if(Test-Path (Join-Path $newRoot 'shadoc-agent.exe')){$r=$newRoot;$name='shadoc-agent';$file='shadoc-agent.exe'}else{$r=Join-Path $env:ProgramData 'restic-control-agent';$name='restic-control-agent';$file='restic-control-agent.exe'};$a=Join-Path $r $file;$p=$a+'.previous';$u=Join-Path $newRoot 'shadoc-agent.upgrade.exe';Stop-Service $name -Force;Remove-Item $p -Force -ErrorAction SilentlyContinue;Move-Item $a $p;Move-Item $u $a;try{Start-Service $name}catch{Move-Item $a ($a+'.failed') -Force;Move-Item $p $a;Start-Service $name;throw}`
@@ -154,6 +157,31 @@ func (r *Remote) Upload(ctx context.Context, file RemoteFile, content []byte) er
 
 func (r *Remote) StageUpgrade(ctx context.Context, content []byte) error {
 	return r.Upload(ctx, UpgradeBinaryFile, content)
+}
+
+func (r *Remote) VerifyStagedVersion(ctx context.Context, platform Platform, expected string) error {
+	if r == nil || r.runner == nil {
+		return errors.New("SSH command runner is required")
+	}
+	command, err := upgradeCommand(platform.OS, linuxStagedVersionCommand, darwinStagedVersionCommand, windowsStagedVersionCommand)
+	if err != nil {
+		return err
+	}
+	output, err := r.runner.Run(ctx, command, nil)
+	if err != nil {
+		return fmt.Errorf("读取暂存 Agent 版本失败: %w", err)
+	}
+	if len(output) > 256 {
+		return errors.New("暂存 Agent 版本输出过大")
+	}
+	actual := strings.TrimSpace(string(output))
+	if actual == "" {
+		return errors.New("暂存 Agent 未报告版本")
+	}
+	if actual != expected {
+		return fmt.Errorf("暂存 Agent 报告版本 %q，目标版本为 %q；请重新执行与控制服务版本一致的完整构建", actual, expected)
+	}
+	return nil
 }
 
 func (r *Remote) ActivateUpgrade(ctx context.Context, platform Platform) error {

@@ -108,6 +108,14 @@ Each Restic task exclusively owns one repository. Do not combine unrelated data 
 | `pg_dump`, `pg_restore` | Logical PostgreSQL backup and restore | Install official clients compatible with the target database. Shadoc does not install database clients automatically. |
 | SSH/SFTP service | SFTP repositories, SSH-based rsync, and remote Agent deployment | Obtain and verify the actual host key. Shadoc never silently accepts unknown or changed host keys. |
 
+If `restic` works in a terminal but initialization says it is missing, the macOS LaunchAgent or another background service usually did not inherit the terminal `PATH`. The control Service prefers the application-managed Restic, then checks the service `PATH` and common system locations; if none is available, install Restic from the Compatibility Center and restart the control Service. Initialization errors now distinguish a missing Restic executable from a repository-directory problem.
+
+During Service startup, Shadoc resolves and probes the local Restic/rsync executable paths and caches the resulting compatibility report. The Compatibility Center, diagnostics export, and actual tasks reuse that result instead of probing again for each page; restart the control Service after installing or replacing a tool. Remote Agent tool versions and each database connection's official clients are still verified independently.
+
+The common database connection form only requires a name, database type/purpose, address, account, password, and TLS mode. “Test connection” uses the built-in Go driver for network, TLS, authentication, and purpose-permission checks; actual backup and restore still invoke `mysqldump`/`mysql` or `pg_dump`/`pg_restore`. The control Service automatically discovers the required official clients on the system `PATH`; enter absolute paths in Advanced settings only when discovery fails. MySQL “preferred TLS” uses the client’s portable default so MariaDB and older MySQL clients do not fail on the unsupported `--ssl-mode` option. Shadoc does not install database clients automatically.
+
+When a database task is saved with “Preflight and enable”, Shadoc first saves a disabled draft and starts a durable lightweight preflight: it verifies read-only access to the Restic repository and runs the official dump client in `--no-data`/`--schema-only` mode without creating a database backup snapshot. Only after it succeeds does the task become enabled; a failure leaves the task disabled and exposes the diagnostic in the operation details. Enabled schedules are not stopped because a preflight is older than 24 hours; actual runs still record real export or repository failures.
+
 Database backups stream logical exports directly into Restic. Shadoc does not copy live database files or write an unencrypted intermediate export to disk.
 
 ## Service Management

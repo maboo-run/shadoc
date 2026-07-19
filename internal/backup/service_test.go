@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,13 +39,50 @@ func (r *s3LeakRestic) Execute(_ context.Context, operation restic.Operation) (r
 	return restic.Result{Outcome: restic.Success, SnapshotID: "snapshot-s3", Stdout: strings.Join([]string{operation.Repository.Password, operation.Repository.S3AccessKey, operation.Repository.S3SecretKey}, " ")}, nil
 }
 
-type metadataExecutor struct{}
+type metadataExecutor struct {
+	exitCode int
+	stderr   string
+}
 
-func (metadataExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
+type legacyMySQLMetadataExecutor struct {
+	dump  string
+	admin string
+}
+
+func (e legacyMySQLMetadataExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
+	if spec.Program == e.dump {
+		for _, argument := range spec.Args {
+			if argument == "--database" {
+				return command.Result{ExitCode: 2, Stderr: "mysqldump: [ERROR] unknown option '--database'."}, errors.New("exit status 2")
+			}
+		}
+		return command.Result{ExitCode: 0, Stdout: "mysqldump  Ver 8.4.5"}, nil
+	}
+	if spec.Program == e.admin {
+		return command.Result{ExitCode: 0, Stdout: "8.4.5\tutf8mb4\tutf8mb4_0900_ai_ci\n"}, nil
+	}
+	return command.Result{ExitCode: 0}, nil
+}
+
+func (e metadataExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
+	if e.exitCode != 0 {
+		return command.Result{ExitCode: e.exitCode, Stderr: e.stderr}, fmt.Errorf("exit status %d", e.exitCode)
+	}
 	if strings.HasSuffix(spec.Program, "mysqldump") {
 		return command.Result{ExitCode: 0, Stdout: "mysqldump  Ver 8.4.5"}, nil
 	}
 	return command.Result{ExitCode: 0, Stdout: "8.4.5\tutf8mb4\tutf8mb4_0900_ai_ci\n"}, nil
+}
+
+type recordingDatabaseExecutor struct {
+	specs    []command.Spec
+	exitCode int
+	stderr   string
+}
+
+func (e *recordingDatabaseExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
+	e.specs = append(e.specs, spec)
+	return command.Result{ExitCode: e.exitCode, Stderr: e.stderr}, nil
 }
 
 func (f *fakeRestic) Execute(_ context.Context, operation restic.Operation) (restic.Result, error) {
@@ -89,7 +128,7 @@ func TestServiceExecutesDirectoryAndDatabaseTasksAndPersistsRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.CreateDatabaseConnection(context.Background(), domain.DatabaseConnection{ID: "conn", Name: "mysql", Engine: domain.MySQL, Purpose: domain.BackupConnection, Network: domain.TCPNetwork, Host: "127.0.0.1", Port: 3306, Username: "backup", ToolPaths: map[string]string{"dump": "/tools/mysqldump", "admin": "/tools/mysql"}, Status: "ready", Preflight: domain.DatabasePreflight{CheckedAt: now, ClientVersion: "8.0", ServerVersion: "8.0"}, CreatedAt: now, UpdatedAt: now}, "dbpass"); err != nil {
+	if err := s.CreateDatabaseConnection(context.Background(), domain.DatabaseConnection{ID: "conn", Name: "mysql", Engine: domain.MySQL, Purpose: domain.BackupConnection, Network: domain.TCPNetwork, Host: "127.0.0.1", Port: 3306, Username: "backup", ToolPaths: map[string]string{"dump": "/tools/mysqldump", "admin": "/tools/mysql"}, Status: "ready", Preflight: domain.DatabasePreflight{CheckedAt: now.Add(-48 * time.Hour), ClientVersion: "8.0", ServerVersion: "8.0"}, CreatedAt: now, UpdatedAt: now}, "dbpass"); err != nil {
 		t.Fatal(err)
 	}
 	for _, task := range []domain.Task{{ID: "t1", Name: "photos", Kind: domain.DirectoryTask, RepositoryID: "r1", Directory: &domain.DirectorySource{Path: "/srv/photos"}, Resources: domain.ResourcePolicy{UploadKiBPerSecond: 128, ReadConcurrency: 4, Compression: "max"}, ScopeConfirmation: domain.TaskScopeConfirmation{PreviewID: "preview-1", Fingerprint: "fingerprint-1", ConfirmedBy: "admin", ConfirmedAt: now, Summary: map[string]any{"includedFiles": 4}}, Enabled: true, CreatedAt: now, UpdatedAt: now}, {ID: "t2", Name: "gitea", Kind: domain.DatabaseTask, RepositoryID: "r2", Database: &domain.DatabaseSource{ConnectionID: "conn", Database: "gitea"}, Resources: domain.ResourcePolicy{UploadKiBPerSecond: 64, ReadConcurrency: 2, Compression: "off"}, Enabled: true, CreatedAt: now, UpdatedAt: now}} {
@@ -192,6 +231,145 @@ func TestServiceExecutesDirectoryAndDatabaseTasksAndPersistsRuns(t *testing.T) {
 	}
 }
 
+func TestDatabaseBackupPreflightChecksDumpWithoutWritingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	for id, purpose := range map[string]string{
+		"repo-password": "repository-password",
+		"db-password":   "database-backup-password",
+	} {
+		if err := s.SaveSecret(ctx, id, purpose, []byte("cipher"), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateRepository(ctx, domain.Repository{
+		ID: "repo", Name: "database", Kind: domain.LocalRepository, Path: "/repo", Status: "ready", CreatedAt: now, UpdatedAt: now,
+	}, "repo-password"); err != nil {
+		t.Fatal(err)
+	}
+	dump := filepath.Join(t.TempDir(), "mysqldump")
+	admin := filepath.Join(t.TempDir(), "mysql")
+	for _, program := range []string{dump, admin} {
+		if err := os.WriteFile(program, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateDatabaseConnection(ctx, domain.DatabaseConnection{
+		ID: "connection", Name: "mysql", Engine: domain.MySQL, Purpose: domain.BackupConnection,
+		Network: domain.TCPNetwork, Host: "127.0.0.1", Port: 3306, Username: "backup",
+		ToolPaths: map[string]string{"dump": dump, "admin": admin}, Status: "ready",
+		Preflight: domain.DatabasePreflight{CheckedAt: now, ClientVersion: "8.4", ServerVersion: "8.4"}, CreatedAt: now, UpdatedAt: now,
+	}, "db-password"); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{
+		ID: "task", Name: "database", Kind: domain.DatabaseTask, RepositoryID: "repo",
+		Database: &domain.DatabaseSource{ConnectionID: "connection", Database: "app"}, Enabled: false,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRestic{}
+	service := New(s, secretReader{
+		"repo-password": []byte("repo-secret"),
+		"db-password":   []byte("db-secret"),
+	}, runner, database.NewMySQL(t.TempDir()), database.NewPostgres(t.TempDir()), time.Now)
+	executor := &recordingDatabaseExecutor{}
+	service.SetMetadataExecutor(metadataExecutor{})
+	service.SetDatabaseExecutor(executor)
+
+	if err := service.PreflightDatabaseBackup(ctx, task.ID); err != nil {
+		t.Fatalf("database backup preflight error: %v", err)
+	}
+	if len(runner.operations) != 1 || runner.operations[0].Kind != restic.VerifyRepository {
+		t.Fatalf("preflight Restic operations=%+v", runner.operations)
+	}
+	if len(executor.specs) != 1 || executor.specs[0].Program != dump {
+		t.Fatalf("preflight dump commands=%+v", executor.specs)
+	}
+	hasNoData := false
+	for _, argument := range executor.specs[0].Args {
+		if argument == "--no-data" {
+			hasNoData = true
+		}
+	}
+	if !hasNoData {
+		t.Fatalf("MySQL preflight did not request no data: %+v", executor.specs[0].Args)
+	}
+	service.SetMetadataExecutor(metadataExecutor{exitCode: 2, stderr: "mysql: unknown option '--ssl-mode=PREFERRED'"})
+	if err := service.PreflightDatabaseBackup(ctx, task.ID); err == nil || !strings.Contains(err.Error(), "unknown option") {
+		t.Fatalf("metadata client diagnostic was hidden: %v", err)
+	}
+	service.SetMetadataExecutor(metadataExecutor{})
+	executor.exitCode = 23
+	executor.stderr = "password=db-secret fixture dump failed"
+	if err := service.PreflightDatabaseBackup(ctx, task.ID); err == nil {
+		t.Fatal("database backup preflight accepted a failing dump client")
+	} else if strings.Contains(err.Error(), "db-secret") {
+		t.Fatalf("preflight error leaked database password: %v", err)
+	}
+	for _, operation := range runner.operations {
+		if operation.Kind == restic.BackupCommand || operation.Kind == restic.ForgetSnapshots {
+			t.Fatalf("preflight wrote a snapshot: %+v", runner.operations)
+		}
+	}
+}
+
+func TestDatabaseBackupPreflightRepairsLegacyMySQLAdminPath(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	for id, purpose := range map[string]string{"repo-password": "repository-password", "db-password": "database-backup-password"} {
+		if err := s.SaveSecret(ctx, id, purpose, []byte("cipher"), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateRepository(ctx, domain.Repository{ID: "repo", Name: "database", Kind: domain.LocalRepository, Path: "/repo", Status: "ready", CreatedAt: now, UpdatedAt: now}, "repo-password"); err != nil {
+		t.Fatal(err)
+	}
+	toolsDir := t.TempDir()
+	dump := filepath.Join(toolsDir, "mysqldump")
+	admin := filepath.Join(toolsDir, "mysql")
+	for _, program := range []string{dump, admin} {
+		if err := os.WriteFile(program, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", toolsDir)
+	if err := s.CreateDatabaseConnection(ctx, domain.DatabaseConnection{
+		ID: "connection", Name: "mysql", Engine: domain.MySQL, Purpose: domain.BackupConnection,
+		Network: domain.TCPNetwork, Host: "127.0.0.1", Port: 3306, Username: "backup",
+		// This is the legacy bad state observed in the failed task: the dump
+		// client was also persisted as the metadata/admin client.
+		ToolPaths: map[string]string{"dump": dump, "admin": dump}, Status: "ready",
+		Preflight: domain.DatabasePreflight{CheckedAt: now, ClientVersion: "8.4", ServerVersion: "8.4"}, CreatedAt: now, UpdatedAt: now,
+	}, "db-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, domain.Task{
+		ID: "task", Name: "database", Kind: domain.DatabaseTask, RepositoryID: "repo",
+		Database: &domain.DatabaseSource{ConnectionID: "connection", Database: "app"}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := New(s, secretReader{"repo-password": []byte("repo-secret"), "db-password": []byte("db-secret")}, &fakeRestic{}, database.NewMySQL(t.TempDir()), database.NewPostgres(t.TempDir()), time.Now)
+	service.SetMetadataExecutor(legacyMySQLMetadataExecutor{dump: dump, admin: admin})
+	service.SetDatabaseExecutor(&recordingDatabaseExecutor{})
+	if err := service.PreflightDatabaseBackup(ctx, "task"); err != nil {
+		t.Fatalf("legacy admin path should be repaired before metadata query: %v", err)
+	}
+}
+
 func TestServiceBuildsStructuredS3MaterialAndRedactsEveryCredential(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -270,6 +448,13 @@ func TestSafeErrorRedactsSecrets(t *testing.T) {
 	got := safeError(errors.New("connection failed using super-secret"), "super-secret")
 	if strings.Contains(got, "super-secret") || !strings.Contains(got, "[redacted]") {
 		t.Fatalf("unsafe error summary: %q", got)
+	}
+}
+
+func TestFirstExecutionErrorIncludesClientDiagnostic(t *testing.T) {
+	got := firstExecutionError(errors.New("exit status 2"), "mysql: unknown option '--ssl-mode=PREFERRED'")
+	if !strings.Contains(got.Error(), "exit status 2") || !strings.Contains(got.Error(), "unknown option") {
+		t.Fatalf("execution diagnostic = %q", got)
 	}
 }
 
