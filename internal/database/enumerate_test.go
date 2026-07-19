@@ -106,23 +106,32 @@ func TestSystemEnumeratorListsPostgreSQLDatabasesWithoutShellOrPasswordEnvironme
 	}
 }
 
-func TestSystemEnumeratorRejectsConnectionsWithoutFreshBackupPreflight(t *testing.T) {
+func TestSystemEnumeratorRejectsConnectionsWithoutValidBackupPreflight(t *testing.T) {
 	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	admin := filepath.Join(t.TempDir(), "mysql")
+	if err := os.WriteFile(admin, []byte("stub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	base := domain.DatabaseConnection{
 		Name: "production", Engine: domain.MySQL, Purpose: domain.BackupConnection, Network: domain.TCPNetwork,
-		Host: "db.internal", Port: 3306, Username: "backup", ToolPaths: map[string]string{"admin": "/usr/bin/mysql"},
+		Host: "db.internal", Port: 3306, Username: "backup", ToolPaths: map[string]string{"admin": admin},
 		Status: "ready", Preflight: domain.DatabasePreflight{CheckedAt: now.Add(-25 * time.Hour)},
 	}
-	executor := &enumerationExecutor{}
+	executor := &enumerationExecutor{result: command.Result{Stdout: "app\n"}}
 	service := SystemEnumerator{Executor: executor, Now: func() time.Time { return now }}
-	if _, err := service.List(t.Context(), base, "secret"); err == nil || !strings.Contains(err.Error(), "预检") {
-		t.Fatalf("stale preflight error=%v", err)
+	if items, err := service.List(t.Context(), base, "secret"); err != nil || !slices.Equal(items, []string{"app"}) {
+		t.Fatalf("old but valid preflight items=%v err=%v", items, err)
 	}
+	executor.specs = nil
 	base.Preflight.CheckedAt = now.Add(time.Second)
 	if _, err := service.List(t.Context(), base, "secret"); err == nil || !strings.Contains(err.Error(), "预检") {
 		t.Fatalf("future preflight error=%v", err)
 	}
 	base.Preflight.CheckedAt = now
+	base.Preflight.Error = "failed"
+	if _, err := service.List(t.Context(), base, "secret"); err == nil || !strings.Contains(err.Error(), "预检") {
+		t.Fatalf("failed preflight error=%v", err)
+	}
 	base.Purpose = domain.RestoreConnection
 	if _, err := service.List(t.Context(), base, "secret"); err == nil || !strings.Contains(err.Error(), "备份连接") {
 		t.Fatalf("restore connection error=%v", err)

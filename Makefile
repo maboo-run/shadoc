@@ -26,6 +26,7 @@ build: web
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.applicationVersion=$(VERSION)" -o dist/shadoc-agent-windows-amd64.exe ./cmd/restic-control-agent
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.applicationVersion=$(VERSION)" -o dist/shadoc-agent-windows-arm64.exe ./cmd/restic-control-agent
 	cp dist/shadoc-agent-$(shell go env GOOS)-$(shell go env GOARCH) dist/shadoc-agent
+	test "$$(dist/shadoc-agent --version)" = "$(VERSION)"
 verify-release-version:
 	./scripts/validate-release-version.sh "$(VERSION)"
 release: verify-release-version build

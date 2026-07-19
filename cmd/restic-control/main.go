@@ -283,13 +283,7 @@ func run(serve serveOptions, overrideConfig bool) error {
 	lifecycleService := lifecycle.New(s)
 	executor := command.OSExecutor{}
 	managedResticPath := filepath.Join(cfg.DataDir, "bin", "restic")
-	resticPath := managedResticPath
-	if _, statErr := os.Stat(managedResticPath); statErr != nil {
-		resticPath, _ = exec.LookPath("restic")
-		if resticPath == "" {
-			resticPath = managedResticPath
-		}
-	}
+	resticPath := selectLocalResticProgram(managedResticPath, runtime.GOOS, exec.LookPath, os.Stat)
 	tempRoot := filepath.Join(cfg.DataDir, "run")
 	resticEngine := restic.New(resticPath, executor, tempRoot)
 	rsyncProbeContext, cancelRsyncProbe := context.WithTimeout(context.Background(), 10*time.Second)
@@ -338,7 +332,20 @@ func run(serve serveOptions, overrideConfig bool) error {
 	taskRunner.SetAgentRunner(agenttask.New(s, time.Now))
 	taskRunner.SetObserver(alertService)
 	taskRunner.AddObserver(repositorycapacity.NewRunObserver(s, repositoryCapacityService, time.Now))
-	toolPaths := compat.ToolPaths{Restic: resticPath, Rsync: rsyncPath}
+	toolPaths := compat.ToolPaths{
+		Restic:          resticPath,
+		Rsync:           rsyncPath,
+		MySQLDump:       localToolPath("mysqldump"),
+		MySQLRestore:    localToolPath("mysql"),
+		PostgresDump:    localToolPath("pg_dump"),
+		PostgresRestore: localToolPath("pg_restore"),
+	}
+	compatibilityContext, cancelCompatibilityProbe := context.WithTimeout(context.Background(), 10*time.Second)
+	initialCompatibility := compat.Merge(
+		compat.System(cfg.DataDir),
+		compat.NewProbe(executor).Tools(compatibilityContext, toolPaths),
+	)
+	cancelCompatibilityProbe()
 
 	setupToken := ""
 	if host, _, splitErr := net.SplitHostPort(cfg.Listen); splitErr == nil {
@@ -371,11 +378,11 @@ func run(serve serveOptions, overrideConfig bool) error {
 	managedBinary := existingManagedApplicationBinary(cfg.DataDir)
 	applicationUpdater := appinstall.NewWebUpdater(executable, cfg.DataDir, cfg.Listen, runningFromManagedPath(executable, managedBinary), serviceinstall.LaunchUpdater)
 	apiServer := httpapi.NewWithRuntime(s, authManager, secretManager, httpapi.Runtime{
-		Runner: taskRunner, Repositories: repositoryService, Paths: toolPaths, Installer: resticInstaller,
-		SelectRestic: resticEngine.SetProgram, DatabaseRestore: databaseRestoreService, Ntfy: ntfyClient, Webhook: webhookClient,
+		Runner: taskRunner, Repositories: repositoryService, Paths: toolPaths, Compatibility: initialCompatibility, Installer: resticInstaller, DatabaseBackupPreflighter: backupService,
+		SelectRestic: resticEngine.SetProgram, DatabaseRestore: databaseRestoreService, DumpFileRestore: dbrestore.NewDumpFileService(repositoryService), Ntfy: ntfyClient, Webhook: webhookClient,
 		DataDir: cfg.DataDir, SetupToken: setupToken, Vault: vaultController, Lifecycle: lifecycleService,
 		ApplicationVersion: applicationVersion, ApplicationReleases: releaseCatalog, ApplicationUpdater: applicationUpdater,
-		AgentService: agentService, AgentUninstaller: agentService, AgentUpgrader: agentService, AgentToolProber: agentService, AgentResticInstaller: agentResticInstaller,
+		AgentService: agentService, AgentUninstaller: agentService, AgentUpgrader: agentService, AgentToolProber: agentService, AgentHeartbeatProber: agentService, AgentResticInstaller: agentResticInstaller,
 		AgentRestore:       agentRestoreService,
 		RepositoryCapacity: repositoryCapacityService, TaskPreviewer: taskPreviewService, Alerts: alertService,
 		LocalFilesystem: localFilesystemService,
@@ -459,6 +466,45 @@ func selectLocalRsyncProgram(ctx context.Context, executor command.Executor, goo
 		return "", errors.New("rsync executable was not found")
 	}
 	return "", fmt.Errorf("rsync 3 or newer is unavailable: %w", errors.Join(probeErrors...))
+}
+
+func localToolPath(name string) string {
+	program, err := exec.LookPath(name)
+	if err != nil {
+		return ""
+	}
+	return program
+}
+
+func selectLocalResticProgram(managedPath, goos string, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) string {
+	if stat == nil {
+		stat = os.Stat
+	}
+	candidates := []string{managedPath}
+	if lookPath != nil {
+		if program, err := lookPath("restic"); err == nil {
+			candidates = append(candidates, program)
+		}
+	}
+	if goos == "darwin" {
+		candidates = append(candidates, "/opt/homebrew/bin/restic", "/usr/local/bin/restic")
+	}
+	if goos == "linux" {
+		candidates = append(candidates, "/usr/local/bin/restic", "/usr/bin/restic", "/snap/bin/restic")
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, program := range candidates {
+		program = strings.TrimSpace(program)
+		if program == "" || seen[program] {
+			continue
+		}
+		seen[program] = true
+		info, err := stat(program)
+		if err == nil && info.Mode().IsRegular() && (goos == "windows" || info.Mode().Perm()&0o111 != 0) {
+			return program
+		}
+	}
+	return managedPath
 }
 
 type capacityMonitorRunner interface {

@@ -58,6 +58,29 @@ func TestSelectLocalRsyncProgramSkipsIncompatibleSystemVersion(t *testing.T) {
 	}
 }
 
+func TestSelectLocalResticProgramUsesKnownHomebrewPathWhenServicePATHMissesIt(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "restic")
+	if err := os.WriteFile(executable, []byte("restic"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := func(path string) (os.FileInfo, error) {
+		if path == "/opt/homebrew/bin/restic" {
+			return info, nil
+		}
+		return os.Stat(path)
+	}
+	program := selectLocalResticProgram(filepath.Join(t.TempDir(), "bin", "restic"), "darwin", func(string) (string, error) {
+		return "", errors.New("restic is not on the service PATH")
+	}, stat)
+	if program != "/opt/homebrew/bin/restic" {
+		t.Fatalf("program=%q", program)
+	}
+}
+
 func TestRunningFromManagedPathUsesFileIdentity(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "restic-control")

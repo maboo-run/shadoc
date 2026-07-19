@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maboo-run/shadoc/internal/database"
 	"github.com/maboo-run/shadoc/internal/dbrestore"
 	"github.com/maboo-run/shadoc/internal/domain"
 	repositoryservice "github.com/maboo-run/shadoc/internal/repository"
@@ -339,6 +340,59 @@ var _ error = restoreResidualError{}
 type cleanupDatabaseRestore struct {
 	request  dbrestore.Request
 	restored chan dbrestore.Request
+}
+
+type dumpFileRestoreStub struct {
+	request dbrestore.DumpFileRequest
+}
+
+func (m *dumpFileRestoreStub) Restore(_ context.Context, request dbrestore.DumpFileRequest) error {
+	m.request = request
+	return nil
+}
+
+func (m *dumpFileRestoreStub) Preflight(_ context.Context, request dbrestore.DumpFileRequest) (dbrestore.DumpFilePreflightResult, error) {
+	m.request = request
+	return dbrestore.DumpFilePreflightResult{
+		Metadata: database.SnapshotMetadata{Engine: database.MySQL, Database: "maboo_course", Format: "sql", Filename: "maboo_course.sql"},
+		Target:   filepath.Join(request.TargetDirectory, "maboo_course.sql"),
+		Behavior: "create_file",
+	}, nil
+}
+
+func TestDatabaseDumpFileRestorePreflightAndStartUsesConfirmedTarget(t *testing.T) {
+	srv := newResourceTestServer(t)
+	manager := &dumpFileRestoreStub{}
+	srv.dumpFileRestore = manager
+	cookie := setupSession(t, srv)
+	directory := t.TempDir()
+	request := map[string]any{"snapshotId": "snapshot", "target": directory}
+	preflight := requestJSON(t, srv, http.MethodPost, "/api/repositories/repo/restore-dump-file/preflight", request, cookie)
+	if preflight.Code != http.StatusOK || !strings.Contains(preflight.Body.String(), `"kind":"database_dump_file_restore"`) {
+		t.Fatalf("preflight=%d %s", preflight.Code, preflight.Body.String())
+	}
+	var confirmation store.RestoreConfirmation
+	if err := json.Unmarshal(preflight.Body.Bytes(), &confirmation); err != nil || confirmation.ID == "" {
+		t.Fatalf("confirmation=%+v err=%v", confirmation, err)
+	}
+	if response := requestJSON(t, srv, http.MethodPost, "/api/restores/"+confirmation.ID+"/authorize", map[string]any{"password": "correct horse battery staple"}, cookie); response.Code != http.StatusNoContent {
+		t.Fatalf("authorize=%d %s", response.Code, response.Body.String())
+	}
+	request["confirmationId"] = confirmation.ID
+	started := requestJSON(t, srv, http.MethodPost, "/api/repositories/repo/restore-dump-file", request, cookie)
+	if started.Code != http.StatusAccepted {
+		t.Fatalf("started=%d %s", started.Code, started.Body.String())
+	}
+	var accepted struct {
+		OperationID string `json:"operationId"`
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &accepted); err != nil || accepted.OperationID == "" {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	operation := waitForOperation(t, srv, cookie, accepted.OperationID, "success")
+	if operation.Kind != "database_dump_file_restore" || manager.request.TargetDirectory != directory || manager.request.RepositoryID != "repo" {
+		t.Fatalf("operation=%+v request=%+v", operation, manager.request)
+	}
 }
 
 func (m *cleanupDatabaseRestore) Restore(_ context.Context, request dbrestore.Request) error {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maboo-run/shadoc/internal/auth"
+	"github.com/maboo-run/shadoc/internal/compat"
 	databaseverify "github.com/maboo-run/shadoc/internal/database"
 	"github.com/maboo-run/shadoc/internal/domain"
 	"github.com/maboo-run/shadoc/internal/s3backend"
@@ -47,6 +48,18 @@ type failedDatabaseVerifier struct{}
 
 func (failedDatabaseVerifier) Verify(context.Context, domain.DatabaseConnection, string) databaseverify.Verification {
 	return databaseverify.Verification{CheckedAt: time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC), ClientVersion: "8.0.36", Error: "数据库认证失败"}
+}
+
+type connectionTesterStub struct {
+	result     databaseverify.Verification
+	password   string
+	connection domain.DatabaseConnection
+}
+
+func (t *connectionTesterStub) Test(_ context.Context, connection domain.DatabaseConnection, password string) databaseverify.Verification {
+	t.connection = connection
+	t.password = password
+	return t.result
 }
 
 type databaseEnumeratorStub struct {
@@ -126,6 +139,114 @@ func TestFailedDatabasePreflightPersistsOnlyADraftAndDoesNotLeakPassword(t *test
 	err := validateTaskActivation(t.Context(), srv.store.(*store.Store), domain.Task{Kind: domain.DatabaseTask, Enabled: true, Database: &domain.DatabaseSource{ConnectionID: saved.ID, Database: "app"}})
 	if err == nil || !strings.Contains(err.Error(), "尚未通过有效预检") {
 		t.Fatalf("draft connection activation error=%v", err)
+	}
+}
+
+func TestDatabaseConnectionTestUsesNativeTesterWithoutPersistingConnection(t *testing.T) {
+	srv := newResourceTestServer(t)
+	tester := &connectionTesterStub{result: databaseverify.Verification{
+		CheckedAt:     time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC),
+		ServerVersion: "8.0.36",
+	}}
+	srv.databaseTester = tester
+	cookie := setupSession(t, srv)
+	rec := requestJSON(t, srv, http.MethodPost, "/api/database-connections/test", map[string]any{
+		"name": "source", "engine": "mysql", "purpose": "backup", "network": "tcp", "host": "db.internal", "port": 3306,
+		"username": "backup", "password": "database-test-secret", "tls": map[string]any{"mode": "preferred"},
+	}, cookie)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) || !strings.Contains(rec.Body.String(), `"serverVersion":"8.0.36"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if tester.password != "database-test-secret" || strings.Contains(rec.Body.String(), "database-test-secret") {
+		t.Fatalf("tester password=%q response=%s", tester.password, rec.Body.String())
+	}
+	list := requestJSON(t, srv, http.MethodGet, "/api/database-connections", nil, cookie)
+	if list.Code != http.StatusOK || list.Body.String() != "[]\n" {
+		t.Fatalf("saved connections status=%d body=%s", list.Code, list.Body.String())
+	}
+}
+
+func TestDatabaseConnectionTestReturnsFailureWithoutSavingDraft(t *testing.T) {
+	srv := newResourceTestServer(t)
+	srv.databaseTester = &connectionTesterStub{result: databaseverify.Verification{
+		CheckedAt: time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC),
+		Error:     "数据库账号缺少当前用途所需权限",
+	}}
+	cookie := setupSession(t, srv)
+	rec := requestJSON(t, srv, http.MethodPost, "/api/database-connections/test", map[string]any{
+		"name": "source", "engine": "mysql", "purpose": "backup", "network": "tcp", "host": "db.internal", "port": 3306,
+		"username": "backup", "password": "database-test-secret", "tls": map[string]any{"mode": "preferred"},
+	}, cookie)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":false`) || !strings.Contains(rec.Body.String(), "数据库账号缺少当前用途所需权限") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	list := requestJSON(t, srv, http.MethodGet, "/api/database-connections", nil, cookie)
+	if list.Code != http.StatusOK || list.Body.String() != "[]\n" {
+		t.Fatalf("saved connections status=%d body=%s", list.Code, list.Body.String())
+	}
+}
+
+func TestDatabaseConnectionTestDoesNotReuseOtherEngineClientPaths(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	created := requestJSON(t, srv, http.MethodPost, "/api/database-connections", map[string]any{
+		"name": "mysql", "engine": "mysql", "purpose": "backup", "network": "tcp", "host": "db.internal", "port": 3306,
+		"username": "backup", "password": "mysql-secret", "tls": map[string]any{"mode": "preferred"},
+		"toolPaths": map[string]string{"dump": "/custom/mysqldump", "admin": "/custom/mysql"},
+	}, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var connection domain.DatabaseConnection
+	if err := json.Unmarshal(created.Body.Bytes(), &connection); err != nil {
+		t.Fatal(err)
+	}
+	tester := &connectionTesterStub{result: databaseverify.Verification{ServerVersion: "16.3"}}
+	srv.databaseTester = tester
+	rec := requestJSON(t, srv, http.MethodPost, "/api/database-connections/test", map[string]any{
+		"id": connection.ID, "name": "postgres", "engine": "postgresql", "purpose": "backup", "network": "tcp", "host": "pg.internal", "port": 5432,
+		"username": "backup", "password": "postgres-secret", "tls": map[string]any{"mode": "preferred"},
+	}, cookie)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if tester.connection.ToolPaths["admin"] == "/custom/mysql" || tester.connection.ToolPaths["dump"] == "/custom/mysqldump" {
+		t.Fatalf("reused incompatible tool paths: %v", tester.connection.ToolPaths)
+	}
+}
+
+func TestDatabaseConnectionUpdateClearsExplicitToolPathForRediscovery(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	created := requestJSON(t, srv, http.MethodPost, "/api/database-connections", map[string]any{
+		"name": "mysql", "engine": "mysql", "purpose": "backup", "network": "tcp", "host": "db.internal", "port": 3306,
+		"username": "backup", "password": "mysql-secret", "tls": map[string]any{"mode": "preferred"},
+		"toolPaths": map[string]string{"dump": "/custom/mysqldump", "admin": "/custom/mysql"},
+	}, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var connection domain.DatabaseConnection
+	if err := json.Unmarshal(created.Body.Bytes(), &connection); err != nil {
+		t.Fatal(err)
+	}
+	connectionChange := requestJSON(t, srv, http.MethodPut, "/api/database-connections/"+connection.ID, map[string]any{
+		"name": "mysql", "engine": "mysql", "purpose": "backup", "network": "tcp", "host": "db.internal", "port": 3306,
+		"username": "backup", "password": "mysql-secret", "tls": map[string]any{"mode": "preferred"},
+		"toolPaths": map[string]string{"dump": "", "admin": ""},
+	}, cookie)
+	if connectionChange.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", connectionChange.Code, connectionChange.Body.String())
+	}
+	var updated domain.DatabaseConnection
+	if err := json.Unmarshal(connectionChange.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.ToolPaths["dump"] == "/custom/mysqldump" {
+		t.Fatalf("explicit dump path was not cleared: %v", updated.ToolPaths)
+	}
+	if updated.ToolPaths["admin"] == "/custom/mysql" {
+		t.Fatalf("explicit admin path was not cleared: %v", updated.ToolPaths)
 	}
 }
 
@@ -592,6 +713,67 @@ func TestChangingRepositoryLocationRequiresReinitialization(t *testing.T) {
 	}, cookie)
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"status":"uninitialized"`) {
 		t.Fatalf("update repository status=%d body=%s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestEditingLocalRepositoryWithoutKindPreservesExistingKind(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	created := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
+		"name": "本地仓库", "kind": "local", "path": "/backup/local", "password": "repository-password", "passwordConfirmed": true,
+	}, cookie)
+	var repository struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &repository); err != nil || repository.ID == "" {
+		t.Fatalf("create repository status=%d body=%s err=%v", created.Code, created.Body.String(), err)
+	}
+
+	updated := requestJSON(t, srv, http.MethodPut, "/api/repositories/"+repository.ID, map[string]any{
+		"name": "本地仓库", "path": "/backup/local", "password": "",
+	}, cookie)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"kind":"local"`) {
+		t.Fatalf("update repository status=%d body=%s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestEditingLocalRepositoryAcceptsLegacyEditorConnectionMode(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	created := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
+		"name": "本地仓库", "kind": "local", "path": "/backup/local", "password": "repository-password", "passwordConfirmed": true,
+	}, cookie)
+	var repository struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &repository); err != nil || repository.ID == "" {
+		t.Fatalf("create repository status=%d body=%s err=%v", created.Code, created.Body.String(), err)
+	}
+
+	updated := requestJSON(t, srv, http.MethodPut, "/api/repositories/"+repository.ID, map[string]any{
+		"name": "本地仓库", "engine": "restic", "kind": "local", "remoteHostId": "", "path": "/backup/local",
+		"password": "", "passwordConfirmed": true, "connectionMode": "create",
+	}, cookie)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"kind":"local"`) {
+		t.Fatalf("legacy editor update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestCompatibilityEndpointUsesCachedInitialReport(t *testing.T) {
+	srv := newResourceTestServer(t)
+	srv.compatibilityCache = compat.Report{Findings: []compat.Finding{{Capability: "restic", Tool: "restic", Path: "/cached/restic", Severity: compat.Info, Version: "0.19.0", Message: "缓存的 Restic 可用"}}}
+	srv.compatibilityCached = true
+	cookie := setupSession(t, srv)
+	response := requestJSON(t, srv, http.MethodGet, "/api/compatibility", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("cached compatibility status=%d body=%s", response.Code, response.Body.String())
+	}
+	var report compat.Report
+	if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Path != "/cached/restic" || report.Findings[0].Version != "0.19.0" {
+		t.Fatalf("cached compatibility report=%+v", report)
 	}
 }
 

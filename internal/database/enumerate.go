@@ -44,8 +44,8 @@ func (e SystemEnumerator) List(ctx context.Context, connection domain.DatabaseCo
 	if connection.Purpose != domain.BackupConnection {
 		return nil, errors.New("只能枚举已验证的备份连接")
 	}
-	if connection.Status != "ready" || connection.Preflight.Error != "" || connection.Preflight.CheckedAt.IsZero() || connection.Preflight.CheckedAt.After(current) || current.Sub(connection.Preflight.CheckedAt) > 24*time.Hour {
-		return nil, errors.New("数据库连接预检缺失、失败或已经过期")
+	if connection.Status != "ready" || connection.Preflight.Error != "" || connection.Preflight.CheckedAt.IsZero() || connection.Preflight.CheckedAt.After(current) {
+		return nil, errors.New("数据库连接预检缺失、失败或时间无效")
 	}
 	adminProgram := connection.ToolPaths["admin"]
 	if !filepath.IsAbs(adminProgram) {

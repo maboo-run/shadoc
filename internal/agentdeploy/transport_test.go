@@ -160,6 +160,23 @@ func TestSSHTransportUsesFixedCommandsForTransactionalUpgrade(t *testing.T) {
 	}
 }
 
+func TestSSHTransportVerifiesStagedAgentVersionWithAClosedCommand(t *testing.T) {
+	runner := &recordingRunner{stagedVersion: "0.1.0\n"}
+	remote := NewRemote(runner)
+	platform := Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}
+	if err := remote.VerifyStagedVersion(t.Context(), platform, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0].command != linuxStagedVersionCommand || len(runner.calls[0].stdin) != 0 {
+		t.Fatalf("calls=%+v", runner.calls)
+	}
+
+	runner.stagedVersion = "0.0.0-SNAPSHOT-389df1b\n"
+	if err := remote.VerifyStagedVersion(t.Context(), platform, "0.1.0"); err == nil || !strings.Contains(err.Error(), "0.0.0-SNAPSHOT-389df1b") {
+		t.Fatalf("version mismatch error=%v", err)
+	}
+}
+
 func TestSSHTransportRestartsAgentWithFixedPlatformCommand(t *testing.T) {
 	for name, test := range map[string]struct {
 		platform Platform
@@ -228,11 +245,12 @@ type commandCall struct {
 }
 
 type recordingRunner struct {
-	probe        string
-	probeErr     error
-	windowsProbe string
-	activateErr  error
-	calls        []commandCall
+	probe         string
+	probeErr      error
+	windowsProbe  string
+	stagedVersion string
+	activateErr   error
+	calls         []commandCall
 }
 
 func (r *recordingRunner) Run(_ context.Context, command string, stdin []byte) ([]byte, error) {
@@ -242,6 +260,9 @@ func (r *recordingRunner) Run(_ context.Context, command string, stdin []byte) (
 	}
 	if command == windowsProbeCommand {
 		return []byte(r.windowsProbe), nil
+	}
+	if command == linuxStagedVersionCommand || command == darwinStagedVersionCommand || command == windowsStagedVersionCommand {
+		return []byte(r.stagedVersion), nil
 	}
 	if command == linuxActivateCommand && r.activateErr != nil {
 		return nil, r.activateErr

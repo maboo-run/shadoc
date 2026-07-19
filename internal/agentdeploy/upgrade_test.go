@@ -3,6 +3,7 @@ package agentdeploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -115,6 +116,28 @@ func TestUpgradeHeartbeatFailureRollsBackAndResumesOldAgentPath(t *testing.T) {
 	}
 }
 
+func TestUpgradeRejectsStagedAgentArtifactVersionBeforeActivation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
+	storage := &upgradeStore{
+		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "0.0.0-SNAPSHOT-389df1b", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+	}
+	remote := &upgradeRemote{
+		platform:      Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
+		stagedVersion: "0.0.0-SNAPSHOT-389df1b",
+	}
+	service := NewUpgradeService(storage, deploymentSecrets{}, staticArtifacts{}, upgradeDialer{remote: remote}, func() time.Time { return now })
+	service.pollInterval = time.Millisecond
+	service.heartbeatTimeout = 5 * time.Millisecond
+
+	if _, err := service.Upgrade(t.Context(), UpgradeRequest{AgentID: "agent-a", TargetVersion: "0.1.0"}, nil); err == nil {
+		t.Fatal("staged Agent artifact with a snapshot version was accepted")
+	}
+	if !remote.staged || remote.verifiedTarget != "0.1.0" || remote.activated || !remote.finalized || remote.rolledBack {
+		t.Fatalf("stale artifact was not rejected before activation: remote=%+v", remote)
+	}
+}
+
 func TestUpgradeStageFailureCleansPartialArtifactAndResumesAssignments(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
@@ -199,6 +222,58 @@ func TestReprobeToolsDrainsAgentRestartsServiceAndWaitsForFreshHeartbeat(t *test
 	}
 }
 
+func TestProbeHeartbeatDrainsAgentRestartsServiceAndWaitsForFreshHeartbeat(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	storage := &upgradeStore{
+		host:       domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
+		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
+		activeWork: []int{1, 0},
+	}
+	remote := &upgradeRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
+	remote.onRestart = func() {
+		heartbeat := now.Add(time.Second)
+		storage.agent.LastHeartbeatAt = &heartbeat
+	}
+	service := NewUpgradeService(storage, deploymentSecrets{}, nil, upgradeDialer{remote: remote}, func() time.Time { return now })
+	service.pollInterval = time.Millisecond
+	service.heartbeatTimeout = time.Second
+
+	var stages []string
+	result, err := service.ProbeHeartbeat(t.Context(), "agent-a", func(stage string) { stages = append(stages, stage) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentID != "agent-a" || result.HostID != "host-a" || result.Platform != "linux/amd64" {
+		t.Fatalf("result=%+v", result)
+	}
+	if !remote.restarted || storage.beginDrain != 1 || storage.endDrain != 1 {
+		t.Fatalf("remote=%+v storage=%+v", remote, storage)
+	}
+	if want := []string{"probing", "draining_agent", "restarting_agent_for_heartbeat", "waiting_for_agent_heartbeat", "agent_heartbeat_verified"}; !slices.Equal(stages, want) {
+		t.Fatalf("stages=%v want=%v", stages, want)
+	}
+}
+
+func TestProbeHeartbeatResumesAssignmentsWhenRestartFails(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	storage := &upgradeStore{
+		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+	}
+	remote := &upgradeRemote{
+		platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
+		err:      errors.New("restart failed"),
+	}
+	service := NewUpgradeService(storage, deploymentSecrets{}, nil, upgradeDialer{remote: remote}, func() time.Time { return now })
+
+	if _, err := service.ProbeHeartbeat(t.Context(), "agent-a", nil); err == nil {
+		t.Fatal("restart failure was ignored")
+	}
+	if !remote.restarted || storage.beginDrain != 1 || storage.endDrain != 1 {
+		t.Fatalf("failed probe did not resume assignments: remote=%+v storage=%+v", remote, storage)
+	}
+}
+
 type upgradeStore struct {
 	host                 domain.RemoteHost
 	agent                store.AgentRecord
@@ -239,6 +314,7 @@ func (d upgradeDialer) Dial(context.Context, Target) (UpgradeRemote, error) { re
 type upgradeRemote struct {
 	platform                                            Platform
 	staged, activated, finalized, rolledBack, restarted bool
+	stagedVersion, verifiedTarget                       string
 	onActivate, onRestart                               func()
 	err                                                 error
 	finalizeErr                                         error
@@ -248,6 +324,13 @@ func (r *upgradeRemote) Probe(context.Context) (Platform, error) { return r.plat
 func (r *upgradeRemote) StageUpgrade(context.Context, []byte) error {
 	r.staged = true
 	return r.err
+}
+func (r *upgradeRemote) VerifyStagedVersion(_ context.Context, _ Platform, expected string) error {
+	r.verifiedTarget = expected
+	if r.stagedVersion != "" && r.stagedVersion != expected {
+		return fmt.Errorf("staged Agent version %q does not match %q", r.stagedVersion, expected)
+	}
+	return nil
 }
 func (r *upgradeRemote) ActivateUpgrade(context.Context, Platform) error {
 	r.activated = true

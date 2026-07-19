@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { translate, type Locale } from "../i18n";
 import { timestampAtSecond } from "./dateTime";
+import { OperationFeedback, type OperationController } from "./OperationFeedback";
 
 type AgentRecord = Record<string, unknown>;
 type Tone = "healthy" | "warning" | "danger" | "neutral";
@@ -12,6 +13,11 @@ type AgentResticOperation = {
   errorSummary?: string;
   error?: string;
 };
+type AgentOperation = {
+  agentId: string;
+  operation: OperationController;
+  starting?: boolean;
+};
 
 type AgentFleetProps = {
   agents: AgentRecord[];
@@ -21,16 +27,20 @@ type AgentFleetProps = {
   currentServiceURL: string;
   latestResticVersion?: string;
   busy: boolean;
+  upgradeOperation?: AgentOperation;
+  toolProbeOperation?: AgentOperation;
+  heartbeatOperation?: AgentOperation;
   resticOperation?: AgentResticOperation;
   onCancelRestic?(): void;
   onUpgrade(agent: AgentRecord): void;
   onInstallRestic?(agent: AgentRecord): void;
   onReprobeTools?(agent: AgentRecord): void;
+  onProbeHeartbeat?(agent: AgentRecord): void;
   onRedeploy(agent: AgentRecord): void;
   onRemove(agent: AgentRecord): void;
 };
 
-export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServiceURL, latestResticVersion = "", busy, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onRedeploy, onRemove }: AgentFleetProps) {
+export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServiceURL, latestResticVersion, busy, upgradeOperation, toolProbeOperation, heartbeatOperation, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onProbeHeartbeat, onRedeploy, onRemove }: AgentFleetProps) {
   const t = (source: string) => translate(locale, source);
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => new Set());
   if (!agents.length) {
@@ -56,15 +66,20 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
       const showResticAction = managesRestic && !resticCurrent;
       const canInstallRestic = Boolean(showResticAction && online && supportsManagedRestic && latestResticVersion);
       const canReprobeTools = Boolean(onReprobeTools && managed && !uninstalled && !revoked && online);
+      const canProbeHeartbeat = Boolean(onProbeHeartbeat && managed && !uninstalled && !revoked);
       const resticAvailability = !managesRestic || resticCurrent ? ""
         : !supportsManagedRestic ? "该 Agent 版本不支持一键安装 Restic，请先升级或重新部署 Agent。"
         : !online ? "Agent 在线后才可安装或升级 Restic。"
-        : !latestResticVersion ? "暂时无法读取官方 Restic 版本，页面会自动重试。"
+        : latestResticVersion === "" ? "暂时无法读取官方 Restic 版本，页面会自动重试。"
         : "";
       const expanded = expandedAgents.has(id);
       const detailID = `agent-${id}-details`;
       const remoteHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent.remoteHostId ?? ""));
       const address = remoteAddress(remoteHost, agent, locale);
+      const agentUpgradeOperation = scopedOperation(upgradeOperation, id);
+      const agentToolProbeOperation = scopedOperation(toolProbeOperation, id);
+      const agentHeartbeatOperation = scopedOperation(heartbeatOperation, id);
+      const heartbeatProbing = Boolean(agentHeartbeatOperation?.active || (heartbeatOperation?.agentId === id && heartbeatOperation.starting));
       const agentResticOperation = resticOperation?.agentId === id ? resticOperation : undefined;
       return <li key={id}>
         <article className={`agent-node agent-node-${heartbeatTone(agent)}`} aria-labelledby={`agent-${id}`}>
@@ -100,6 +115,8 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
             <span className="agent-summary-disclosure">{t(expanded ? "收起详情" : "查看详情")}<span aria-hidden="true">{expanded ? "↑" : "↓"}</span></span>
           </button>
 
+          {agentUpgradeOperation && <OperationFeedback operation={agentUpgradeOperation} locale={locale} persistTerminal compact autoDismissSuccess dismissibleTerminal />}
+          {agentToolProbeOperation && <OperationFeedback operation={agentToolProbeOperation} locale={locale} hideTerminal compact />}
           {agentResticOperation && <AgentResticOperationStatus operation={agentResticOperation} locale={locale} onCancel={onCancelRestic} />}
 
           {expanded && <div className="agent-node-details" id={detailID}>
@@ -114,6 +131,10 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
               {agent.endpointStatus !== "migration_required" && <div><dt>{t("Service 地址")}</dt><dd><code>{String(agent.serviceUrl || t("未报告地址"))}</code></dd></div>}
             </dl>
             <div className="agent-node-actions">
+              {canProbeHeartbeat && <button className={`secondary-button agent-heartbeat-button${heartbeatProbing ? " agent-heartbeat-button-probing" : ""}`} type="button" disabled={busy || heartbeatProbing} aria-busy={heartbeatProbing} onClick={() => onProbeHeartbeat?.(agent)}>
+                {heartbeatProbing && <span className="agent-heartbeat-spinner" aria-hidden="true" />}
+                {t(heartbeatProbing ? "探测中…" : "主动探测心跳")}
+              </button>}
               {managed && !uninstalled && !revoked && <button className="secondary-button" type="button" disabled={busy || !canReprobeTools} onClick={() => onReprobeTools?.(agent)}>{t("重新探测工具")}</button>}
               {showResticAction && <button className="primary-button" type="button" disabled={busy || !canInstallRestic} onClick={() => onInstallRestic?.(agent)}>{t(currentResticVersion ? "升级 Agent Restic" : "安装 Agent Restic")}</button>}
               {managed && upgradeAvailable && <button className="primary-button" type="button" disabled={busy} onClick={() => onUpgrade(agent)}>{managedResticRepair ? t("更新 Agent 以启用 Restic 安装") : locale === "en-US" ? `Upgrade Agent to ${targetVersion}` : `升级 Agent 至 ${targetVersion}`}</button>}
@@ -130,6 +151,10 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
       </li>;
     })}
   </ul>;
+}
+
+function scopedOperation(value: AgentOperation | undefined, agentID: string): OperationController | undefined {
+  return value?.agentId === agentID ? value.operation : undefined;
 }
 
 function AgentResticOperationStatus({ operation, locale, onCancel }: { operation: AgentResticOperation; locale: Locale; onCancel?(): void }) {

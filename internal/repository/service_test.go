@@ -89,6 +89,8 @@ type repoRunner struct {
 	operations     []restic.Operation
 	failCheck      bool
 	failVerify     bool
+	failDump       bool
+	dumpContent    string
 	verifyOutput   string
 	forgetOutput   string
 	contentsOutput string
@@ -161,6 +163,15 @@ func (r *repoRunner) Execute(_ context.Context, op restic.Operation) (restic.Res
 	}
 	if op.Kind == restic.CheckRepository && r.failCheck {
 		return restic.Result{}, errors.New("damaged")
+	}
+	if op.Kind == restic.DumpSnapshot {
+		if op.Output != nil {
+			_, _ = io.WriteString(op.Output, r.dumpContent)
+		}
+		if r.failDump {
+			return restic.Result{}, errors.New("dump failed")
+		}
+		return restic.Result{Outcome: restic.Success}, nil
 	}
 	output := `[{"id":"abc","time":"2026-07-11T00:00:00Z","paths":["/srv"]}]`
 	if op.Kind == restic.ListSnapshotContents {
@@ -639,6 +650,81 @@ func TestDumpAppliesControlledDownloadLimit(t *testing.T) {
 	}
 	if err := service.Dump(context.Background(), "repo", "snap", "database.sql", -1, io.Discard); err == nil {
 		t.Fatal("negative download limit was accepted")
+	}
+}
+
+func TestRestoreDumpFileStreamsToSecureNewFileAndUsesRepositoryLock(t *testing.T) {
+	runner := &repoRunner{dumpContent: "CREATE TABLE example(id INT);"}
+	service := New(&repoStore{execution: store.RepositoryExecution{Repository: domain.Repository{ID: "repo", Kind: domain.LocalRepository, Path: "/backup", Status: "ready"}, RepositoryPasswordSecretID: "pass"}}, repoSecrets{"pass": []byte("password")}, runner)
+	locker := &recordingLocker{}
+	service.SetLocker(locker)
+	target := filepath.Join(t.TempDir(), "database.sql")
+
+	if err := service.RestoreDumpFile(context.Background(), "repo", "snap", "database.sql", target, 128); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != runner.dumpContent {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("output permissions=%o", info.Mode().Perm())
+	}
+	if locker.calls != 1 {
+		t.Fatalf("restore lock calls=%d", locker.calls)
+	}
+	operation := runner.operations[len(runner.operations)-1]
+	if operation.Kind != restic.DumpSnapshot || strings.Join(operation.Arguments, " ") != "--limit-download 128 snap database.sql" {
+		t.Fatalf("operation=%+v", operation)
+	}
+}
+
+func TestRestoreDumpFileDoesNotPublishFailedOrUnsafeOutput(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		filename string
+	}{
+		{name: "existing target", filename: "database.sql"},
+		{name: "path traversal source", filename: "../database.sql"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			target := filepath.Join(directory, "database.sql")
+			if test.name == "existing target" {
+				if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &repoRunner{failDump: true, dumpContent: "partial"}
+			service := New(&repoStore{execution: store.RepositoryExecution{Repository: domain.Repository{ID: "repo", Kind: domain.LocalRepository, Path: "/backup", Status: "ready"}, RepositoryPasswordSecretID: "pass"}}, repoSecrets{"pass": []byte("password")}, runner)
+
+			err := service.RestoreDumpFile(context.Background(), "repo", "snap", test.filename, target, 0)
+			if test.name == "existing target" {
+				if err == nil {
+					t.Fatalf("existing target reached dump: err=%v operations=%+v", err, runner.operations)
+				}
+				for _, operation := range runner.operations {
+					if operation.Kind == restic.DumpSnapshot {
+						t.Fatalf("existing target reached dump: operations=%+v", runner.operations)
+					}
+				}
+				content, readErr := os.ReadFile(target)
+				if readErr != nil || string(content) != "keep" {
+					t.Fatalf("existing target changed content=%q err=%v", content, readErr)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("unsafe source filename was accepted")
+			}
+			if len(runner.operations) != 0 {
+				t.Fatalf("unsafe source reached Restic: %+v", runner.operations)
+			}
+		})
 	}
 }
 

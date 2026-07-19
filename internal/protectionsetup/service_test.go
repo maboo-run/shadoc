@@ -251,7 +251,7 @@ func databaseDraftInput(now time.Time) CreateDraftInput {
 func TestCreateDraftStagesOnlyRepositorySecretsAndPersistsCompleteMapping(t *testing.T) {
 	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	storage := newSetupStorage()
-	storage.connections = []domain.DatabaseConnection{{ID: "connection", Name: "mysql", Purpose: domain.BackupConnection, Status: "ready", Preflight: domain.DatabasePreflight{CheckedAt: now.Add(-time.Hour)}}}
+	storage.connections = []domain.DatabaseConnection{{ID: "connection", Name: "mysql", Purpose: domain.BackupConnection, Status: "ready", Preflight: domain.DatabasePreflight{CheckedAt: now.Add(-25 * time.Hour)}}}
 	secrets := &setupSecrets{}
 	service := setupService(storage, secrets, &setupInitializer{storage: storage}, now)
 	draft, err := service.CreateDraft(t.Context(), databaseDraftInput(now))

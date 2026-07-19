@@ -402,8 +402,42 @@ describe("restic-control administration", () => {
     await user.click(within(dialog).getByRole("button", { name: "开始托管升级" }));
 
     expect(action).toHaveBeenCalledWith("/api/agents/agent-a/upgrade", {});
-    const completion = await screen.findByText("Agent 升级完成，新版本心跳已验证");
+    const completion = await screen.findByText("Agent 升级完成，新版本心跳已验证", { selector: ".toast-message" });
     expect(completion.closest(".toast")).toBeVisible();
+    const agentNode = screen.getByText("agent-a").closest("article") as HTMLElement;
+    expect(within(agentNode).getByRole("status", { name: "状态：成功" })).toBeVisible();
+  });
+
+  it("keeps a failed Agent upgrade diagnostic visible when the staged artifact is stale", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/agents/agent-a/upgrade") return { operationId: "op-upgrade-failed", status: "queued" };
+      if (path === "/api/operations/op-upgrade-failed") return {
+        id: "op-upgrade-failed", kind: "agent_upgrade", status: "failed", stage: "failed",
+        errorSummary: "暂存 Agent 报告版本 \"0.0.0-SNAPSHOT-389df1b\"，目标版本为 \"0.1.0\"",
+      };
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => resource === "agents" ? [{
+        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running",
+        compatibilityStatus: "compatible", buildVersion: "0.0.0-SNAPSHOT-389df1b", targetVersion: "0.1.0", upgradeAvailable: true,
+        protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
+      }] : [],
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "agent-a 查看详情" }));
+    await user.click(await screen.findByRole("button", { name: "升级 Agent 至 0.1.0" }));
+    await user.click(within(screen.getByRole("dialog", { name: "确认升级 Agent" })).getByRole("button", { name: "开始托管升级" }));
+
+    expect(await screen.findByText("查看失败详情")).toBeVisible();
+    const feedback = screen.getByText("查看失败详情").closest(".operation-feedback") as HTMLElement;
+    await user.click(within(feedback).getByText("查看失败详情"));
+    expect(within(feedback).getByText(/0\.0\.0-SNAPSHOT-389df1b/)).toBeVisible();
   });
 
   it("restarts a managed Agent to refresh its fixed backup-tool probes", async () => {
@@ -434,6 +468,40 @@ describe("restic-control administration", () => {
     expect(action).toHaveBeenCalledWith("/api/agents/agent-a/tools/reprobe", {});
     const completion = await screen.findByText("Agent 工具重新探测完成，新能力心跳已验证");
     expect(completion.closest(".toast")).toBeVisible();
+  });
+
+  it("actively probes a managed Agent heartbeat and restores the action after the toast result", async () => {
+    const user = userEvent.setup();
+    let resolveProbe: ((value: unknown) => void) | undefined;
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/agents/agent-a/heartbeat/probe") return new Promise<unknown>((resolve) => { resolveProbe = resolve; });
+      if (path === "/api/operations/op-heartbeat") return { id: "op-heartbeat", kind: "agent_heartbeat_probe", status: "success", stage: "agent_heartbeat_verified" };
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => resource === "agents" ? [{
+        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
+        compatibilityStatus: "compatible", buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false,
+        protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
+      }] : [],
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "agent-a 查看详情" }));
+    await user.click(await screen.findByRole("button", { name: "主动探测心跳" }));
+    expect(screen.getByRole("button", { name: "探测中…" })).toBeDisabled();
+    expect(screen.queryByRole("dialog", { name: "确认主动探测 Agent 心跳" })).not.toBeInTheDocument();
+
+    expect(action).toHaveBeenCalledWith("/api/agents/agent-a/heartbeat/probe", {});
+    resolveProbe?.({ operationId: "op-heartbeat", status: "queued" });
+    const completion = await screen.findByText("Agent 主动心跳探测完成，新的心跳已验证", { selector: ".toast-message" });
+    expect(completion.closest(".toast")).toBeVisible();
+    const agentNode = screen.getByText("agent-a").closest("article") as HTMLElement;
+    expect(within(agentNode).queryByText("Agent 主动心跳探测完成，新的心跳已验证")).not.toBeInTheDocument();
+    expect(within(agentNode).getByRole("button", { name: "主动探测心跳" })).toBeEnabled();
   });
 
   it("installs official Restic on a managed Linux Agent and waits for capability verification", async () => {
@@ -467,6 +535,36 @@ describe("restic-control administration", () => {
     expect(action).toHaveBeenCalledWith("/api/agents/agent-a/restic/install", { version: "0.19.1" });
     const completion = await screen.findByText("Agent Restic 安装完成，备份与恢复能力已验证");
     expect(completion.closest(".toast")).toBeVisible();
+  });
+
+  it("waits for a failed Restic version retry before showing the catalog warning", async () => {
+    const user = userEvent.setup();
+    let versionAttempts = 0;
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/restic/versions") {
+        versionAttempts += 1;
+        throw new Error("catalog unavailable");
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => resource === "agents" ? [{
+        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64",
+        capabilities: ["managed-restic-install-v1"],
+      }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "agent-a 查看详情" }));
+    await waitFor(() => expect(versionAttempts).toBe(1));
+    expect(screen.queryByText("暂时无法读取官方 Restic 版本，页面会自动重试。")).not.toBeInTheDocument();
+
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(versionAttempts).toBe(2));
+    expect(await screen.findByText("暂时无法读取官方 Restic 版本，页面会自动重试。")).toBeVisible();
   });
 
   it("keeps a failed Agent Restic installation diagnostic on the Agent page", async () => {
@@ -1731,7 +1829,33 @@ describe("restic-control administration", () => {
 
 	expect(action).toHaveBeenCalledWith("/api/database-connections/temporary", expect.objectContaining({ name: "紧急恢复", purpose: "restore", host: "db.internal", username: "restore", password: "one-time-secret" }));
 	expect(action).toHaveBeenCalledWith("/api/repositories/repo-1/restore-database/preflight", { snapshotId: "db-snap", connectionId: "temporary-dbconn_1", database: "restored_db" });
-	expect(screen.getByRole("checkbox", { name: "另存为长期恢复连接" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "另存为长期恢复连接" })).not.toBeChecked();
+  });
+
+  it("can restore a database snapshot as a dump file without database credentials", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string, payload?: Record<string, unknown>) => {
+      if (path.endsWith("/snapshots")) return [{ id: "db-snap", time: "2026-07-12T02:00:00Z", paths: [], tags: ["rc:source=database"] }];
+      if (path.endsWith("/restore-dump-file/preflight")) return { confirmationId: "confirm-dump", summary: { target: "…/maboo_course.sql" } };
+      if (path.endsWith("/authorize")) return {};
+      if (path.endsWith("/restore-dump-file")) return { operationId: "op-dump", status: "queued" };
+      if (path === "/api/operations/op-dump") return { id: "op-dump", status: "success", stage: "completed", kind: "database_dump_file_restore" };
+      return {};
+    });
+    render(<App api={{ ...fakeAPI, action, listResource: async (resource) => resource === "repositories" ? [{ id: "repo-1", name: "数据库仓库", kind: "local", path: "/backup/db", status: "ready" }] : [] }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await user.click(screen.getByRole("button", { name: "快照与恢复" }));
+    await user.selectOptions(await screen.findByLabelText("数据库快照"), "db-snap");
+    await user.click(screen.getByRole("radio", { name: "恢复为 dump 文件" }));
+    await user.type(screen.getByLabelText("dump 文件输出目录"), "/tmp/restdump");
+    await user.click(screen.getByRole("button", { name: "执行 dump 文件只读预检" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "确认并开始 dump 文件恢复" });
+    expect(screen.queryByLabelText("目标数据库名")).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("当前管理员密码"), "correct horse battery staple");
+    await user.click(within(dialog).getByRole("button", { name: "确认并开始 dump 文件恢复" }));
+    await waitFor(() => expect(action).toHaveBeenCalledWith("/api/repositories/repo-1/restore-dump-file/preflight", { snapshotId: "db-snap", target: "/tmp/restdump" }));
+    expect(action).toHaveBeenCalledWith("/api/repositories/repo-1/restore-dump-file", { snapshotId: "db-snap", target: "/tmp/restdump", confirmationId: "confirm-dump" });
   });
 
   it("browses an Agent parent directory and submits a remote restore target", async () => {
@@ -2443,6 +2567,7 @@ describe("restic-control administration", () => {
     await user.type(screen.getByLabelText("用户"), "backup");
     await user.type(screen.getByLabelText("密码"), "database-secret");
     await user.selectOptions(screen.getByLabelText("TLS 模式"), "verify-full");
+    await user.click(screen.getByText("高级设置"));
     await user.type(
       screen.getByLabelText("TLS CA 文件绝对路径"),
       "/etc/ssl/db-ca.pem",
@@ -2462,6 +2587,33 @@ describe("restic-control administration", () => {
         }),
       }),
     );
+  });
+
+  it("tests a database with the Go driver and hides client paths by default", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string, _payload?: Record<string, unknown>) => {
+      if (path === "/api/database-connections/test") return { ok: true, preflight: { serverVersion: "8.0.36" } };
+      return {};
+    });
+    render(<App api={{ ...fakeAPI, action }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "数据库实例");
+    await user.click(screen.getByRole("button", { name: "新建数据库实例" }));
+    await user.type(screen.getByLabelText("名称"), "生产 MySQL");
+    await user.type(screen.getByLabelText("用户"), "backup");
+    await user.type(screen.getByLabelText("密码"), "database-secret");
+
+    expect(screen.getByLabelText("导出工具绝对路径")).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(await screen.findByText(/连接成功.*8\.0\.36/)).toBeVisible();
+    expect(action).toHaveBeenCalledWith(
+      "/api/database-connections/test",
+      expect.objectContaining({ name: "生产 MySQL", username: "backup", password: "database-secret" }),
+    );
+    const testCall = action.mock.calls.find(([path]) => path === "/api/database-connections/test");
+    expect(testCall?.[1]).toHaveProperty("toolPaths", { dump: "", admin: "" });
+    await user.click(screen.getByText("高级设置"));
+    expect(screen.getByLabelText("导出工具绝对路径")).toBeVisible();
   });
 
   it("shows database preflight status, versions, and a safe failure reason", async () => {

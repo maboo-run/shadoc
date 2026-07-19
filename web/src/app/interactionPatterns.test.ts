@@ -34,6 +34,6 @@ describe("administration interaction patterns", () => {
   it("routes terminal long-operation results away from persistent inline feedback", () => {
     const usages = [...sources.matchAll(/<OperationFeedback\b[^>]*>/g)].map((match) => match[0]);
     expect(usages.length).toBeGreaterThan(0);
-    expect(usages.every((usage) => usage.includes("hideTerminal"))).toBe(true);
+    expect(usages.filter((usage) => !usage.includes("persistTerminal")).every((usage) => usage.includes("hideTerminal"))).toBe(true);
   });
 });

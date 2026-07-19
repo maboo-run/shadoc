@@ -28,8 +28,9 @@ export type OperationController = {
 };
 
 const terminal = new Set(["success", "partial", "failed", "cancelled", "cleanup_required"]);
+const terminalSuccessAutoDismissMilliseconds = 4500;
 
-export function useOperation(api: AppAPI): OperationController {
+export function useOperation(api: Pick<AppAPI, "action">): OperationController {
   const [operation, setOperation] = useState<OperationRecord | null>(null);
   const [error, setError] = useState("");
 	const operationRef = useRef<OperationRecord | null>(null);
@@ -120,21 +121,46 @@ export function useOperation(api: AppAPI): OperationController {
   };
 }
 
-export function OperationFeedback({ operation, locale = "zh-CN", hideTerminal = false, cancellable = true }: { operation: OperationController; locale?: Locale; hideTerminal?: boolean; cancellable?: boolean }) {
+type OperationFeedbackProps = {
+  operation: OperationController;
+  locale?: Locale;
+  hideTerminal?: boolean;
+  persistTerminal?: boolean;
+  compact?: boolean;
+  autoDismissSuccess?: boolean;
+  dismissibleTerminal?: boolean;
+  cancellable?: boolean;
+};
+
+export function OperationFeedback({ operation, locale = "zh-CN", hideTerminal = false, persistTerminal = false, compact = false, autoDismissSuccess = false, dismissibleTerminal = false, cancellable = true }: OperationFeedbackProps) {
   const t = (source: string) => translate(locale, source);
   const [cleanupReady, setCleanupReady] = useState(false);
   const [cleanupKind, setCleanupKind] = useState("");
   const [password, setPassword] = useState("");
+  const [dismissedOperationID, setDismissedOperationID] = useState("");
   const record = operation.operation;
-  if (hideTerminal && !operation.error && record && terminal.has(record.status) && record.status !== "cleanup_required") return null;
-  if (hideTerminal && operation.error && !record) return null;
+  const dismissed = Boolean(record?.id && dismissedOperationID === record.id);
+  const autoDismissable = record?.status === "success";
+  useEffect(() => {
+    if (!autoDismissSuccess || !record?.id || !autoDismissable || dismissed) return;
+    const timer = window.setTimeout(() => setDismissedOperationID(record.id), terminalSuccessAutoDismissMilliseconds);
+    return () => window.clearTimeout(timer);
+  }, [autoDismissSuccess, autoDismissable, dismissed, record?.id]);
+  const suppressTerminal = hideTerminal && !persistTerminal;
+  if (dismissed) return null;
+  if (suppressTerminal && !operation.error && record && terminal.has(record.status) && record.status !== "cleanup_required") return null;
+  if (suppressTerminal && operation.error && !record) return null;
   if (!record && !operation.error) return null;
   const residual = String(record?.detail?.residualPath ?? "");
+  const showDismissButton = Boolean(dismissibleTerminal && record && terminal.has(record.status) && record.status !== "cleanup_required");
   return (
-    <div className={`operation-feedback operation-${record?.status ?? "error"}`} role="status">
+    <div className={`operation-feedback operation-${record?.status ?? "error"}${compact ? " operation-feedback-compact" : ""}`} role="status">
       {record && <div className="operation-feedback-heading">
         <strong>{operationLabel(record, locale)}</strong>
-        <StatusIndicator value={record.status} locale={locale} variant="pill" />
+        <span className="operation-feedback-heading-actions">
+          <StatusIndicator value={record.status} locale={locale} variant="pill" />
+          {showDismissButton && <button className="icon-button operation-feedback-close" type="button" aria-label={t("关闭")} title={t("关闭")} onClick={() => setDismissedOperationID(record.id)}>×</button>}
+        </span>
       </div>}
       {record?.errorSummary && terminal.has(record.status) ? <details className="operation-error-detail">
         <summary>{t("查看失败详情")}</summary>
@@ -218,9 +244,12 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
   if (record.kind === "agent_tool_probe" && record.status === "success") return t("Agent 工具重新探测完成，新能力心跳已验证");
   if (record.kind === "agent_tool_probe" && record.status === "failed") return t("Agent 工具重新探测失败");
   if (record.kind === "agent_tool_probe" && record.status === "cancelled") return t("Agent 工具重新探测已取消");
-  if (record.status === "success") return t(record.kind === "application_update" ? "应用升级完成并通过健康检查" : record.kind === "agent_uninstall" ? "Agent 已停止并卸载" : record.kind === "agent_upgrade" ? "Agent 升级完成，新版本心跳已验证" : record.kind === "protection_setup" ? "保护资源创建完成" : "操作完成");
-  if (record.status === "failed") return t(record.kind === "application_update" ? "应用升级失败，旧版本已保留或已自动回滚" : record.kind === "agent_uninstall" ? "Agent 停止或卸载失败" : record.kind === "agent_upgrade" ? "Agent 升级失败，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源未全部创建完成" : "操作失败");
-  if (record.status === "cancelled") return t(record.kind === "agent_upgrade" ? "Agent 升级已取消，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源创建已取消" : "操作已取消");
+  if (record.kind === "agent_heartbeat_probe" && record.status === "success") return t("Agent 主动心跳探测完成，新的心跳已验证");
+  if (record.kind === "agent_heartbeat_probe" && record.status === "failed") return t("Agent 主动心跳探测失败");
+  if (record.kind === "agent_heartbeat_probe" && record.status === "cancelled") return t("Agent 主动心跳探测已取消");
+  if (record.status === "success") return t(record.kind === "application_update" ? "应用升级完成并通过健康检查" : record.kind === "agent_uninstall" ? "Agent 已停止并卸载" : record.kind === "agent_upgrade" ? "Agent 升级完成，新版本心跳已验证" : record.kind === "protection_setup" ? "保护资源创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检通过" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复完成" : "操作完成");
+  if (record.status === "failed") return t(record.kind === "application_update" ? "应用升级失败，旧版本已保留或已自动回滚" : record.kind === "agent_uninstall" ? "Agent 停止或卸载失败" : record.kind === "agent_upgrade" ? "Agent 升级失败，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源未全部创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检失败" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复失败" : "操作失败");
+  if (record.status === "cancelled") return t(record.kind === "agent_upgrade" ? "Agent 升级已取消，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源创建已取消" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复已取消" : "操作已取消");
   if (record.status === "cleanup_required") return t("需要人工清理");
   const stages: Record<string, string> = {
     queued: "等待执行",
@@ -241,6 +270,7 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
     staging_agent_upgrade: "正在暂存新 Agent 程序",
     activating_agent_upgrade: "正在切换并重启 Agent",
     waiting_for_agent_upgrade: "正在验证目标版本心跳",
+    verifying_staged_agent_upgrade: "正在校验暂存 Agent 版本",
     rolling_back_agent_upgrade: "正在恢复旧 Agent 程序",
     agent_upgrade_verified: "Agent 新版本心跳已验证",
     downloading_agent_restic: "正在下载并校验 Agent Restic",
@@ -252,6 +282,11 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
     restarting_agent_for_tool_probe: "正在重启 Agent 以重新探测工具",
     waiting_for_agent_tool_probe: "正在等待 Agent 返回新的工具能力",
     agent_tool_probe_verified: "Agent 工具能力心跳已验证",
+    restarting_agent_for_heartbeat: "正在重启 Agent 以主动探测心跳",
+    waiting_for_agent_heartbeat: "正在等待 Agent 上报新的心跳",
+    agent_heartbeat_verified: "Agent 主动心跳已验证",
+    preflighting_database_backup: "正在执行数据库备份预检",
+    database_backup_preflighted: "数据库导出预检与 Restic 仓库访问已验证",
     probing_capacity: "正在读取仓库存储容量",
     waiting_for_agent_capacity: "正在等待 Agent 返回仓库容量",
     verifying_read_only: "正在只读验证已有仓库",
