@@ -1,12 +1,12 @@
 module github.com/maboo-run/shadoc
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327
 	github.com/chromedp/chromedp v0.14.2
 	github.com/go-sql-driver/mysql v1.10.0
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pkg/sftp v1.13.10
 	golang.org/x/crypto v0.41.0
 	golang.org/x/sys v0.35.0
