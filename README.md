@@ -68,7 +68,7 @@ sh install.sh
 
 ```bash
 curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.sh \
-  | SHADOC_VERSION=0.1.0 sh
+  | SHADOC_VERSION=0.1.2 sh
 ```
 
 只安装控制服务、不下载远程部署所需的 Agent 制品：
@@ -161,7 +161,7 @@ SHADOC_DATA_DIR=/srv/shadoc SHADOC_LISTEN=0.0.0.0:8585 "$SHADOC_BIN" start
 
 令牌只用于首次初始化，请勿通过不受信任的渠道发送。
 
-远程 Agent 的托管升级会先在远端固定暂存路径执行 `shadoc-agent --version`，确认制品版本与控制服务目标版本完全一致后才切换服务；页面会保留成功或失败的操作结果。如果提示暂存制品仍是 `SNAPSHOT` 或其他旧版本，请重新生成同一版本的完整制品并重启控制服务，例如 `make build VERSION=0.1.0`，不要重复提交同一个旧制品。
+远程 Agent 的托管升级会先在远端固定暂存路径执行 `shadoc-agent --version`，确认制品版本与控制服务目标版本完全一致后才切换服务；页面会保留成功或失败的操作结果。如果提示暂存制品仍是 `SNAPSHOT` 或其他旧版本，请重新生成同一版本的完整制品并重启控制服务，例如 `make build VERSION=0.1.2`，不要重复提交同一个旧制品。
 
 Agent 节点卡片内的“主动探测心跳”点击后会直接启动，不再弹出确认框；系统会等待该节点当前任务结束，通过固定 SSH 服务命令安全重启 Agent，并等待新的认证心跳。探测期间原按钮显示“探测中”动画并保持禁用，完成或失败结果通过页面提示展示；主动探测不会升级 Agent 或修改备份工具。升级和工具探测的进度与终态仍显示在对应 Agent 节点内。
 

@@ -68,7 +68,7 @@ sh install.sh
 
 ```bash
 curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.sh \
-  | SHADOC_VERSION=0.1.0 sh
+  | SHADOC_VERSION=0.1.2 sh
 ```
 
 To install only the control service without downloading Agent artifacts used for remote deployment:

@@ -4,6 +4,22 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-25
+
+### Added
+
+- 重新设计管理页面的响应式导航与仪表盘，新增关键指标、运行趋势、近期运行、计划覆盖和告警面板。
+- 新增命令面板以及可持久化的明暗主题切换。
+
+### Changed
+
+- 局域网首次初始化改为明确要求一次性令牌；服务会在管理员创建前持续保存并通过 `start` 重新显示令牌，初始化完成后自动删除。
+
+### Fixed
+
+- 修复局域网初始化令牌在服务重启后无法找回，以及首次部署时误报“只能在本机访问”的问题。
+- 恢复仪表盘成功率统计口径说明，并升级 `pgx` 安全依赖。
+
 ## [0.1.1] - 2026-07-19
 
 ### Added
@@ -32,6 +48,7 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 - 官方 GitHub 仓库身份统一为 `maboo-run/shadoc`。
 - README 调整为面向管理员的安装和使用手册。
 
-[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.2
 [0.1.1]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.0
