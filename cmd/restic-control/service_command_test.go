@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,6 +40,25 @@ func TestStartWithoutPortPreservesConfiguredListenAddress(t *testing.T) {
 		t.Fatalf("executable=%q arguments=%v", service.executable, service.arguments)
 	}
 	if stdout.String() != "Shadoc started in the background\n" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestStartPrintsPersistedLANSetupToken(t *testing.T) {
+	dataDir := t.TempDir()
+	token := "MTExMTExMTExMTExMTExMTExMTExMTEx"
+	if err := os.WriteFile(filepath.Join(dataDir, setupTokenFilename), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &backgroundServiceFake{}
+	var stdout bytes.Buffer
+	handled, err := handleServiceCommand([]string{"start"}, &stdout, "/opt/shadoc", service, func() (serviceLaunchConfig, error) {
+		return serviceLaunchConfig{DataDir: dataDir, Listen: "0.0.0.0:8585"}, nil
+	})
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v", handled, err)
+	}
+	if !strings.Contains(stdout.String(), "LAN initialization token: "+token) {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 }

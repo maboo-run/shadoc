@@ -25,8 +25,8 @@ describe("wide table scrolling", () => {
 
 describe("compact capacity refresh", () => {
   it("keeps the refresh control close to and vertically aligned with the value", () => {
-    expect(stylesheet).toMatch(/\.capacity-cell-compact\s*\{(?=[^}]*justify-content: flex-start;)(?=[^}]*align-items: center;)(?=[^}]*gap: 6px;)/s);
-    expect(stylesheet).toMatch(/\.capacity-refresh-button\s*\{(?=[^}]*display: grid;)(?=[^}]*place-items: center;)(?=[^}]*padding: 0;)/s);
+    expect(stylesheet).toMatch(/\.capacity-cell-compact\s*\{(?=[^}]*justify-content: flex-start;)(?=[^}]*align-items: center;)(?=[^}]*gap: 4px;)/s);
+    expect(stylesheet).toMatch(/\.capacity-refresh-button\s*\{(?=[^}]*display: inline-grid;)(?=[^}]*place-items: center;)(?=[^}]*padding: 0;)/s);
   });
 });
 

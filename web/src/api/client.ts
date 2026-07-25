@@ -166,7 +166,7 @@ async function getText(path: string): Promise<string> {
 }
 
 export const httpAPI: AppAPI = {
-  setupStatus: () => getJSON<{ initialized: boolean }>("/api/setup/status"),
+  setupStatus: () => getJSON<{ initialized: boolean; tokenRequired?: boolean }>("/api/setup/status"),
   setup: (username, password, token) =>
     postJSON<{ username: string }>("/api/setup", { username, password, token }),
   login: (username, password) =>

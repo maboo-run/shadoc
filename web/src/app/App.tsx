@@ -9,14 +9,17 @@ import { Toast } from "./Toast";
 import { HealthEvents, type AlertState } from "./HealthEvents";
 import { ControlPlaneRecovery } from "./ControlPlaneRecovery";
 import { SnapshotBrowser, SnapshotDiffPanel, type SnapshotContentsPage } from "./SnapshotBrowser";
-import { TaskHealthTrends } from "./TaskHealthTrends";
 import { TaskHealthDetailPage } from "./TaskHealthDetailPage";
 import { RunHistoryPage } from "./RunHistoryPage";
 import { AgentFleet } from "./AgentFleet";
 import { NotificationChannels } from "./NotificationChannels";
-import { ApplicationVersionStatus, type ApplicationReleaseState } from "./ApplicationVersionStatus";
+import { type ApplicationReleaseState } from "./ApplicationVersionStatus";
+import { Sidebar, navigationGroups, navigation } from "./Sidebar";
+import { TopBar } from "./TopBar";
+import { CommandPalette } from "./CommandPalette";
 import { StatusIndicator, statusLabel } from "./StatusIndicator";
 import { isRFC3339Timestamp, timestampAtSecond } from "./dateTime";
+import { Dashboard } from "./Dashboard";
 import type {
   ControlPlaneExportRequest,
   ControlPlaneImportPreview,
@@ -58,7 +61,7 @@ export type Dashboard = {
 };
 
 export type AppAPI = {
-  setupStatus(): Promise<{ initialized: boolean }>;
+  setupStatus(): Promise<{ initialized: boolean; tokenRequired?: boolean }>;
   setup(
     username: string,
     password: string,
@@ -137,55 +140,6 @@ type LifecycleReport = {
   completedAt: string;
 };
 
-const navigation = [
-  "仪表盘",
-  "兼容性中心",
-  "远程主机",
-  "Agent 节点",
-  "备份仓库",
-  "数据库实例",
-  "备份任务",
-  "快照与恢复",
-  "运行记录",
-  "告警历史",
-  "投递记录",
-  "审计日志",
-  "通知配置",
-  "Agent 服务",
-  "安全设置",
-  "配置备份与恢复",
-  "数据生命周期",
-  "界面语言",
-];
-
-const navigationGroups = {
-  "连接管理": ["远程主机", "Agent 节点", "数据库实例"],
-  "活动与记录": ["运行记录", "告警历史", "投递记录", "审计日志"],
-  "系统": ["兼容性中心", "通知配置", "Agent 服务", "安全设置", "配置备份与恢复", "数据生命周期", "界面语言"],
-} as const;
-
-const sidebarNavigation = [
-  "仪表盘", "连接管理", "备份仓库", "备份任务",
-  "快照与恢复", "活动与记录", "系统",
-];
-
-function NavigationIcon({ item }: { item: string }) {
-  const paths: Record<string, ReactNode> = {
-    "仪表盘": <path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" />,
-    "连接管理": <><circle cx="6" cy="12" r="3" /><circle cx="18" cy="6" r="3" /><circle cx="18" cy="18" r="3" /><path d="m9 11 6-4M9 13l6 4" /></>,
-    "远程主机": <><rect x="3" y="5" width="18" height="12" rx="2" /><path d="M8 21h8M12 17v4M7 9h.01M10 9h.01" /></>,
-    "Agent 节点": <><circle cx="12" cy="12" r="3" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><path d="m7 7.5 2.5 2M17 7.5l-2.5 2M7 16.5l2.5-2M17 16.5l-2.5-2" /></>,
-    "备份仓库": <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" /></>,
-    "数据库实例": <><ellipse cx="12" cy="5" rx="7" ry="3" /><path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7" /></>,
-    "备份任务": <><path d="M6 3h9l4 4v14H6z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></>,
-    "备份计划": <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01" /></>,
-    "快照与恢复": <><path d="M4 7v5h5M20 17v-5h-5" /><path d="M6.1 17A8 8 0 0 0 20 12M17.9 7A8 8 0 0 0 4 12" /></>,
-    "活动与记录": <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
-    "系统": <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" /></>,
-  };
-  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[item]}</svg>;
-}
-
 const pagePaths: Record<string, string> = {
   仪表盘: "dashboard", 创建保护: "protection", 兼容性中心: "compatibility", 远程主机: "remote-hosts",
   "Agent 节点": "agents",
@@ -222,6 +176,7 @@ export function App({ api }: AppProps) {
     "loading" | "setup" | "login" | "unlock" | "dashboard"
   >("loading");
   const [username, setUsername] = useState("");
+  const [setupTokenRequired, setSetupTokenRequired] = useState(false);
   const [dashboard, setDashboard] = useState<Dashboard>({
     tasks: [],
     alerts: [],
@@ -238,6 +193,7 @@ export function App({ api }: AppProps) {
   const routeLoaded = useRef(false);
   const [mobile, setMobile] = useState(() => window.matchMedia?.("(max-width: 820px)").matches ?? false);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const firstNavigationItem = useRef<HTMLButtonElement>(null);
   const [shellMessage, setShellMessage] = useState("");
@@ -338,7 +294,10 @@ export function App({ api }: AppProps) {
       try {
         const setup = await api.setupStatus();
         if (!setup.initialized) {
-          if (active) setView("setup");
+          if (active) {
+            setSetupTokenRequired(Boolean(setup.tokenRequired));
+            setView("setup");
+          }
           return;
         }
         const session = await api.session();
@@ -427,6 +386,17 @@ export function App({ api }: AppProps) {
     return () => window.removeEventListener("keydown", close);
   }, [mobileNavigationOpen]);
 
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   if (view === "loading")
     return <div className="centered-state">{t("正在加载…")}</div>;
   if (view === "setup")
@@ -436,6 +406,7 @@ export function App({ api }: AppProps) {
         action={t("创建管理员")}
         mode="setup"
         locale={locale}
+        tokenRequired={setupTokenRequired}
         onSubmit={authenticate}
       />
     );
@@ -474,42 +445,28 @@ export function App({ api }: AppProps) {
         <span className="mobile-operation-state" aria-live="polite">{t(error ? "异常" : "在线")}</span>
       </div>
       {mobile && mobileNavigationOpen && <button className="navigation-scrim" type="button" aria-label={t("关闭导航")} onClick={() => { setMobileNavigationOpen(false); menuButton.current?.focus(); }} />}
-      <aside id="administration-navigation" className={`sidebar${mobileNavigationOpen ? " mobile-open" : ""}`} aria-hidden={mobile && !mobileNavigationOpen} inert={mobile && !mobileNavigationOpen ? true : undefined}>
-        <div className="brand">
-          <span className="brand-mark"><img src="/shadoc-icon.png" alt="" /></span>
-          <span>影刻 <small>Shadoc</small></span>
-        </div>
-        <nav aria-label={t("主导航")}>
-          {sidebarNavigation.map((item, index) => {
-            const children = navigationGroups[item as keyof typeof navigationGroups];
-            const selected = item === activePage || !!children?.includes(activePage as never);
-            const target = children?.[0] ?? item;
-            return (
-            <button
-              ref={index === 0 ? firstNavigationItem : undefined}
-              className={selected ? "nav-item selected" : "nav-item"}
-              key={item}
-              type="button"
-              onClick={() => { setMobileNavigationOpen(false); void openPage(target); }}
-            >
-              <span className="nav-icon" aria-hidden="true"><NavigationIcon item={item} /></span>
-              {t(item)}
-            </button>
-          )})}
-        </nav>
-        <div className="sidebar-account">
-          <div className="sidebar-user">
-            <span className="status-dot" />
-            {username}
-            <button className="text-button" type="button" onClick={() => void api.logout().then(() => {
-              setUsername(""); setDashboard({ tasks: [], alerts: [] }); setPageData([]); setCompatibility(null); setError(""); setActivePage(navigation[0]); setTaskHealthTarget(""); setView("login");
-            }).catch(() => setShellMessage(t("退出登录失败")))}>{t("退出登录")}</button>
-          </div>
-          <ApplicationVersionStatus api={api} locale={locale} />
-        </div>
-      </aside>
+      <Sidebar
+        api={api}
+        locale={locale}
+        username={username}
+        activePage={activePage}
+        mobile={mobile}
+        mobileNavigationOpen={mobileNavigationOpen}
+        firstNavigationItem={firstNavigationItem}
+        onNavigate={(page) => void openPage(page)}
+        onCloseMobile={() => setMobileNavigationOpen(false)}
+        onLogout={() => void api.logout().then(() => {
+          setUsername(""); setDashboard({ tasks: [], alerts: [] }); setPageData([]); setCompatibility(null); setError(""); setActivePage(navigation[0]); setTaskHealthTarget(""); setView("login");
+        }).catch(() => setShellMessage(t("退出登录失败")))}
+      />
 
       <main className="main-content">
+        <TopBar
+          locale={locale}
+          activePage={activePage}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+          onRefresh={() => void refreshPage(activePage)}
+        />
         {error && <p className="error-message" role="alert">{error}</p>}
         {Object.entries(navigationGroups).map(([label, pages]) => pages.includes(activePage as never) && (
           <div className="page-tabs" role="tablist" aria-label={t(label)} key={label}>
@@ -536,95 +493,13 @@ export function App({ api }: AppProps) {
         ) : activePage === "兼容性中心" ? (
           <CompatibilityPage report={compatibility} api={api} locale={locale} />
         ) : activePage === "仪表盘" ? (
-          <>
-            <header className="page-header">
-              <div>
-                <h1>{t("仪表盘")}</h1>
-                <p>{t("查看计划、仓库与最近运行状态。")}</p>
-              </div>
-              <div className="page-header-actions">
-                <button className="primary-button" type="button" onClick={() => void openPage("备份任务", true, "?view=create")}>{t("新建备份任务")}</button>
-              </div>
-            </header>
-
-            <section className="summary-strip" aria-label={t("备份概览")}>
-              <Summary
-                label={t("下次计划")}
-                value={dashboard.nextRun && dashboard.nextRun !== "暂无计划" ? adminTime(dashboard.nextRun, locale, timeZone) : t("暂无计划")}
-              />
-              <Summary label={t("仓库状态")} value={t(dashboard.repositoryStatus === "abnormal" ? "异常" : "正常")} tone={dashboard.repositoryStatus === "abnormal" ? "warning" : "healthy"} />
-              <Summary
-                label={t("当前告警")}
-                value={String(dashboard.alerts.length)}
-                tone={dashboard.alerts.length ? "warning" : "healthy"}
-              />
-            </section>
-
-            <section className="content-section">
-              <div className="section-heading">
-                <h2>{t("最近运行")}</h2>
-                <button className="text-button" type="button" onClick={() => void openPage("运行记录")}>
-                  {t("查看全部")}
-                </button>
-              </div>
-              <div className="table-frame">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("任务")}</th>
-                      <th>{t("类型")}</th>
-                      <th>{t("状态")}</th>
-                      <th>{t("目标仓库")}</th>
-                      <th>{t("上次应运行")}</th>
-                      <th>{t("实际运行")}</th>
-                      <th>{t("最近完整备份")}</th>
-                      <th>{t("下次计划")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dashboard.tasks.map((task) => (
-                      <tr key={task.id}>
-                        <td className="strong-cell">{task.name}</td>
-                        <td>{t(task.kind === "directory" ? "目录" : "数据库")}</td>
-                        <td><StatusIndicator value={task.status} locale={locale} /></td>
-                        <td>{task.repository}</td>
-                        <td>{adminTime(task.lastScheduledAt ?? "尚无计划发生记录", locale, timeZone)}</td>
-                        <td>{adminTime(task.lastRun, locale, timeZone)}</td>
-                        <td>{task.lastCompleteBackup ? <><span className="strong-cell">{shortIdentifier(task.lastCompleteBackup.snapshotId)}</span><br />{adminTime(task.lastCompleteBackup.finishedAt ?? task.lastCompleteBackup.startedAt, locale, timeZone)}</> : "—"}</td>
-                        <td>{adminTime(task.nextRun, locale, timeZone)}</td>
-                      </tr>
-                    ))}
-                    {!dashboard.tasks.length && (
-                      <tr>
-                        <td className="empty-row" colSpan={8}>
-                          {t("尚未创建备份任务")}
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-            <TaskHealthTrends api={api} locale={locale} onOpenTask={(taskId) => void openPage("备份任务", true, `?task=${encodeURIComponent(taskId)}&view=health`)} />
-            {dashboard.alerts.length > 0 && <section className="content-section dashboard-alerts" aria-label={t("当前告警")}>
-              <h2>{t("当前告警")}</h2>
-              <ul className="health-alert-list">{dashboard.alerts.map((alert) => <li className={`health-alert ${alert.severity ?? "warning"}`} key={alert.stateKey ?? alert.id}>
-                <div className="health-alert-heading"><strong>{alert.objectName ?? alert.object ?? t("系统")}</strong>{alert.severity && <StatusIndicator value={alert.severity} locale={locale} label={t(alert.severity === "critical" ? "严重" : alert.severity === "warning" ? "警告" : "信息")} variant="pill" />}</div>
-                <p>{alert.message}</p>
-                <dl>
-                  {alert.reason && <div><dt>{t("原因")}</dt><dd>{alert.reason}</dd></div>}
-                  {alert.firstAt && <div><dt>{t("首次发生")}</dt><dd>{adminTime(alert.firstAt, locale, timeZone)}</dd></div>}
-                  {alert.lastAt && <div><dt>{t("最近发生")}</dt><dd>{adminTime(alert.lastAt, locale, timeZone)}</dd></div>}
-                  {alert.recoveryCondition && <div className="wide"><dt>{t("恢复条件")}</dt><dd>{alert.recoveryCondition}</dd></div>}
-                </dl>
-                {alert.targetPage && <button className="text-button" type="button" onClick={() => void openPage(
-                  alert.targetPage!,
-                  true,
-                  "",
-                )}>{t("处理")}</button>}
-              </li>)}</ul>
-            </section>}
-          </>
+          <Dashboard
+            api={api}
+            locale={locale}
+            timeZone={timeZone}
+            dashboard={dashboard}
+            onNavigate={(page, search) => openPage(page, true, search ?? "")}
+          />
         ) : (
           <ManagementPage
             name={activePage}
@@ -639,6 +514,14 @@ export function App({ api }: AppProps) {
           />
         )}
       </main>
+      {commandPaletteOpen && (
+        <CommandPalette
+          api={api}
+          locale={locale}
+          onClose={() => setCommandPaletteOpen(false)}
+          onNavigate={(page) => { setCommandPaletteOpen(false); void openPage(page); }}
+        />
+      )}
       <Toast message={shellMessage} locale={locale} onClose={() => setShellMessage("")} />
     </div>
   );
@@ -1972,11 +1855,7 @@ function AuditTable({ api, locale }: { api: AppAPI; locale: Locale }) {
   );
 }
 
-function shortIdentifier(value: string): string {
-  return value.length > 12 ? `${value.slice(0, 12)}…` : value;
-}
-
-function adminTime(value: unknown, locale: Locale = "zh-CN", timeZone?: string) {
+export function adminTime(value: unknown, locale: Locale = "zh-CN", timeZone?: string) {
   if (!value) return "—";
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) return display(value, locale);
@@ -3542,23 +3421,6 @@ function buildPayload(name: string, form: FormData): Record<string, unknown> {
   return {};
 }
 
-function Summary({
-  label,
-  value,
-  tone = "default",
-}: {
-  label: string;
-  value: ReactNode;
-  tone?: string;
-}) {
-  return (
-    <div className="summary-item">
-      <span>{label}</span>
-      <strong className={`tone-${tone}`}>{value}</strong>
-    </div>
-  );
-}
-
 function LifecycleSettings({ api, locale }: { api: AppAPI; locale: Locale }) {
   const t = (source: string) => translate(locale, source);
   const [policy, setPolicy] = useState<LifecyclePolicy | null>(null);
@@ -3918,11 +3780,13 @@ function AccessScreen({
   error: initialError,
   onSubmit,
   locale,
+  tokenRequired = false,
 }: {
   title: string;
   action: string;
   mode: "setup" | "login";
   locale: Locale;
+  tokenRequired?: boolean;
   error?: string;
   onSubmit(
     mode: "setup" | "login",
@@ -3977,16 +3841,22 @@ function AccessScreen({
             onChange={(event) => setUsername(event.target.value)}
           />
         </label>
-        {mode === "setup" && (
-          <label>
-            {t("首次初始化令牌（仅 LAN 安装需要）")}
-            <input
-              type="password"
-              autoComplete="off"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-            />
-          </label>
+        {mode === "setup" && tokenRequired && (
+          <>
+            <label>
+              {t("首次初始化令牌")}
+              <input
+                type="password"
+                autoComplete="off"
+                required
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+              />
+            </label>
+            <p className="field-hint">
+              {t("该令牌由 shadoc start 输出，并在管理员创建成功后失效。")}
+            </p>
+          </>
         )}
         <label>
           {t("密码")}
