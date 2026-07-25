@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 )
@@ -73,6 +74,13 @@ func handleServiceCommand(args []string, stdout io.Writer, executable string, se
 			_, _ = fmt.Fprintf(stdout, "Shadoc started in the background on port %d\n", *port)
 		} else {
 			_, _ = fmt.Fprintln(stdout, "Shadoc started in the background")
+		}
+		token, err := readSetupTokenFile(launchConfig.DataDir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return true, fmt.Errorf("read LAN initialization token: %w", err)
+		}
+		if token != "" {
+			_, _ = fmt.Fprintf(stdout, "LAN initialization token: %s\n", token)
 		}
 		return true, nil
 	case "stop":

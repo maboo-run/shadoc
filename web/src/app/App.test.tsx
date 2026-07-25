@@ -152,7 +152,7 @@ describe("restic-control administration", () => {
     const section = heading.closest("section")!;
     expect(within(section).queryByRole("button", { name: "手动运行" })).not.toBeInTheDocument();
     expect(within(section).queryByRole("columnheader", { name: "最近验证成功" })).not.toBeInTheDocument();
-    expect(within(section).getAllByRole("columnheader")).toHaveLength(8);
+    expect(within(section).getAllByRole("columnheader")).toHaveLength(3);
   });
 
   it("groups hosts, Agents, and databases under one connection entry", async () => {
@@ -269,7 +269,7 @@ describe("restic-control administration", () => {
     tableFrame.scrollLeft = 144;
     await user.click(screen.getByRole("button", { name: "刷新存储容量" }));
     await waitFor(() => expect(action).toHaveBeenCalledWith("/api/repositories/repo-a/capacity", {}));
-    await waitFor(() => expect(listResource).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    await waitFor(() => expect(listResource).toHaveBeenCalledTimes(3), { timeout: 2000 });
     expect(screen.getByRole("row", { name: /照片仓库/ })).toBeVisible();
     expect(tableFrame.scrollLeft).toBe(144);
     resolveRefresh([{
@@ -806,48 +806,7 @@ describe("restic-control administration", () => {
     expect(screen.getByText("失败")).toBeVisible();
     expect(screen.getByText("部分成功")).toBeVisible();
 	expect(screen.getByRole("region", { name: "当前告警" })).toHaveTextContent("仓库完整性异常");
-	expect(screen.getByRole("region", { name: "当前告警" })).toHaveTextContent("仓库检查通过");
 	expect(screen.queryByText("80%")).not.toBeInTheDocument();
-	expect(screen.getByRole("region", { name: "任务健康趋势" })).toHaveTextContent("成功率分母只包含完整成功、部分成功和失败");
-	const dashboardTable = screen.getByRole("table");
-	expect(within(dashboardTable).getByRole("columnheader", { name: "上次应运行" })).toBeVisible();
-	expect(within(dashboardTable).getByRole("columnheader", { name: "实际运行" })).toBeVisible();
-	expect(within(dashboardTable).getByRole("columnheader", { name: "下次计划" })).toBeVisible();
-	const failedRow = screen.getByText("失败任务").closest("tr")!;
-	expect(failedRow.querySelector('time[datetime="2026-07-12T01:00:00Z"]')).not.toBeNull();
-	expect(failedRow.querySelector('time[datetime="2026-07-12T01:02:00Z"]')).not.toBeNull();
-	expect(failedRow.querySelector('time[datetime="2026-07-12T03:00:00Z"]')).not.toBeNull();
-  });
-
-  it("opens the selected task health detail from the dashboard summary", async () => {
-    const user = userEvent.setup();
-    const action = vi.fn(async (path: string) => {
-      if (path === "/api/task-trends") return {
-        generatedAt: "2026-07-16T14:06:00Z",
-        eligibleStatuses: ["success", "partial", "failed"],
-        excludedStatuses: ["queued", "running", "cancelled", "skipped"],
-        tasks: [{
-          taskId: "task-a", taskName: "照片", engine: "restic", latestCompleteSuccessAt: "2026-07-16T13:30:00Z", daily: [],
-          windows: [7, 30, 90].map((windowDays) => ({
-            windowDays, windowStart: "2026-04-17T14:06:00Z", windowEnd: "2026-07-16T14:06:00Z",
-            eligibleCount: 2, completeSuccessCount: 2, partialCount: 0, failedCount: 0, excludedCount: 0,
-            successRate: 100, retryCount: 0, averageDurationMilliseconds: 5000, p95DurationMilliseconds: 5000,
-            metricCoverage: { duration: 2, filesProcessed: 0, filesChanged: 0, bytesProcessed: 0, bytesChanged: 0 },
-          })),
-        }],
-      };
-      if (path.startsWith("/api/activity?")) return { generatedAt: "2026-07-16T14:06:00Z", truncated: false, items: [] };
-      return {};
-    });
-    render(<App api={{ ...fakeAPI, action }} />);
-
-    const trends = await screen.findByRole("region", { name: "任务健康趋势" });
-    await user.click(await within(trends).findByRole("button", { name: "详情" }));
-
-    expect(await screen.findByRole("heading", { name: "照片" })).toBeVisible();
-    expect(window.location.pathname).toBe("/admin/tasks");
-    expect(new URLSearchParams(window.location.search).get("task")).toBe("task-a");
-    expect(new URLSearchParams(window.location.search).get("view")).toBe("health");
   });
 
   it("loads the dashboard and opens the create task workflow", async () => {
@@ -949,9 +908,9 @@ describe("restic-control administration", () => {
       }),
     }} />);
 
-    const runningRow = (await screen.findByText("运行任务")).closest("tr")!;
+    const runningRow = (await screen.findByText("运行任务")).closest('[role="row"]') as HTMLElement;
     expect(within(runningRow).getByRole("status", { name: "状态：运行中" })).toHaveClass("status-active");
-    const stoppedRow = screen.getByText("停止任务").closest("tr")!;
+    const stoppedRow = screen.getByText("停止任务").closest('[role="row"]') as HTMLElement;
     expect(within(stoppedRow).getByRole("status", { name: "状态：已停止" })).toHaveClass("status-stopped");
   });
 
@@ -2341,6 +2300,37 @@ describe("restic-control administration", () => {
       await screen.findByRole("heading", { name: "仪表盘" }),
     ).toBeVisible();
     expect(screen.getByText("owner")).toBeVisible();
+  });
+
+  it("requires and explains the one-time token for LAN initialization", async () => {
+    const user = userEvent.setup();
+    const setup = vi.fn(async () => ({ username: "owner" }));
+    render(
+      <App
+        api={{
+          ...fakeAPI,
+          setupStatus: async () => ({ initialized: false, tokenRequired: true }),
+          setup,
+        }}
+      />,
+    );
+
+    const token = await screen.findByLabelText("首次初始化令牌");
+    expect(token).toBeRequired();
+    expect(
+      screen.getByText("该令牌由 shadoc start 输出，并在管理员创建成功后失效。"),
+    ).toBeVisible();
+    await user.type(screen.getByLabelText("管理员名称"), "owner");
+    await user.type(token, "installer-token");
+    await user.type(screen.getByLabelText("密码"), "correct-horse-battery");
+    await user.type(screen.getByLabelText("再次输入密码"), "correct-horse-battery");
+    await user.click(screen.getByRole("button", { name: "创建管理员" }));
+
+    expect(setup).toHaveBeenCalledWith(
+      "owner",
+      "correct-horse-battery",
+      "installer-token",
+    );
   });
 
   it("shows a useful error when login is rejected", async () => {

@@ -44,6 +44,7 @@ describe("interface locale", () => {
   it("has an English translation for every literal passed to the translation helper", () => {
     const sources = [
       "./app/App.tsx",
+      "./app/Sidebar.tsx",
       "./app/ResourceEditors.tsx",
       "./app/PlanEditor.tsx",
       "./app/OperationFeedback.tsx",
@@ -60,7 +61,15 @@ describe("interface locale", () => {
       "./app/AgentFleet.tsx",
       "./app/ProtectionWizard.tsx",
       "./app/NotificationChannels.tsx",
-	  "./app/ApplicationVersionStatus.tsx",
+      "./app/ApplicationVersionStatus.tsx",
+      "./app/TopBar.tsx",
+      "./app/CommandPalette.tsx",
+      "./app/DashboardKpis.tsx",
+      "./app/DashboardTrendChart.tsx",
+      "./app/DashboardScheduleCoverage.tsx",
+      "./app/DashboardRecentRuns.tsx",
+      "./app/DashboardAlerts.tsx",
+      "./app/Dashboard.tsx",
     ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
     const literals = [...sources.matchAll(/\bt\(\s*"([^"]+)"\s*\)/g)].map((match) => match[1]);
     const missing = [...new Set(literals.filter((source) => translate("en-US", source) === source))];

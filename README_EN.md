@@ -149,6 +149,16 @@ Common commands:
 
 `stop` stops only the control service. It does not delete tasks, secrets, run history, or backup repositories.
 
+When the management UI listens on a non-loopback address and no administrator exists yet, `start` prints a one-time LAN initialization token. The token remains stable across restarts and is removed from the data directory after the administrator is created; enter it when opening the management UI from the LAN for the first time. Loopback initialization does not require a token.
+
+If you forget the token or close its output before creating the administrator, run `start` again with the same `SHADOC_DATA_DIR` and `SHADOC_LISTEN` values used during installation. It displays the same token; if the token file was unexpectedly lost, the Service generates a new token during that start. For example:
+
+```bash
+SHADOC_DATA_DIR=/srv/shadoc SHADOC_LISTEN=0.0.0.0:8585 "$SHADOC_BIN" start
+```
+
+The token is only for first-time initialization; do not send it through an untrusted channel.
+
 ## Upgrading and Uninstalling
 
 Upgrade to the latest stable release:

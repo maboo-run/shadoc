@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -347,17 +346,16 @@ func run(serve serveOptions, overrideConfig bool) error {
 	)
 	cancelCompatibilityProbe()
 
-	setupToken := ""
-	if host, _, splitErr := net.SplitHostPort(cfg.Listen); splitErr == nil {
-		ip := net.ParseIP(host)
-		if ip == nil || !ip.IsLoopback() {
-			raw := make([]byte, 24)
-			if _, err := rand.Read(raw); err != nil {
-				return err
-			}
-			setupToken = base64.RawURLEncoding.EncodeToString(raw)
-			slog.Warn("LAN initialization token; required once before the administrator exists", "token", setupToken)
-		}
+	initialized, err := s.IsInitialized(context.Background())
+	if err != nil {
+		return fmt.Errorf("read administrator initialization state: %w", err)
+	}
+	setupToken, err := prepareSetupToken(cfg.DataDir, cfg.Listen, initialized, rand.Reader)
+	if err != nil {
+		return err
+	}
+	if setupToken != "" {
+		slog.Warn("LAN initialization token; required once before the administrator exists", "token", setupToken)
 	}
 	initialAgentSettings := agentservice.Settings{ListenHost: "0.0.0.0", Port: agentservice.DefaultPort}
 	agentService := agentservice.New(s, secretManager, cfg.DataDir, agentArtifactDir, time.Now)
@@ -380,7 +378,9 @@ func run(serve serveOptions, overrideConfig bool) error {
 	apiServer := httpapi.NewWithRuntime(s, authManager, secretManager, httpapi.Runtime{
 		Runner: taskRunner, Repositories: repositoryService, Paths: toolPaths, Compatibility: initialCompatibility, Installer: resticInstaller, DatabaseBackupPreflighter: backupService,
 		SelectRestic: resticEngine.SetProgram, DatabaseRestore: databaseRestoreService, DumpFileRestore: dbrestore.NewDumpFileService(repositoryService), Ntfy: ntfyClient, Webhook: webhookClient,
-		DataDir: cfg.DataDir, SetupToken: setupToken, Vault: vaultController, Lifecycle: lifecycleService,
+		DataDir: cfg.DataDir, SetupToken: setupToken, ConsumeSetupToken: func() error {
+			return consumeSetupTokenFile(cfg.DataDir)
+		}, Vault: vaultController, Lifecycle: lifecycleService,
 		ApplicationVersion: applicationVersion, ApplicationReleases: releaseCatalog, ApplicationUpdater: applicationUpdater,
 		AgentService: agentService, AgentUninstaller: agentService, AgentUpgrader: agentService, AgentToolProber: agentService, AgentHeartbeatProber: agentService, AgentResticInstaller: agentResticInstaller,
 		AgentRestore:       agentRestoreService,

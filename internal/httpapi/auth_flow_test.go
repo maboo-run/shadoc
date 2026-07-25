@@ -181,6 +181,11 @@ func TestAdministratorSetupLoginAndLogout(t *testing.T) {
 func TestLANSetupRequiresConfiguredOneTimeToken(t *testing.T) {
 	srv := newAuthTestServer(t)
 	srv.setupToken = "installer-token"
+	consumed := 0
+	srv.consumeSetupToken = func() error {
+		consumed++
+		return nil
+	}
 	for _, test := range []struct {
 		token string
 		want  int
@@ -196,5 +201,45 @@ func TestLANSetupRequiresConfiguredOneTimeToken(t *testing.T) {
 		if rec.Code != test.want {
 			t.Fatalf("token %q status=%d body=%s", test.token, rec.Code, rec.Body.String())
 		}
+		if test.want == http.StatusForbidden && !strings.Contains(rec.Body.String(), "局域网首次初始化需要有效的一次性令牌") {
+			t.Fatalf("token %q returned misleading body=%s", test.token, rec.Body.String())
+		}
+	}
+	if consumed != 1 {
+		t.Fatalf("setup token consumed %d times", consumed)
+	}
+}
+
+func TestSetupStatusReportsWhetherLANTokenIsRequired(t *testing.T) {
+	srv := newAuthTestServer(t)
+	srv.setupToken = "installer-token"
+	for _, test := range []struct {
+		name       string
+		remoteAddr string
+		want       bool
+	}{
+		{name: "loopback", remoteAddr: "127.0.0.1:1234", want: false},
+		{name: "lan", remoteAddr: "192.168.1.25:1234", want: true},
+		{name: "malformed", remoteAddr: "untrusted", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/setup/status", nil)
+			req.RemoteAddr = test.remoteAddr
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var status struct {
+				Initialized   bool `json:"initialized"`
+				TokenRequired bool `json:"tokenRequired"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Initialized || status.TokenRequired != test.want {
+				t.Fatalf("status=%+v wantTokenRequired=%t", status, test.want)
+			}
+		})
 	}
 }

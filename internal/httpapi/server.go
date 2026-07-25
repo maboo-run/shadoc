@@ -101,6 +101,7 @@ type Server struct {
 	manualRuns                map[string]string
 	closing                   bool
 	setupToken                string
+	consumeSetupToken         func() error
 	vault                     vaultManager
 	lifecycle                 lifecycleManager
 	operations                *operationruntime.Manager
@@ -278,6 +279,7 @@ type Runtime struct {
 	Webhook                   webhookPublisher
 	DataDir                   string
 	SetupToken                string
+	ConsumeSetupToken         func() error
 	Vault                     vaultManager
 	Lifecycle                 lifecycleManager
 	ApplicationVersion        string
@@ -369,6 +371,7 @@ func NewWithRuntime(s *store.Store, manager *auth.Manager, secrets *secret.Manag
 		background:                background, cancel: cancel,
 		manualRuns:           make(map[string]string),
 		setupToken:           runtime.SetupToken,
+		consumeSetupToken:    runtime.ConsumeSetupToken,
 		vault:                runtime.Vault,
 		lifecycle:            runtime.Lifecycle,
 		operations:           operations,
@@ -3732,12 +3735,10 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式无效")
 		return
 	}
-	host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
-	ip := net.ParseIP(host)
-	local := splitErr == nil && ip != nil && ip.IsLoopback()
+	local := requestIsLoopback(r.RemoteAddr)
 	tokenOK := s.setupToken != "" && subtle.ConstantTimeCompare([]byte(input.Token), []byte(s.setupToken)) == 1
 	if !local && !tokenOK {
-		writeError(w, http.StatusForbidden, "首次初始化只允许从本机访问")
+		writeError(w, http.StatusForbidden, "局域网首次初始化需要有效的一次性令牌；请使用 shadoc start 输出的令牌")
 		return
 	}
 	session, err := s.auth.Setup(r.Context(), input.Username, input.Password)
@@ -3753,6 +3754,11 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("setup administrator", "error", err)
 		writeError(w, http.StatusInternalServerError, "初始化失败")
 		return
+	}
+	if s.consumeSetupToken != nil {
+		if err := s.consumeSetupToken(); err != nil {
+			s.log.Error("consume LAN initialization token", "error", err)
+		}
 	}
 	setSessionCookie(w, session)
 	writeJSON(w, http.StatusCreated, map[string]string{"username": session.Username})
@@ -6622,7 +6628,19 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "无法读取初始化状态")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"initialized": initialized})
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"initialized":   initialized,
+		"tokenRequired": !initialized && !requestIsLoopback(r.RemoteAddr),
+	})
+}
+
+func requestIsLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
