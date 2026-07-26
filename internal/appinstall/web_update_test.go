@@ -24,3 +24,18 @@ func TestWebUpdaterLaunchesOnlyFixedValidatedHelperArguments(t *testing.T) {
 		t.Fatal("download URL was accepted as a version")
 	}
 }
+
+func TestSystemWebUpdaterCarriesServiceScopeIntoTheHelper(t *testing.T) {
+	var gotArguments []string
+	updater := NewWebUpdaterWithScope("/var/lib/shadoc/app/shadoc", "/var/lib/shadoc", "127.0.0.1:8585", true, "system", func(_, _ string, arguments []string) error {
+		gotArguments = append([]string(nil), arguments...)
+		return nil
+	})
+	if err := updater.Launch(context.Background(), "op_0123456789abcdef01234567", "v1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	want := "[managed-update --operation-id op_0123456789abcdef01234567 --version v1.2.3 --data-dir /var/lib/shadoc --listen 127.0.0.1:8585 --service-scope system]"
+	if fmt.Sprint(gotArguments) != want {
+		t.Fatalf("arguments=%v", gotArguments)
+	}
+}

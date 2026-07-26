@@ -74,6 +74,9 @@ func (i *Installer) InstallCurrent(ctx context.Context, current string) error {
 	if err := copyAtomic(current, i.paths.Binary); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
+	if err := writeInstalledChecksumForFile(i.paths.Binary); err != nil {
+		return errors.Join(err, i.restoreInstallBinary(knownGood, hadKnownGood))
+	}
 	companions, err := installCompanions(current, i.paths.Binary, i.paths.Companions)
 	if err != nil {
 		return errors.Join(fmt.Errorf("install companion files: %w", err), i.restoreInstallBinary(knownGood, hadKnownGood))
@@ -107,12 +110,18 @@ func (i *Installer) restoreInstallBinary(knownGood []byte, existed bool) error {
 		if err := writeAtomic(i.paths.Binary, knownGood); err != nil {
 			return fmt.Errorf("restore installed binary: %w", err)
 		}
+		if err := writeInstalledChecksumForFile(i.paths.Binary); err != nil {
+			return fmt.Errorf("restore installed binary integrity record: %w", err)
+		}
 		return nil
 	}
-	if err := os.Remove(i.paths.Binary); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove failed installation: %w", err)
+	var cleanupErr error
+	for _, path := range []string{i.paths.Binary, ChecksumPath(i.paths.Binary)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
-	return nil
+	return cleanupErr
 }
 
 func (i *Installer) Update(ctx context.Context, version string) error {
@@ -158,6 +167,9 @@ func (i *Installer) UpdateWithReporter(ctx context.Context, version string, repo
 	if err := writeAtomic(i.paths.Binary, artifact.Binary); err != nil {
 		return fmt.Errorf("replace binary: %w", err)
 	}
+	if err := writeInstalledChecksum(i.paths.Binary, artifact.SHA256); err != nil {
+		return i.rollback(ctx, err, reporter)
+	}
 	if err := reportUpdateStage(reporter, "restarting_service"); err != nil {
 		return i.rollback(ctx, err, reporter)
 	}
@@ -186,7 +198,7 @@ func (i *Installer) Uninstall(removeData bool) error {
 		return fmt.Errorf("unregister service: %w", err)
 	}
 	var cleanupErr error
-	paths := []string{i.paths.Binary, i.paths.Previous}
+	paths := []string{i.paths.Binary, i.paths.Previous, ChecksumPath(i.paths.Binary)}
 	for _, name := range i.paths.Companions {
 		if name == "" || filepath.Base(name) != name {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("unsafe companion filename %q", name))
@@ -275,6 +287,9 @@ func (i *Installer) rollback(ctx context.Context, updateErr error, reporter Upda
 	if err := writeAtomic(i.paths.Binary, previous); err != nil {
 		return errors.Join(updateErr, fmt.Errorf("restore rollback binary: %w", err))
 	}
+	if err := writeInstalledChecksumForFile(i.paths.Binary); err != nil {
+		return errors.Join(updateErr, fmt.Errorf("restore rollback integrity record: %w", err))
+	}
 	if err := i.services.Restart(); err != nil {
 		return errors.Join(updateErr, fmt.Errorf("restart rolled back service: %w", err))
 	}
@@ -312,7 +327,11 @@ func copyAtomic(source, target string) error {
 }
 
 func writeAtomic(target string, content []byte) error {
-	return writeFromAtomic(target, &byteReader{content: content})
+	return writeAtomicMode(target, content, 0o755)
+}
+
+func writeAtomicMode(target string, content []byte, mode os.FileMode) error {
+	return writeFromAtomicMode(target, &byteReader{content: content}, mode)
 }
 
 type byteReader struct {
@@ -330,6 +349,10 @@ func (r *byteReader) Read(p []byte) (int, error) {
 }
 
 func writeFromAtomic(target string, source io.Reader) (retErr error) {
+	return writeFromAtomicMode(target, source, 0o755)
+}
+
+func writeFromAtomicMode(target string, source io.Reader, mode os.FileMode) (retErr error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -345,7 +368,7 @@ func writeFromAtomic(target string, source io.Reader) (retErr error) {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if err := tmp.Chmod(0o755); err != nil {
+	if err := tmp.Chmod(mode.Perm()); err != nil {
 		return err
 	}
 	if _, err := io.Copy(tmp, source); err != nil {

@@ -29,7 +29,8 @@ type streamingSummaryExecutor struct{}
 
 func (streamingSummaryExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
 	if spec.Stdout != nil {
-		_, _ = spec.Stdout.Write([]byte(`{"message_type":"status","percent_done":0.9}` + "\n"))
+		_, _ = spec.Stdout.Write([]byte(`{"message_type":"status","percent_done":0.2,"total_files":5,"files_done":1}` + "\n"))
+		_, _ = spec.Stdout.Write([]byte(`{"message_type":"status","percent_done":0.9,"total_files":7,"files_done":3}` + "\n"))
 		_, _ = spec.Stdout.Write([]byte(`{"message_type":"summary","snapshot_id":"streamed","files_new":2,"total_files_processed":3,"total_bytes_processed":300,"data_added":120,"total_duration":0.5}` + "\n"))
 	}
 	return command.Result{ExitCode: 0, Stdout: `{"message_type":"status","percent_done":0.9}` + "\n"}, nil
@@ -177,7 +178,7 @@ func TestEngineReadsFinalSummaryFromUnboundedOutputStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SnapshotID != "streamed" || result.Summary["filesProcessed"] != int64(3) || result.Summary["bytesChanged"] != int64(120) {
+	if result.SnapshotID != "streamed" || result.Summary["filesExpected"] != int64(7) || result.Summary["filesProcessed"] != int64(3) || result.Summary["bytesChanged"] != int64(120) {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -214,8 +215,12 @@ func TestEngineVerifiesExistingRepositoryWithFixedReadOnlyArguments(t *testing.T
 
 func TestEngineMapsResticExitThreeToPartialSuccess(t *testing.T) {
 	recorder := &recordingExecutor{
-		result: command.Result{ExitCode: 3, Stdout: `{"message_type":"summary","snapshot_id":"partial1"}` + "\n"},
-		err:    errors.New("exit status 3"),
+		result: command.Result{ExitCode: 3, Stdout: strings.Join([]string{
+			`{"message_type":"status","total_files":8354,"files_done":8353}`,
+			`{"message_type":"summary","snapshot_id":"partial1","total_files_processed":8353}`,
+			"",
+		}, "\n")},
+		err: errors.New("exit status 3"),
 	}
 	engine := New("/tools/restic", recorder, t.TempDir())
 	result, err := engine.Execute(context.Background(), Operation{
@@ -228,6 +233,73 @@ func TestEngineMapsResticExitThreeToPartialSuccess(t *testing.T) {
 	}
 	if result.Outcome != Partial || result.SnapshotID != "partial1" {
 		t.Fatalf("unexpected partial result: %+v", result)
+	}
+	if result.Summary["filesExpected"] != int64(8354) || result.Summary["filesProcessed"] != int64(8353) || result.Summary["filesFailed"] != int64(1) {
+		t.Fatalf("partial file evidence=%+v", result.Summary)
+	}
+}
+
+func TestPartialBackupCountsDistinctUnreadableItemsWhenResticOmitsStatus(t *testing.T) {
+	recorder := &recordingExecutor{
+		result: command.Result{ExitCode: 3, Stdout: strings.Join([]string{
+			`{"message_type":"error","error":{"message":"permission denied"},"during":"archival","item":"/srv/stacks/gitea/data/ssh/ssh_host_rsa_key"}`,
+			`{"message_type":"error","error":{"message":"permission denied"},"during":"archival","item":"/srv/stacks/gitea/data/ssh/ssh_host_rsa_key"}`,
+			`{"message_type":"error","error":{"message":"permission denied"},"during":"archival","item":"/srv/stacks/other/private.key"}`,
+			`{"message_type":"summary","snapshot_id":"partial-errors","total_files_processed":8353}`,
+			"",
+		}, "\n")},
+		err: errors.New("exit status 3"),
+	}
+	engine := New("/tools/restic", recorder, t.TempDir())
+	result, err := engine.Execute(t.Context(), Operation{
+		Kind: BackupDirectory, Repository: Repository{Location: "/tmp/repository", Password: "secret"},
+		Directory: &DirectoryBackup{Path: "/srv/stacks"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != Partial || result.Summary["filesExpected"] != int64(8355) || result.Summary["filesProcessed"] != int64(8353) || result.Summary["filesFailed"] != int64(2) {
+		t.Fatalf("partial file evidence=%+v", result)
+	}
+}
+
+func TestSuccessfulBackupFallsBackToEqualExpectedAndProcessedCountsWithoutStatusOutput(t *testing.T) {
+	recorder := &recordingExecutor{
+		result: command.Result{ExitCode: 0, Stdout: `{"message_type":"summary","snapshot_id":"complete","total_files_processed":42}` + "\n"},
+	}
+	engine := New("/tools/restic", recorder, t.TempDir())
+	result, err := engine.Execute(context.Background(), Operation{
+		Kind:       BackupDirectory,
+		Repository: Repository{Location: "/tmp/repository", Password: "secret"},
+		Directory:  &DirectoryBackup{Path: "/srv/photos"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != Success || result.Summary["filesExpected"] != int64(42) || result.Summary["filesProcessed"] != int64(42) || result.Summary["filesFailed"] != int64(0) {
+		t.Fatalf("complete file evidence=%+v", result)
+	}
+}
+
+func TestEngineDoesNotReportCompleteSuccessWhenSameRunFileCountsDiffer(t *testing.T) {
+	recorder := &recordingExecutor{
+		result: command.Result{ExitCode: 0, Stdout: strings.Join([]string{
+			`{"message_type":"status","total_files":10,"files_done":9}`,
+			`{"message_type":"summary","snapshot_id":"count-mismatch","total_files_processed":9}`,
+			"",
+		}, "\n")},
+	}
+	engine := New("/tools/restic", recorder, t.TempDir())
+	result, err := engine.Execute(context.Background(), Operation{
+		Kind:       BackupDirectory,
+		Repository: Repository{Location: "/tmp/repository", Password: "secret"},
+		Directory:  &DirectoryBackup{Path: "/srv/photos"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != Partial || result.Summary["filesFailed"] != int64(1) {
+		t.Fatalf("mismatched same-run evidence must be partial: %+v", result)
 	}
 }
 

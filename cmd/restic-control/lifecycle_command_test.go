@@ -43,6 +43,27 @@ func TestLifecycleCommandRoutesInstallAndSelectedUpdateVersion(t *testing.T) {
 	}
 }
 
+func TestLifecycleCommandsAcceptAndReportExplicitSystemScope(t *testing.T) {
+	for _, args := range [][]string{
+		{"install-app", "--system"},
+		{"update-app", "--system", "--version", "1.2.3"},
+		{"uninstall-app", "--system"},
+	} {
+		scope, err := lifecycleCommandScope(args)
+		if err != nil || scope != systemServiceScope {
+			t.Fatalf("args=%v scope=%q err=%v", args, scope, err)
+		}
+		lifecycle := &fakeLifecycle{}
+		handled, err := handleLifecycleCommand(context.Background(), args, bytes.NewBuffer(nil), &bytes.Buffer{}, lifecycle, "/tmp/current")
+		if err != nil || !handled {
+			t.Fatalf("args=%v handled=%t err=%v", args, handled, err)
+		}
+	}
+	if _, err := lifecycleCommandScope([]string{"serve"}); err == nil {
+		t.Fatal("non-lifecycle command returned a scope")
+	}
+}
+
 func TestRemoveDataRequiresExplicitInteractiveConfirmation(t *testing.T) {
 	for _, test := range []struct {
 		input     string

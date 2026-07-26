@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { translate, type Locale } from "../i18n";
 import type { AppAPI, DashboardTask } from "./App";
 import { OperationFeedback, useOperation } from "./OperationFeedback";
+import { formatDateTime } from "./dateTime";
 
 type VerificationSchedule = {
   kind: "daily" | "weekly" | "interval";
@@ -70,13 +71,13 @@ type PolicyForm = {
 
 const emptyOverview: RestoreVerificationOverview = { policies: [], records: [], cleanupRequired: [] };
 
-export function RestoreVerificationPanel({ api, locale }: { api: AppAPI; locale: Locale }) {
+export function RestoreVerificationPanel({ api, locale, timeZone }: { api: AppAPI; locale: Locale; timeZone: string }) {
   const t = (source: string) => translate(locale, source);
   const [tasks, setTasks] = useState<VerificationTask[]>([]);
   const [dashboardTasks, setDashboardTasks] = useState<Array<DashboardTask & { latestVerifiedRestore?: RestoreVerificationRecord }>>([]);
   const [overview, setOverview] = useState<RestoreVerificationOverview>(emptyOverview);
   const [taskID, setTaskID] = useState("");
-  const [form, setForm] = useState<PolicyForm>(() => defaultForm());
+  const [form, setForm] = useState<PolicyForm>(() => defaultForm(timeZone));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -115,8 +116,8 @@ export function RestoreVerificationPanel({ api, locale }: { api: AppAPI; locale:
 
   const policy = overview.policies.find((item) => item.taskId === taskID);
   useLayoutEffect(() => {
-    setForm(policy ? formFromPolicy(policy) : defaultForm());
-  }, [taskID, policy]);
+    setForm(policy ? formFromPolicy(policy) : defaultForm(timeZone));
+  }, [taskID, policy, timeZone]);
 
   useEffect(() => {
     setMessage("");
@@ -209,11 +210,11 @@ export function RestoreVerificationPanel({ api, locale }: { api: AppAPI; locale:
       <div className="restore-proof-grid">
         <EvidenceCard title={t("最近完整备份")} empty={t("尚无完整成功备份")} values={dashboardTask?.lastCompleteBackup ? [
           [t("快照 ID"), dashboardTask.lastCompleteBackup.snapshotId],
-          [t("完成时间"), formatTime(dashboardTask.lastCompleteBackup.finishedAt ?? dashboardTask.lastCompleteBackup.startedAt, locale)],
+          [t("完成时间"), formatDateTime(dashboardTask.lastCompleteBackup.finishedAt ?? dashboardTask.lastCompleteBackup.startedAt, locale, timeZone)],
         ] : []} />
-        <EvidenceCard title={t("最近验证成功")} empty={t("尚无成功恢复验证")} values={latestVerified ? verificationValues(latestVerified, locale, t) : []} />
+        <EvidenceCard title={t("最近验证成功")} empty={t("尚无成功恢复验证")} values={latestVerified ? verificationValues(latestVerified, locale, timeZone, t) : []} />
       </div>
-      {policy && <p className="field-help">{t("下次验证")}：{policy.nextRun ? formatTime(policy.nextRun, locale) : t("尚未安排")}；{t("最近计划状态")}：{policy.lastScheduleStatus ? verificationStatus(policy.lastScheduleStatus, t) : t("尚无记录")}</p>}
+      {policy && <p className="field-help">{t("下次验证")}：{policy.nextRun ? formatDateTime(policy.nextRun, locale, timeZone) : t("尚未安排")}；{t("最近计划状态")}：{policy.lastScheduleStatus ? verificationStatus(policy.lastScheduleStatus, t) : t("尚无记录")}</p>}
       {latestAttempt && latestAttempt.status !== "success" && <p className="warning-text" role="status">{t("最近一次验证")}：{verificationStatus(latestAttempt.status, t)}{latestAttempt.errorSummary ? ` · ${latestAttempt.errorSummary}` : ""}</p>}
       {cleanupRequired.map((record) => <div className="restore-cleanup-callout" role="alert" key={record.id}><span>{t("临时内容仍需清理")} · {record.id}</span><button className="danger-button" type="button" aria-label={`${t("重试清理")} ${record.id}`} disabled={operation.active} onClick={() => void operation.start(`/api/restore-verifications/${encodeURIComponent(record.id)}/cleanup`, {})}>{t("重试清理")}</button></div>)}
     </>}
@@ -223,10 +224,10 @@ export function RestoreVerificationPanel({ api, locale }: { api: AppAPI; locale:
   </section>;
 }
 
-function defaultForm(): PolicyForm {
+function defaultForm(timeZone: string): PolicyForm {
   return {
     scheduleKind: "interval", timeOfDay: "03:00", dayOfWeek: 0, intervalHours: 168,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", selectionPath: "",
+    timezone: timeZone, selectionPath: "",
     maximumMiB: 1024, maximumSuccessAgeHours: 24 * 8, catchUpWindowMinutes: 60, enabled: false,
   };
 }
@@ -255,10 +256,10 @@ function EvidenceCard({ title, empty, values }: { title: string; empty: string; 
   return <article className="restore-proof-card"><h3>{title}</h3>{values.length ? <dl>{values.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "—"}</dd></div>)}</dl> : <p>{empty}</p>}</article>;
 }
 
-function verificationValues(record: RestoreVerificationRecord, locale: Locale, t: (source: string) => string): string[][] {
+function verificationValues(record: RestoreVerificationRecord, locale: Locale, timeZone: string, t: (source: string) => string): string[][] {
   return [
     [t("快照 ID"), record.snapshotId],
-    [t("完成时间"), formatTime(record.finishedAt ?? record.startedAt, locale)],
+    [t("完成时间"), formatDateTime(record.finishedAt ?? record.startedAt, locale, timeZone)],
     [t("耗时"), duration(record.startedAt, record.finishedAt, locale)],
     [t("读取数据"), `${new Intl.NumberFormat(locale).format(record.fileCount)} ${t("个文件")} · ${formatBytes(record.byteCount, locale)}`],
     [t("清理状态"), record.cleanupStatus === "removed" ? t("已清理") : t("待清理")],
@@ -276,12 +277,6 @@ function formatBytes(bytes: number, locale: Locale): string {
   if (bytes < 1024) return `${new Intl.NumberFormat(locale).format(bytes)} B`;
   if (bytes < 1024 * 1024) return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(bytes / 1024)} KiB`;
   return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(bytes / 1024 / 1024)} MiB`;
-}
-
-function formatTime(value: string | undefined, locale: Locale): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "medium" }).format(date);
 }
 
 function verificationStatus(status: string, t: (source: string) => string): string {

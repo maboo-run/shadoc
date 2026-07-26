@@ -15,8 +15,23 @@ type Config struct {
 	Listen       string
 }
 
+const LinuxSystemDataDir = "/var/lib/shadoc"
+
 func Load(getenv func(string) string) (Config, error) {
 	return load(getenv, os.UserConfigDir)
+}
+
+func LoadSystem(getenv func(string) string, goos string) (Config, error) {
+	if getenv == nil {
+		return Config{}, errors.New("environment reader is required")
+	}
+	if goos != "linux" {
+		return Config{}, fmt.Errorf("system service configuration is unsupported on %s", goos)
+	}
+	if configured := compatibleValue(getenv, "SHADOC_DATA_DIR", "RESTIC_CONTROL_DATA_DIR"); configured != "" && filepath.Clean(configured) != LinuxSystemDataDir {
+		return Config{}, fmt.Errorf("system service data directory must be %s", LinuxSystemDataDir)
+	}
+	return configForDataDir(getenv, LinuxSystemDataDir)
 }
 
 func load(getenv func(string) string, userConfigDir func() (string, error)) (Config, error) {
@@ -32,8 +47,11 @@ func load(getenv func(string) string, userConfigDir func() (string, error)) (Con
 		}
 		dataDir = defaultDataDirectory(base)
 	}
-	dataDir = filepath.Clean(dataDir)
+	return configForDataDir(getenv, dataDir)
+}
 
+func configForDataDir(getenv func(string) string, dataDir string) (Config, error) {
+	dataDir = filepath.Clean(dataDir)
 	listen := compatibleValue(getenv, "SHADOC_LISTEN", "RESTIC_CONTROL_LISTEN")
 	if listen == "" {
 		listen = "127.0.0.1:8585"

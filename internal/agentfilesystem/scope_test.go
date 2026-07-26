@@ -3,6 +3,7 @@ package agentfilesystem
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,12 +65,21 @@ func TestScopePreviewReportsUnreadableDirectories(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
 
-	preview, err := scanScope(root, nil, 100)
+	var blockedEntries []ScopeEntry
+	preview, err := ScanScope(t.Context(), root, nil, 100, func(entry ScopeEntry) error {
+		if entry.Path == "blocked" {
+			blockedEntries = append(blockedEntries, entry)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.UnreadableItems == 0 {
+	if preview.UnreadableItems != 1 || preview.ScannedItems != 1 {
 		t.Fatalf("preview=%+v", preview)
+	}
+	if len(blockedEntries) != 1 || blockedEntries[0].Disposition != ScopeUnreadable || blockedEntries[0].Type != ScopeDirectory {
+		t.Fatalf("blocked entries=%+v", blockedEntries)
 	}
 }
 
@@ -90,6 +100,68 @@ func TestDoubleStarScopePatternsMatchDirectoriesAndDescendants(t *testing.T) {
 		if got := matchScopePattern(test.pattern, test.path); got != test.match {
 			t.Fatalf("matchScopePattern(%q, %q)=%v want %v", test.pattern, test.path, got, test.match)
 		}
+	}
+}
+
+func TestScopeInventoryListsRelativePathsAndClassifiesIncludedAndExcludedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeScopeFile(t, filepath.Join(root, "photos", "a.jpg"), 30)
+	writeScopeFile(t, filepath.Join(root, "cache", "thumb.bin"), 10)
+	if err := os.Symlink(filepath.Join(root, "photos", "a.jpg"), filepath.Join(root, "photo-link")); err != nil {
+		t.Fatal(err)
+	}
+	var entries []ScopeEntry
+	preview, err := ScanScope(t.Context(), root, []string{"cache/**"}, 100, func(entry ScopeEntry) error {
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.TotalFiles != 3 || preview.IncludedFiles != 2 || preview.ExcludedFiles != 1 {
+		t.Fatalf("preview=%+v", preview)
+	}
+	byPath := make(map[string]ScopeEntry, len(entries))
+	for _, entry := range entries {
+		if filepath.IsAbs(entry.Path) || strings.Contains(entry.Path, root) {
+			t.Fatalf("inventory leaked absolute path: %+v", entry)
+		}
+		byPath[entry.Path] = entry
+	}
+	if byPath["photos/a.jpg"].Disposition != ScopeIncluded || byPath["photos/a.jpg"].Type != ScopeRegularFile {
+		t.Fatalf("included=%+v", byPath["photos/a.jpg"])
+	}
+	if byPath["cache/thumb.bin"].Disposition != ScopeExcluded || byPath["cache/thumb.bin"].ReasonCode != ScopeReasonExclusionRule || len(byPath["cache/thumb.bin"].RuleIndexes) != 1 {
+		t.Fatalf("excluded=%+v", byPath["cache/thumb.bin"])
+	}
+	if byPath["photo-link"].Type != ScopeSymlink {
+		t.Fatalf("symlink=%+v", byPath["photo-link"])
+	}
+}
+
+func TestScopeInventoryTreatsARegularFileThatCannotBeOpenedAsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open mode-zero files")
+	}
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked.key")
+	writeScopeFile(t, blocked, 5)
+	if err := os.Chmod(blocked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o600) })
+	var entry ScopeEntry
+	preview, err := ScanScope(t.Context(), root, nil, 100, func(candidate ScopeEntry) error {
+		if candidate.Path == "blocked.key" {
+			entry = candidate
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.TotalFiles != 1 || preview.IncludedFiles != 0 || preview.UnreadableItems != 1 || entry.Disposition != ScopeUnreadable {
+		t.Fatalf("preview=%+v entry=%+v", preview, entry)
 	}
 }
 

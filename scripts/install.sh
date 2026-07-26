@@ -4,6 +4,7 @@ set -eu
 repository="maboo-run/shadoc"
 requested_version=${SHADOC_VERSION:-latest}
 install_agents=${SHADOC_INSTALL_AGENTS:-1}
+install_as_root=0
 
 fail() {
   printf 'Shadoc installation failed: %s\n' "$*" >&2
@@ -20,8 +21,10 @@ require_command awk
 require_command uname
 require_command mktemp
 
-if [ "$(id -u)" -eq 0 ] && [ "${SHADOC_ALLOW_ROOT:-0}" != "1" ]; then
-  fail "refusing to install as root; use a normal service account or set SHADOC_ALLOW_ROOT=1 after reviewing the risk"
+if [ "$(id -u)" -eq 0 ]; then
+  [ "${SHADOC_ALLOW_ROOT:-0}" = "1" ] ||
+    fail "refusing to install as root; set SHADOC_ALLOW_ROOT=1 after reviewing the risk"
+  install_as_root=1
 fi
 
 case "$install_agents" in
@@ -34,6 +37,15 @@ case "$(uname -s)" in
   Darwin) platform=darwin ;;
   *) fail "the control service supports only Linux and macOS" ;;
 esac
+
+if [ "$install_as_root" = "1" ]; then
+  [ "$platform" = "linux" ] || fail "root system service installation is currently supported only on Linux"
+  if [ -n "${SHADOC_DATA_DIR:-}" ] && [ "$SHADOC_DATA_DIR" != "/var/lib/shadoc" ]; then
+    fail "root system service data directory must be /var/lib/shadoc"
+  fi
+  SHADOC_DATA_DIR=/var/lib/shadoc
+  export SHADOC_DATA_DIR
+fi
 
 case "$(uname -m)" in
   x86_64|amd64) architecture=amd64 ;;
@@ -107,7 +119,11 @@ for asset in $assets; do
   esac
 done
 
-"$temporary_directory/$control_asset" install-app
+if [ "$install_as_root" = "1" ]; then
+  "$temporary_directory/$control_asset" install-app --system
+else
+  "$temporary_directory/$control_asset" install-app
+fi
 
 if [ -n "${SHADOC_DATA_DIR:-}" ]; then
   managed_binary="$SHADOC_DATA_DIR/app/shadoc"
@@ -120,4 +136,8 @@ fi
 printf '\nShadoc is installed and running.\n'
 printf 'Configured management listener: %s\n' "${SHADOC_LISTEN:-127.0.0.1:8585}"
 printf 'Managed command: %s\n' "$managed_binary"
-printf 'Check status with: "%s" status\n' "$managed_binary"
+if [ "$install_as_root" = "1" ]; then
+  printf 'Check status with: sudo "%s" status --system\n' "$managed_binary"
+else
+  printf 'Check status with: "%s" status\n' "$managed_binary"
+fi

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,10 +111,14 @@ func TestAgentLeaseCompletionIsAcceptedExactlyOnce(t *testing.T) {
 	if _, err := s.ClaimAgentLease(ctx, "agent-1", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "succeeded", json.RawMessage(`{"status":"succeeded"}`), now); err != nil {
+	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "partial", json.RawMessage(`{"status":"partial"}`), now); err != nil {
 		t.Fatalf("complete lease: %v", err)
 	}
-	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "succeeded", json.RawMessage(`{"status":"succeeded"}`), now); !errors.Is(err, sql.ErrNoRows) {
+	completed, err := s.AgentLeaseStatus(ctx, "lease-1")
+	if err != nil || completed.Status != "partial" {
+		t.Fatalf("completed=%+v err=%v", completed, err)
+	}
+	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "partial", json.RawMessage(`{"status":"partial"}`), now); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("second completion error = %v", err)
 	}
 }
@@ -140,6 +145,21 @@ func TestAgentFilesystemRequestLifecycle(t *testing.T) {
 	completed, err := s.AgentFilesystemRequestStatus(ctx, request.ID)
 	if err != nil || completed.Status != "succeeded" || string(completed.Result) != string(result) || completed.CompletedAt == nil {
 		t.Fatalf("completed=%+v err=%v", completed, err)
+	}
+
+	expiring := AgentFilesystemRequest{ID: "fs-expiring", AgentID: "agent-1", Definition: request.Definition, ExpiresAt: now.Add(time.Minute), CreatedAt: now.Add(time.Second)}
+	if err := s.CreateAgentFilesystemRequest(ctx, expiring); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimAgentFilesystemRequest(ctx, "agent-1", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExpireAgentFilesystemRequest(ctx, expiring.ID, "inventory timed out", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := s.AgentFilesystemRequestStatus(ctx, expiring.ID)
+	if err != nil || expired.Status != "failed" || expired.CompletedAt == nil || !strings.Contains(string(expired.Result), "inventory timed out") {
+		t.Fatalf("expired=%+v err=%v", expired, err)
 	}
 }
 
@@ -327,5 +347,36 @@ INSERT INTO operations VALUES ('deploy-1','agent_deploy','admin','','','','agent
 	}
 	if stoppedAt.Valid || uninstalledAt.Valid {
 		t.Fatalf("legacy Agent unexpectedly stopped or uninstalled: stopped=%v uninstalled=%v", stoppedAt, uninstalledAt)
+	}
+}
+
+func TestEnsureAgentRemoteHostsClearsDanglingBinding(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SaveAgent(ctx, AgentRecord{
+		ID: "agent-a", CertificateSerial: "serial-a", Status: "offline",
+		CreatedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE agents SET remote_host_id='deleted-host' WHERE id='agent-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ensureAgentRemoteHosts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var binding sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT remote_host_id FROM agents WHERE id='agent-a'`).Scan(&binding); err != nil {
+		t.Fatal(err)
+	}
+	if binding.Valid {
+		t.Fatalf("dangling remote host binding was not cleared: %q", binding.String)
 	}
 }

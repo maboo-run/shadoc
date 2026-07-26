@@ -194,6 +194,7 @@ func (e *Engine) Execute(ctx context.Context, operation Operation) (Result, erro
 	}
 	if processResult.ExitCode == 3 && operation.Kind == BackupDirectory {
 		result.Outcome = Partial
+		completeFileEvidence(result.Summary, false)
 		return result, nil
 	}
 	if processErr != nil && (errors.Is(processErr, os.ErrNotExist) || errors.Is(processErr, os.ErrPermission)) {
@@ -202,6 +203,12 @@ func (e *Engine) Execute(ctx context.Context, operation Operation) (Result, erro
 	if processErr != nil || processResult.ExitCode != 0 {
 		result.Outcome = Failure
 		return result, executionError{kind: operation.Kind, exitCode: processResult.ExitCode, stderr: processResult.Stderr, cause: processErr}
+	}
+	if operation.Kind == BackupDirectory {
+		completeFileEvidence(result.Summary, true)
+		if fileEvidenceDiffers(result.Summary) {
+			result.Outcome = Partial
+		}
 	}
 	return result, nil
 }
@@ -485,24 +492,40 @@ type resticSummaryMessage struct {
 	TotalDuration       *float64 `json:"total_duration"`
 }
 
+type resticStatusMessage struct {
+	MessageType string `json:"message_type"`
+	TotalFiles  *int64 `json:"total_files"`
+}
+
 func parsedBackupSummary(output string) (string, map[string]any) {
 	var latest resticSummaryMessage
+	var expected *int64
+	failedItems := make(map[string]struct{})
 	found := false
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	scanner.Buffer(make([]byte, 16<<10), 1<<20)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		var status resticStatusMessage
+		if json.Unmarshal(line, &status) == nil && status.MessageType == "status" && validNonNegative(status.TotalFiles) && (expected == nil || *status.TotalFiles > *expected) {
+			value := *status.TotalFiles
+			expected = &value
+		}
+		if item, ok := resticSourceErrorItem(line); ok {
+			failedItems[item] = struct{}{}
+		}
 		var message resticSummaryMessage
-		if json.Unmarshal(scanner.Bytes(), &message) == nil && message.MessageType == "summary" {
+		if json.Unmarshal(line, &message) == nil && message.MessageType == "summary" {
 			latest, found = message, true
 		}
 	}
 	if !found {
 		return "", nil
 	}
-	return resticSummaryValues(latest)
+	return resticSummaryValues(latest, expected, int64(len(failedItems)))
 }
 
-func resticSummaryValues(latest resticSummaryMessage) (string, map[string]any) {
+func resticSummaryValues(latest resticSummaryMessage, expected *int64, observedFailures int64) (string, map[string]any) {
 	summary := map[string]any{}
 	add := func(key string, value *int64) {
 		if value != nil && *value >= 0 {
@@ -512,7 +535,11 @@ func resticSummaryValues(latest resticSummaryMessage) (string, map[string]any) {
 	add("filesNew", latest.FilesNew)
 	add("filesModified", latest.FilesChanged)
 	add("filesUnmodified", latest.FilesUnmodified)
+	add("filesExpected", expected)
 	add("filesProcessed", latest.TotalFilesProcessed)
+	if observedFailures > 0 {
+		summary["filesFailed"] = observedFailures
+	}
 	add("bytesProcessed", latest.TotalBytesProcessed)
 	add("dataAdded", latest.DataAdded)
 	add("dataAddedPacked", latest.DataAddedPacked)
@@ -538,12 +565,65 @@ func resticSummaryValues(latest resticSummaryMessage) (string, map[string]any) {
 	return latest.SnapshotID, summary
 }
 
+func validNonNegative(value *int64) bool {
+	return value != nil && *value >= 0
+}
+
+func resticSourceErrorItem(line []byte) (string, bool) {
+	var message struct {
+		MessageType string `json:"message_type"`
+		During      string `json:"during"`
+		Item        string `json:"item"`
+	}
+	if json.Unmarshal(line, &message) != nil || message.MessageType != "error" || message.During != "archival" || message.Item == "" {
+		return "", false
+	}
+	return message.Item, true
+}
+
+func completeFileEvidence(summary map[string]any, complete bool) {
+	if summary == nil {
+		return
+	}
+	processed, processedOK := summary["filesProcessed"].(int64)
+	expected, expectedOK := summary["filesExpected"].(int64)
+	observedFailures, failuresOK := summary["filesFailed"].(int64)
+	if processedOK {
+		minimumExpected := processed
+		if failuresOK && observedFailures > 0 && processed <= math.MaxInt64-observedFailures {
+			minimumExpected = processed + observedFailures
+		} else if !complete && processed < math.MaxInt64 {
+			// Restic exit code 3 guarantees at least one source item was not
+			// read, even when a short run emitted no status or error JSON.
+			minimumExpected = processed + 1
+		}
+		if !expectedOK || expected < minimumExpected {
+			expected, expectedOK = minimumExpected, true
+			summary["filesExpected"] = expected
+		} else if expected < processed {
+			expected = processed
+			summary["filesExpected"] = expected
+		}
+	}
+	if expectedOK && processedOK && expected >= processed {
+		summary["filesFailed"] = expected - processed
+	}
+}
+
+func fileEvidenceDiffers(summary map[string]any) bool {
+	expected, expectedOK := summary["filesExpected"].(int64)
+	processed, processedOK := summary["filesProcessed"].(int64)
+	return expectedOK && processedOK && expected != processed
+}
+
 type resticSummaryCollector struct {
-	mu     sync.Mutex
-	buffer strings.Builder
-	seen   bool
-	found  bool
-	latest resticSummaryMessage
+	mu            sync.Mutex
+	buffer        strings.Builder
+	seen          bool
+	found         bool
+	latest        resticSummaryMessage
+	expectedFiles *int64
+	failedItems   map[string]struct{}
 }
 
 func (c *resticSummaryCollector) Write(value []byte) (int, error) {
@@ -574,6 +654,17 @@ func (c *resticSummaryCollector) append(value []byte) {
 }
 
 func (c *resticSummaryCollector) consume(line string) {
+	if item, ok := resticSourceErrorItem([]byte(line)); ok {
+		if c.failedItems == nil {
+			c.failedItems = make(map[string]struct{})
+		}
+		c.failedItems[item] = struct{}{}
+	}
+	var status resticStatusMessage
+	if json.Unmarshal([]byte(line), &status) == nil && status.MessageType == "status" && validNonNegative(status.TotalFiles) && (c.expectedFiles == nil || *status.TotalFiles > *c.expectedFiles) {
+		value := *status.TotalFiles
+		c.expectedFiles = &value
+	}
 	var message resticSummaryMessage
 	if json.Unmarshal([]byte(line), &message) == nil && message.MessageType == "summary" {
 		c.latest, c.found = message, true
@@ -596,5 +687,5 @@ func (c *resticSummaryCollector) result() (string, map[string]any) {
 	if !c.found {
 		return "", nil
 	}
-	return resticSummaryValues(c.latest)
+	return resticSummaryValues(c.latest, c.expectedFiles, int64(len(c.failedItems)))
 }

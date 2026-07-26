@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,6 +272,21 @@ func TestProbeHeartbeatResumesAssignmentsWhenRestartFails(t *testing.T) {
 	}
 	if !remote.restarted || storage.beginDrain != 1 || storage.endDrain != 1 {
 		t.Fatalf("failed probe did not resume assignments: remote=%+v storage=%+v", remote, storage)
+	}
+}
+
+func TestProbeHeartbeatExplainsMissingManagedRemoteHost(t *testing.T) {
+	storage := &upgradeStore{
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "deleted-host", Status: "offline"},
+	}
+	service := NewUpgradeService(storage, deploymentSecrets{}, nil, upgradeDialer{remote: &upgradeRemote{}}, time.Now)
+
+	_, err := service.ProbeHeartbeat(t.Context(), "agent-a", nil)
+	if err == nil {
+		t.Fatal("missing managed remote host was accepted")
+	}
+	if !strings.Contains(err.Error(), "关联的远程主机已被删除") {
+		t.Fatalf("unexpected diagnostic: %v", err)
 	}
 }
 

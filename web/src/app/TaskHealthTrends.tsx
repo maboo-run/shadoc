@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { translate, type Locale } from "../i18n";
 import type { AppAPI } from "./App";
+import { formatDateTime } from "./dateTime";
 
 export type MetricCoverage = {
   duration?: number;
@@ -60,7 +61,7 @@ export type TrendReport = {
   tasks: TaskTrend[];
 };
 
-export function TaskHealthTrends({ api, locale, onOpenTask }: { api: AppAPI; locale: Locale; onOpenTask(taskId: string): void }) {
+export function TaskHealthTrends({ api, locale, timeZone, onOpenTask }: { api: AppAPI; locale: Locale; timeZone: string; onOpenTask(taskId: string): void }) {
   const t = (source: string) => translate(locale, source);
   const [report, setReport] = useState<TrendReport | null>(null);
   const [error, setError] = useState("");
@@ -84,7 +85,7 @@ export function TaskHealthTrends({ api, locale, onOpenTask }: { api: AppAPI; loc
         <div>
           <h2>{t("任务健康趋势")}</h2>
           <p>{denominatorExplanation(locale)}</p>
-          {report && <p>{freshnessText(report.generatedAt, locale)}</p>}
+          {report && <p>{freshnessText(report.generatedAt, locale, timeZone)}</p>}
         </div>
       </div>
       {!report && !error && <p role="status">{t("正在读取任务健康趋势…")}</p>}
@@ -98,7 +99,7 @@ export function TaskHealthTrends({ api, locale, onOpenTask }: { api: AppAPI; loc
           return <tr key={task.taskId}>
             <td className="strong-cell">{task.taskName}</td>
             <td><span className="trend-primary">{successRateText(window, locale)}</span><small>{excludedText(window.excludedCount, locale)}</small></td>
-            <td>{task.latestCompleteSuccessAt ? formatDateTime(task.latestCompleteSuccessAt, locale) : t("尚无完整成功")}</td>
+            <td>{task.latestCompleteSuccessAt ? formatDateTime(task.latestCompleteSuccessAt, locale, timeZone, { dateStyle: "medium", timeStyle: "short" }) : t("尚无完整成功")}</td>
             <td><button className="text-button" type="button" onClick={() => onOpenTask(task.taskId)}>{t("详情")}</button></td>
           </tr>;
         })}</tbody>
@@ -119,8 +120,9 @@ function denominatorExplanation(locale: Locale) {
     : "成功率分母只包含完整成功、部分成功和失败；等待、运行中、已取消和已跳过的记录被排除。";
 }
 
-function freshnessText(value: string, locale: Locale) {
-  return locale === "en-US" ? `Data generated at ${formatDateTime(value, locale)}.` : `数据更新于 ${formatDateTime(value, locale)}。`;
+function freshnessText(value: string, locale: Locale, timeZone: string) {
+  const formatted = formatDateTime(value, locale, timeZone, { dateStyle: "medium", timeStyle: "short" });
+  return locale === "en-US" ? `Data generated at ${formatted}.` : `数据更新于 ${formatted}。`;
 }
 
 function successRateText(window: TrendWindow, locale: Locale) {
@@ -131,10 +133,4 @@ function successRateText(window: TrendWindow, locale: Locale) {
 
 function excludedText(count: number, locale: Locale) {
   return locale === "en-US" ? `${count} additional runs excluded` : `另排除 ${count} 次`;
-}
-
-function formatDateTime(value: string, locale: Locale) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(parsed);
 }

@@ -247,9 +247,9 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
   if (record.kind === "agent_heartbeat_probe" && record.status === "success") return t("Agent 主动心跳探测完成，新的心跳已验证");
   if (record.kind === "agent_heartbeat_probe" && record.status === "failed") return t("Agent 主动心跳探测失败");
   if (record.kind === "agent_heartbeat_probe" && record.status === "cancelled") return t("Agent 主动心跳探测已取消");
-  if (record.status === "success") return t(record.kind === "application_update" ? "应用升级完成并通过健康检查" : record.kind === "agent_uninstall" ? "Agent 已停止并卸载" : record.kind === "agent_upgrade" ? "Agent 升级完成，新版本心跳已验证" : record.kind === "protection_setup" ? "保护资源创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检通过" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复完成" : "操作完成");
-  if (record.status === "failed") return t(record.kind === "application_update" ? "应用升级失败，旧版本已保留或已自动回滚" : record.kind === "agent_uninstall" ? "Agent 停止或卸载失败" : record.kind === "agent_upgrade" ? "Agent 升级失败，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源未全部创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检失败" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复失败" : "操作失败");
-  if (record.status === "cancelled") return t(record.kind === "agent_upgrade" ? "Agent 升级已取消，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源创建已取消" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复已取消" : "操作已取消");
+  if (record.status === "success") return t(record.kind === "application_update" ? "应用升级完成并通过健康检查" : record.kind === "agent_uninstall" ? "Agent 已停止并卸载" : record.kind === "agent_upgrade" ? "Agent 升级完成，新版本心跳已验证" : record.kind === "protection_setup" ? "保护资源创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检通过" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复完成" : record.kind === "task_scope_inventory" ? "保护范围清单已生成" : "操作完成");
+  if (record.status === "failed") return t(record.kind === "application_update" ? "应用升级失败，旧版本已保留或已自动回滚" : record.kind === "agent_uninstall" ? "Agent 停止或卸载失败" : record.kind === "agent_upgrade" ? "Agent 升级失败，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源未全部创建完成" : record.kind === "database_backup_preflight" ? "数据库备份预检失败" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复失败" : record.kind === "task_scope_inventory" ? "保护范围清单生成失败" : "操作失败");
+  if (record.status === "cancelled") return t(record.kind === "agent_upgrade" ? "Agent 升级已取消，系统已尝试恢复旧版本" : record.kind === "protection_setup" ? "保护资源创建已取消" : record.kind === "database_dump_file_restore" ? "数据库 dump 文件恢复已取消" : record.kind === "task_scope_inventory" ? "保护范围扫描已取消" : "操作已取消");
   if (record.status === "cleanup_required") return t("需要人工清理");
   const stages: Record<string, string> = {
     queued: "等待执行",
@@ -297,6 +297,8 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
     verification_evidence_persisted: "恢复验证证据已保存",
     cleaning_verification_content: "正在清理恢复验证临时内容",
     protection_item: "正在逐项创建独立保护资源",
+    scanning_source: "正在扫描源目录",
+    catalog_ready: "源文件清单已就绪",
 	launching_updater: "正在启动独立升级助手",
 	downloading_release: "正在下载官方稳定版",
 	release_verified: "发布文件校验完成",

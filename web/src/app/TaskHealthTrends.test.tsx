@@ -24,13 +24,15 @@ describe("TaskHealthTrends", () => {
     const user = userEvent.setup();
     const action = vi.fn(async () => report);
     const onOpenTask = vi.fn();
-    render(<TaskHealthTrends api={{ action } as unknown as AppAPI} locale="zh-CN" onOpenTask={onOpenTask} />);
+    render(<TaskHealthTrends api={{ action } as unknown as AppAPI} locale="zh-CN" timeZone="Asia/Shanghai" onOpenTask={onOpenTask} />);
 
     const section = await screen.findByRole("region", { name: "任务健康趋势" });
     expect(within(section).getByText("50%（2/4）")).toBeVisible();
     expect(within(section).getByText(/分母只包含完整成功、部分成功和失败/)).toBeVisible();
     expect(within(section).getByText(/另排除 2 次/)).toBeVisible();
     expect(within(section).getByText(/数据更新于/)).toBeVisible();
+    expect(within(section).getByText(/2026.*7.*15.*23:00/)).toBeVisible();
+    expect(within(section).getByText(/2026.*7.*15.*22:00/)).toBeVisible();
     expect(within(section).queryByText("变化数据量")).not.toBeInTheDocument();
     expect(within(section).queryByText("运行耗时")).not.toBeInTheDocument();
     expect(within(section).queryByText("查看每日趋势")).not.toBeInTheDocument();

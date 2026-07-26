@@ -21,6 +21,17 @@ describe("DashboardAlerts", () => {
     expect(screen.getByText("容量 82%")).toBeInTheDocument();
   });
 
+  it("formats a timestamp embedded in an alert message with the interface time zone", () => {
+    render(<DashboardAlerts
+      dashboard={{ tasks: [], alerts: [{ id: "a-time", object: "agent", message: "证书将在 2026-07-20T06:12:00Z 到期", severity: "warning" }] }}
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      onViewAll={() => undefined}
+    />);
+    expect(screen.getByText(/证书将在.*2026.*7.*20.*14:12:00.*到期/)).toBeVisible();
+    expect(screen.queryByText(/2026-07-20T06:12:00Z/)).not.toBeInTheDocument();
+  });
+
   it("shows empty state when no alerts", () => {
     render(<DashboardAlerts dashboard={{ tasks: [], alerts: [] }} locale="zh-CN" timeZone="UTC" onViewAll={() => undefined} />);
     expect(screen.getByText("当前无告警")).toBeInTheDocument();

@@ -113,3 +113,29 @@ func TestLoadDoesNotUseRemovedAgentEnvironmentControls(t *testing.T) {
 		t.Fatalf("removed Agent environment controls still change config: with=%+v without=%+v", withRemovedOverride, withoutOverride)
 	}
 }
+
+func TestLoadSystemUsesFixedLinuxRootDataDirectory(t *testing.T) {
+	cfg, err := LoadSystem(func(key string) string {
+		if key == "SHADOC_LISTEN" {
+			return "127.0.0.1:9090"
+		}
+		return ""
+	}, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != "/var/lib/shadoc" || cfg.DatabasePath != "/var/lib/shadoc/shadoc.db" || cfg.VaultKeyPath != "/var/lib/shadoc/vault.key" || cfg.Listen != "127.0.0.1:9090" {
+		t.Fatalf("system config=%+v", cfg)
+	}
+	if _, err := LoadSystem(func(string) string { return "" }, "darwin"); err == nil {
+		t.Fatal("macOS system configuration accepted")
+	}
+	if _, err := LoadSystem(func(key string) string {
+		if key == "SHADOC_DATA_DIR" {
+			return "/tmp/not-the-system-directory"
+		}
+		return ""
+	}, "linux"); err == nil {
+		t.Fatal("custom root data directory accepted")
+	}
+}

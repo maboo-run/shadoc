@@ -225,6 +225,7 @@ describe("restic-control administration", () => {
     expect(await screen.findByLabelText("Interface language")).toBeVisible();
   });
   it("displays concise repository capacity and refreshes only on request", async () => {
+    localStorage.setItem("shadoc.timezone", "Asia/Shanghai");
     let repositoryReads = 0;
     let resolveRefresh!: (value: Array<Record<string, unknown>>) => void;
     const refreshedRepositories = new Promise<Array<Record<string, unknown>>>((resolve) => { resolveRefresh = resolve; });
@@ -261,7 +262,7 @@ describe("restic-control administration", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     expect(await screen.findByText("409.6 GiB 可用 / 共 1 TiB")).toBeVisible();
-    expect(screen.getByText("2026-07-12T10:02:30Z · 5.6 MiB")).toBeVisible();
+    expect(screen.getByText(/2026.*7.*12.*18:02:30 · 5\.6 MiB/)).toBeVisible();
     expect(screen.queryByText(/2026-07-12T10:02:30\.508331Z/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Agent agent-a/)).not.toBeInTheDocument();
     expect(action).not.toHaveBeenCalledWith("/api/repositories/repo-a/capacity", {});
@@ -390,7 +391,7 @@ describe("restic-control administration", () => {
         id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.3.0", targetVersion: "v1.4.0", upgradeAvailable: true,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
-      }] : [],
+      }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
 
     await screen.findByRole("heading", { name: "仪表盘" });
@@ -425,7 +426,7 @@ describe("restic-control administration", () => {
         id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running",
         compatibilityStatus: "compatible", buildVersion: "0.0.0-SNAPSHOT-389df1b", targetVersion: "0.1.0", upgradeAvailable: true,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
-      }] : [],
+      }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
 
     await screen.findByRole("heading", { name: "仪表盘" });
@@ -454,7 +455,7 @@ describe("restic-control administration", () => {
         id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
-      }] : [],
+      }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
 
     await screen.findByRole("heading", { name: "仪表盘" });
@@ -485,7 +486,7 @@ describe("restic-control administration", () => {
         id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
-      }] : [],
+      }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
 
     await screen.findByRole("heading", { name: "仪表盘" });
@@ -602,7 +603,9 @@ describe("restic-control administration", () => {
           lastHeartbeatAt: "2026-07-14T14:47:37.568669Z",
           ...(uninstalled ? { uninstalledAt: "2026-07-14T14:47:38.498771Z" } : {}),
         }]
-      : []);
+      : resource === "remote-hosts"
+        ? [{ id: "host-1", host: "agent.example", port: 22, username: "backup" }]
+        : []);
     const action = vi.fn(async (path: string) => {
       if (path === "/api/agents/mini-debian/uninstall") return { operationId: "op-uninstall", status: "queued" };
       if (path === "/api/operations/op-uninstall") {
@@ -634,6 +637,109 @@ describe("restic-control administration", () => {
     expect(screen.queryByRole("columnheader", { name: "引擎" })).not.toBeInTheDocument();
     expect(screen.queryByText(/filesystem-browse/)).not.toBeInTheDocument();
     expect(listResource.mock.calls.filter(([resource]) => resource === "agents").length).toBeGreaterThan(1);
+  });
+
+  it("revokes an Agent whose managed remote host record was deleted", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async () => ({}));
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => {
+        if (resource === "agents") return [{
+          id: "orphaned-agent", remoteHostId: "deleted-host", status: "offline", runtimeStatus: "unknown",
+          platform: "linux/amd64", certificateStatus: "valid",
+        }];
+        if (resource === "remote-hosts") return [{
+          id: "replacement-host", name: "新连接", host: "192.168.0.105", port: 22, username: "backup",
+        }];
+        return [];
+      },
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "orphaned-agent 查看详情" }));
+    await screen.findByRole("heading", { name: "远程主机连接已失效" });
+    await user.click(screen.getByRole("button", { name: "撤销凭据" }));
+    const dialog = screen.getByRole("dialog", { name: "确认撤销 Agent 凭据" });
+    await user.click(within(dialog).getByRole("button", { name: "确认撤销凭据" }));
+
+    expect(action).toHaveBeenCalledWith("/api/agents/orphaned-agent/revoke", {});
+    expect(action).not.toHaveBeenCalledWith("/api/agents/orphaned-agent/uninstall", {});
+  });
+
+  it("deletes a revoked Agent record through a versioned impact preview", async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    const action = vi.fn(async (path: string, payload?: Record<string, unknown>) => {
+      if (path === "/api/delete-previews/agents/retired-agent") {
+        return {
+          resourceType: "agents", id: "retired-agent", name: "retired-agent",
+          updatedAt: "agent-version", dependencies: [], deletable: true,
+        };
+      }
+      if (path === "/api/delete-previews/agents/retired-agent/confirm") {
+        expect(payload).toEqual({ expectedUpdatedAt: "agent-version" });
+        deleted = true;
+        return {};
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => {
+        if (resource === "agents") {
+          return deleted ? [] : [{
+            id: "retired-agent", status: "revoked", runtimeStatus: "stopped",
+            revokedAt: "2026-07-25T14:30:00Z",
+          }];
+        }
+        return [];
+      },
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "retired-agent 查看详情" }));
+    await user.click(screen.getByRole("button", { name: "删除记录" }));
+    const dialog = await screen.findByRole("dialog", { name: "确认删除 Agent 记录" });
+    expect(within(dialog).getByText(/只删除控制服务中的 Agent 记录/)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "确认删除记录" }));
+
+    expect(action).toHaveBeenCalledWith("/api/delete-previews/agents/retired-agent/confirm", {
+      expectedUpdatedAt: "agent-version",
+    });
+    expect(await screen.findByText("Agent 记录已删除")).toBeVisible();
+    expect(screen.queryByText("retired-agent")).not.toBeInTheDocument();
+  });
+
+  it("prefills a replacement host when redeploying a revoked Agent after its stale binding is repaired", async () => {
+    const user = userEvent.setup();
+    render(<App api={{
+      ...fakeAPI,
+      listResource: async (resource) => {
+        if (resource === "agents") return [{
+          id: "orphaned-agent", status: "revoked", runtimeStatus: "unknown",
+          revokedAt: "2026-07-25T12:30:00Z",
+        }];
+        if (resource === "remote-hosts") return [{
+          id: "replacement-host", name: "新连接", host: "192.168.0.105", port: 22, username: "backup",
+        }];
+        return [];
+      },
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "orphaned-agent 查看详情" }));
+    await user.click(screen.getByRole("button", { name: "重新部署" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重新部署 Agent" });
+    expect(within(dialog).getByLabelText("远程主机")).toHaveValue("replacement-host");
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("orphaned-agent");
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveAttribute("readonly");
   });
 
   it("prefills the managed host and Agent ID when redeploying an uninstalled Agent", async () => {
@@ -929,6 +1035,51 @@ describe("restic-control administration", () => {
     expect(new URLSearchParams(window.location.search).get("view")).toBe("create");
   });
 
+  it("opens the layered source inventory from a task row and keeps it addressable", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/tasks/task-scope/scope-inventory") {
+        return { operationId: "op-scope", status: "queued", kind: "task_scope_inventory" };
+      }
+      if (path === "/api/operations/op-scope") {
+        return {
+          id: "op-scope", status: "success", stage: "completed", kind: "task_scope_inventory",
+          detail: {
+            previewId: "preview-scope",
+            summary: { totalFiles: 2, includedFiles: 1, excludedFiles: 1, entriesAvailable: true },
+          },
+        };
+      }
+      if (path.startsWith("/api/task-scope-previews/preview-scope/entries?")) {
+        return {
+          items: [{ ordinal: 1, path: "photos", type: "directory", disposition: "included", coverage: "full", totalFiles: 1, includedFiles: 1 }],
+          truncated: false,
+        };
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      listResource: async (resource) => resource === "tasks"
+        ? [{ id: "task-scope", name: "照片保护", kind: "directory", engine: "restic", repositoryId: "repo-a", directory: { path: "/srv/photos", exclusions: [] }, enabled: true }]
+        : [],
+    }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await user.click(screen.getByRole("button", { name: "备份任务" }));
+    const row = (await screen.findByText("照片保护")).closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: "保护范围" }));
+
+    expect(await screen.findByRole("heading", { name: "保护范围透镜" })).toBeVisible();
+    expect(await screen.findByText("photos")).toBeVisible();
+    expect(window.location.pathname).toBe("/admin/tasks");
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("scope");
+    expect(new URLSearchParams(window.location.search).get("task")).toBe("task-scope");
+    await user.click(screen.getByRole("button", { name: "返回任务编辑" }));
+    expect(await screen.findByRole("heading", { name: "编辑备份任务" })).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("edit");
+  });
+
   it("creates an agent local-to-local rsync task without a remote host", async () => {
 	const user = userEvent.setup();
 	const createResource = vi.fn(async () => undefined);
@@ -965,7 +1116,7 @@ describe("restic-control administration", () => {
 	}));
   });
 
-  it("saves a disabled task draft, previews its explicit scope, and invalidates the preview when a suggestion is adopted", async () => {
+  it("saves a disabled task draft and keeps the editor preview compact", async () => {
     const user = userEvent.setup();
     const createResource = vi.fn(async () => ({ id: "task-draft" }));
     const updateResource = vi.fn(async () => undefined);
@@ -1009,7 +1160,7 @@ describe("restic-control administration", () => {
     await user.type(screen.getByLabelText("任务名称"), "照片备份");
     await user.selectOptions(screen.getByLabelText("备份仓库"), "repo-1");
     await user.type(screen.getByLabelText("源目录绝对路径"), "/srv/photos");
-    expect(screen.getByLabelText("排除规则（每行一条）")).toHaveValue("");
+    expect(screen.queryByLabelText("排除规则（每行一条）")).not.toBeInTheDocument();
     expect(screen.getByLabelText("任务状态")).toHaveValue("false");
 
     await user.click(screen.getByRole("button", { name: "保存草稿并预览范围" }));
@@ -1022,17 +1173,12 @@ describe("restic-control administration", () => {
     expect(action).toHaveBeenCalledWith("/api/tasks/task-draft/preview", {});
     expect(screen.getByText("10 个文件将纳入保护，0 个文件被排除，1 项无法读取。")).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("预览达到扫描上限，结果已截断");
+    expect(screen.getByRole("button", { name: "查看并调整保护范围" })).toBeVisible();
+    expect(screen.queryByText("当前生效规则及影响")).not.toBeInTheDocument();
+    expect(screen.queryByText("可选排除建议")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("checkbox", { name: "采用建议 **/node_modules" }));
-    expect(screen.getByLabelText("排除规则（每行一条）")).toHaveValue("**/node_modules");
-    expect(screen.getByText("任务范围已改变，需要重新生成预览。")).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "保存草稿并重新预览" }));
-    expect((await screen.findAllByText("3 个文件，4 KB", {}, { timeout: 3000 }))[0]).toBeVisible();
-    expect(updateResource).toHaveBeenCalledWith("tasks", "task-draft", expect.objectContaining({
-      enabled: false,
-      directory: expect.objectContaining({ exclusions: ["**/node_modules"] }),
-    }));
+    await user.click(screen.getByRole("button", { name: "重新生成范围预览" }));
+    expect(await screen.findByText("当前有 0 条排除规则", {}, { timeout: 3000 })).toBeVisible();
 
     await user.selectOptions(screen.getByLabelText("任务状态"), "true");
     await user.click(screen.getByRole("button", { name: "保存任务" }));
@@ -1666,6 +1812,7 @@ describe("restic-control administration", () => {
   });
 
   it("guides restore through resource selection, preflight, and administrator reauthentication", async () => {
+	localStorage.setItem("shadoc.timezone", "Asia/Shanghai");
 	const user = userEvent.setup();
 	const action = vi.fn(async (path: string, payload?: Record<string, unknown>) => {
 	  if (path.endsWith("/snapshots")) return [
@@ -1705,7 +1852,7 @@ describe("restic-control administration", () => {
 	expect(screen.getByText("当前备份仓库位于控制服务本机，远程 Agent 无法直接访问；请选择 SFTP 或 S3 仓库。")).toBeVisible();
 	expect(screen.queryByLabelText("仓库 ID")).not.toBeInTheDocument();
 	await user.selectOptions(await screen.findByLabelText("目录快照"), "dir-snap");
-	expect(screen.getByLabelText("目录快照")).toHaveTextContent("dir-snap · 2026-07-12 01:00");
+	expect(screen.getByLabelText("目录快照")).toHaveTextContent(/dir-snap · 2026.*7.*12.*09:00/);
 	expect(screen.getByLabelText("目录快照")).not.toHaveTextContent("2026-07-12T01:00:00Z");
 	expect(screen.getByLabelText("目录快照")).not.toHaveTextContent("/srv/photos");
 	await user.click(screen.getByRole("button", { name: "浏览并选择快照内容" }));
@@ -1936,7 +2083,8 @@ describe("restic-control administration", () => {
 
   it("filters audits and exports the same action filter", async () => {
     const user = userEvent.setup();
-    render(<App api={{ ...fakeAPI, async action(path) {
+    localStorage.setItem("shadoc.timezone", "Asia/Shanghai");
+    const action = vi.fn(async (path: string) => {
       if (path.startsWith("/api/audits?")) {
         const records = [
         { id: 1, occurredAt: "2026-07-12T10:00:00Z", actor: "admin", action: "task.delete", targetType: "task", targetId: "t1" },
@@ -1947,13 +2095,17 @@ describe("restic-control administration", () => {
         return { items, page: 1, pageSize: 25, total: items.length };
       }
       return {};
-    } }} />);
+    });
+    render(<App api={{ ...fakeAPI, action }} />);
     await screen.findByRole("heading", { name: "仪表盘" });
     await openGroupedPage(user, "活动与记录", "审计日志");
     await user.selectOptions(await screen.findByLabelText("动作筛选"), "task.delete");
     expect(screen.getByRole("row", { name: /task.delete/ })).toBeVisible();
     expect(screen.queryByRole("row", { name: /repository.delete/ })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "导出当前筛选 CSV" })).toHaveAttribute("href", "/api/audits/export?action=task.delete");
+    await user.type(screen.getByLabelText("开始时间"), "2026-07-12T18:00");
+    await waitFor(() => expect(action).toHaveBeenCalledWith(expect.stringContaining("from=2026-07-12T10%3A00%3A00.000Z")));
+    expect(screen.getByRole("link", { name: "导出当前筛选 CSV" })).toHaveAttribute("href", expect.stringContaining("from=2026-07-12T10%3A00%3A00.000Z"));
   });
 
   it("retains the old repository key until explicit revocation", async () => {
@@ -2015,6 +2167,80 @@ describe("restic-control administration", () => {
     expect(await screen.findByText("0.18.0")).toBeVisible();
     expect(screen.getByRole("tab", { name: "兼容性中心" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByRole("heading", { name: "兼容性中心", level: 1 })).not.toBeInTheDocument();
+  });
+
+  it("reprobes newly installed local tools without restarting the service", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/compatibility/reprobe") {
+        return {
+          blocked: false,
+          configuredPaths: {},
+          findings: [{
+            capability: "mysql-backup", tool: "mysqldump", path: "/usr/bin/mysqldump",
+            severity: "info", message: "mysqldump 可用", version: "10.11.18",
+          }],
+        };
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      compatibility: async () => ({
+        blocked: true,
+        configuredPaths: {},
+        findings: [{
+          capability: "mysql-backup", tool: "mysqldump",
+          severity: "blocker", message: "未配置 mysqldump 的绝对路径",
+        }],
+      }),
+    }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openGroupedPage(user, "系统", "兼容性中心");
+
+    await user.click(await screen.findByRole("button", { name: "重新检测本机工具" }));
+
+    await waitFor(() => expect(action).toHaveBeenCalledWith("/api/compatibility/reprobe", {}));
+    expect(await screen.findByText("10.11.18")).toBeVisible();
+    expect(screen.getByText("/usr/bin/mysqldump")).toBeVisible();
+  });
+
+  it("saves manual local tool paths and immediately refreshes detection", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string, payload?: Record<string, unknown>) => {
+      if (path === "/api/compatibility/tool-paths") {
+        return {
+          blocked: false,
+          configuredPaths: payload,
+          findings: [{
+            capability: "mysql-backup", tool: "mysqldump", path: payload?.mysqlDump,
+            severity: "info", message: "mysqldump 可用", version: "10.11.18",
+          }],
+        };
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      compatibility: async () => ({ blocked: true, configuredPaths: {}, findings: [] }),
+    }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openGroupedPage(user, "系统", "兼容性中心");
+    await user.click(await screen.findByRole("button", { name: "手动指定工具路径" }));
+    await user.type(screen.getByLabelText("MySQL 备份客户端路径"), "/opt/mysql/bin/mysqldump");
+
+    await user.click(screen.getByRole("button", { name: "保存路径并重新检测" }));
+
+    await waitFor(() => expect(action).toHaveBeenCalledWith("/api/compatibility/tool-paths", {
+      rsync: "",
+      mysqlDump: "/opt/mysql/bin/mysqldump",
+      mysqlRestore: "",
+      postgresDump: "",
+      postgresRestore: "",
+    }));
+    expect(await screen.findByText("/opt/mysql/bin/mysqldump")).toBeVisible();
   });
 
   it("downloads a bounded redacted diagnostic bundle from the compatibility page", async () => {
@@ -2608,6 +2834,7 @@ describe("restic-control administration", () => {
 
   it("shows database preflight status, versions, and a safe failure reason", async () => {
     const user = userEvent.setup();
+    localStorage.setItem("shadoc.timezone", "Asia/Shanghai");
     render(<App api={{ ...fakeAPI, async listResource(resource) {
       if (resource === "database-connections") return [{ id: "db-1", name: "生产库", engine: "mysql", purpose: "backup", status: "draft", preflight: { checkedAt: "2026-07-12T10:00:00.508331Z", clientVersion: "8.0.36", error: "数据库认证失败" } }];
       return [];
@@ -2616,7 +2843,8 @@ describe("restic-control administration", () => {
     await openConnectionPage(user, "数据库实例");
     expect(await screen.findByText("草稿（不可启用）")).toBeVisible();
     expect(screen.getByText(/客户端 8.0.36.*数据库认证失败/)).toBeVisible();
-    expect(screen.getByText(/检查于 2026-07-12T10:00:00Z/)).toBeVisible();
+    expect(screen.getByText(/检查于.*2026.*7.*12.*18:00:00/)).toBeVisible();
+    expect(screen.queryByText(/检查于 2026-07-12T10:00:00Z/)).not.toBeInTheDocument();
     expect(screen.queryByText(/2026-07-12T10:00:00\.508331Z/)).not.toBeInTheDocument();
   });
 

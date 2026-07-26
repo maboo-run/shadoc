@@ -198,7 +198,7 @@ func runActivityQuery(filter ActivityFilter, cursor *activityCursor) (string, []
 		r.task_id AS task_id,COALESCE(t.name,'') AS task_name,COALESCE(t.repository_id,'') AS repository_id,COALESCE(repo.name,'') AS repository_name,
 		COALESCE(r.plan_id,'') AS plan_id,COALESCE(p.name,'') AS plan_name,r.started_at AS occurred_at,r.started_at AS started_at,r.finished_at AS finished_at,r.attempt_count AS attempt_count,
 		substr(CAST(COALESCE(json_extract(r.summary_json,'$.error'),'') AS TEXT),1,512) AS error_summary,
-		r.duration_ms,r.files_processed,r.files_changed,r.bytes_processed,r.bytes_changed
+		r.duration_ms,r.files_expected,r.files_processed,r.files_changed,r.bytes_processed,r.bytes_changed
 	FROM runs r
 	LEFT JOIN tasks t ON t.id=r.task_id
 	LEFT JOIN repositories repo ON repo.id=t.repository_id
@@ -243,7 +243,7 @@ func operationActivityQuery(filter ActivityFilter, cursor *activityCursor) (stri
 		o.task_id AS task_id,COALESCE(t.name,'') AS task_name,COALESCE(NULLIF(o.repository_id,''),NULLIF(t.repository_id,''),'') AS repository_id,
 		COALESCE(NULLIF(direct_repo.name,''),NULLIF(task_repo.name,''),'') AS repository_name,'' AS plan_id,'' AS plan_name,
 		o.created_at AS occurred_at,o.started_at AS started_at,o.finished_at AS finished_at,o.attempt_count AS attempt_count,substr(o.error_summary,1,512) AS error_summary,
-		NULL AS duration_ms,NULL AS files_processed,NULL AS files_changed,NULL AS bytes_processed,NULL AS bytes_changed
+		NULL AS duration_ms,NULL AS files_expected,NULL AS files_processed,NULL AS files_changed,NULL AS bytes_processed,NULL AS bytes_changed
 	FROM operations o
 	LEFT JOIN tasks t ON t.id=o.task_id
 	LEFT JOIN repositories direct_repo ON direct_repo.id=o.repository_id
@@ -265,13 +265,13 @@ func scanActivity(scanner activityScanner) (ActivityItem, error) {
 	var item ActivityItem
 	var occurred string
 	var started, finished sql.NullString
-	var duration, filesProcessed, filesChanged, bytesProcessed, bytesChanged sql.NullInt64
+	var duration, filesExpected, filesProcessed, filesChanged, bytesProcessed, bytesChanged sql.NullInt64
 	if err := scanner.Scan(
 		&item.RecordType, &item.ID, &item.Kind, &item.Engine, &item.Status, &item.Trigger,
 		&item.ObjectType, &item.ObjectID, &item.ObjectName, &item.TaskID, &item.TaskName,
 		&item.RepositoryID, &item.RepositoryName, &item.PlanID, &item.PlanName,
 		&occurred, &started, &finished, &item.AttemptCount, &item.ErrorSummary,
-		&duration, &filesProcessed, &filesChanged, &bytesProcessed, &bytesChanged,
+		&duration, &filesExpected, &filesProcessed, &filesChanged, &bytesProcessed, &bytesChanged,
 	); err != nil {
 		return ActivityItem{}, err
 	}
@@ -294,8 +294,8 @@ func scanActivity(scanner activityScanner) (ActivityItem, error) {
 		}
 		item.FinishedAt = &value
 	}
-	metrics := RunMetrics{DurationMilliseconds: nullMetric(duration), FilesProcessed: nullMetric(filesProcessed), FilesChanged: nullMetric(filesChanged), BytesProcessed: nullMetric(bytesProcessed), BytesChanged: nullMetric(bytesChanged)}
-	if metrics.DurationMilliseconds != nil || metrics.FilesProcessed != nil || metrics.FilesChanged != nil || metrics.BytesProcessed != nil || metrics.BytesChanged != nil {
+	metrics := RunMetrics{DurationMilliseconds: nullMetric(duration), FilesExpected: nullMetric(filesExpected), FilesProcessed: nullMetric(filesProcessed), FilesChanged: nullMetric(filesChanged), BytesProcessed: nullMetric(bytesProcessed), BytesChanged: nullMetric(bytesChanged)}
+	if metrics.DurationMilliseconds != nil || metrics.FilesExpected != nil || metrics.FilesProcessed != nil || metrics.FilesChanged != nil || metrics.BytesProcessed != nil || metrics.BytesChanged != nil {
 		item.Metrics = &metrics
 	}
 	return item, nil

@@ -13,6 +13,8 @@ import (
 const (
 	Version                        = 1
 	ManagedResticInstallCapability = "managed-restic-install-v1"
+	FilesystemScopeEntryCapability = "filesystem-scope-entries-v1"
+	MaxFilesystemScopeChunkEntries = 128
 )
 
 type EnrollmentRequest struct {
@@ -155,6 +157,79 @@ type Result struct {
 	Summary      map[string]any `json:"summary,omitempty"`
 	RawLog       string         `json:"rawLog,omitempty"`
 	Error        string         `json:"error,omitempty"`
+}
+
+// FilesystemScopeEntryChunk carries a bounded, relative-path-only portion of a
+// source inventory over the authenticated Agent channel. The final Result
+// remains summary-only so large trees never become one oversized response.
+type FilesystemScopeEntryChunk struct {
+	Version      int                    `json:"version"`
+	AssignmentID string                 `json:"assignmentId"`
+	AgentID      string                 `json:"agentId"`
+	Sequence     int                    `json:"sequence"`
+	Entries      []FilesystemScopeEntry `json:"entries"`
+}
+
+type FilesystemScopeEntry struct {
+	Ordinal     int64  `json:"ordinal"`
+	Path        string `json:"path"`
+	Type        string `json:"type"`
+	Disposition string `json:"disposition"`
+	Size        int64  `json:"size,omitempty"`
+	ReasonCode  string `json:"reasonCode,omitempty"`
+	RuleIndexes []int  `json:"ruleIndexes,omitempty"`
+}
+
+func (c FilesystemScopeEntryChunk) ValidateFor(agentID string) error {
+	if c.Version != Version || c.AgentID != agentID || !validAgentID(c.AgentID) || strings.TrimSpace(c.AssignmentID) == "" || len(c.AssignmentID) > 256 {
+		return errors.New("invalid filesystem scope chunk identity")
+	}
+	if c.Sequence < 0 || len(c.Entries) == 0 || len(c.Entries) > MaxFilesystemScopeChunkEntries {
+		return errors.New("filesystem scope chunk is outside bounds")
+	}
+	var previousOrdinal int64
+	for _, entry := range c.Entries {
+		if entry.Ordinal <= previousOrdinal || !validInventoryPath(entry.Path) || entry.Size < 0 {
+			return errors.New("filesystem scope chunk contains an invalid entry")
+		}
+		previousOrdinal = entry.Ordinal
+		switch entry.Type {
+		case "file", "directory", "symlink", "special", "unknown":
+		default:
+			return errors.New("filesystem scope chunk contains an invalid entry type")
+		}
+		switch entry.Disposition {
+		case "included", "excluded", "unreadable", "attention":
+		default:
+			return errors.New("filesystem scope chunk contains an invalid disposition")
+		}
+		switch entry.ReasonCode {
+		case "", "exclusion_rule", "permission_denied", "unreadable", "special_file", "metadata_unavailable":
+		default:
+			return errors.New("filesystem scope chunk contains an invalid reason")
+		}
+		if len(entry.RuleIndexes) > 256 {
+			return errors.New("filesystem scope chunk contains too many rule matches")
+		}
+		for _, index := range entry.RuleIndexes {
+			if index < 0 || index >= 256 {
+				return errors.New("filesystem scope chunk contains an invalid rule match")
+			}
+		}
+	}
+	return nil
+}
+
+func validInventoryPath(value string) bool {
+	if value == "" || len(value) > 32<<10 || strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`) || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (a Assignment) ValidateFor(agentID string, now time.Time) error {

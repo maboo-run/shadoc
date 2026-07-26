@@ -110,7 +110,7 @@ func TestFinishRunPersistsCanonicalMetricsAndEndToEndDuration(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary := map[string]any{
-		"filesProcessed": float64(120), "filesChanged": 7, "bytesProcessed": int64(8192), "bytesChanged": uint64(1024),
+		"filesExpected": float64(123), "filesProcessed": float64(120), "filesChanged": 7, "bytesProcessed": int64(8192), "bytesChanged": uint64(1024),
 		"unsafePath": "/must/not/become/an/indexed/metric",
 	}
 	if err := s.FinishRun(ctx, "metric-run", "success", started.Add(1500*time.Millisecond), 2, "snapshot", summary, ""); err != nil {
@@ -120,7 +120,7 @@ func TestFinishRunPersistsCanonicalMetricsAndEndToEndDuration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Metrics == nil || metricValue(record.Metrics.DurationMilliseconds) != 1500 || metricValue(record.Metrics.FilesProcessed) != 120 || metricValue(record.Metrics.FilesChanged) != 7 || metricValue(record.Metrics.BytesProcessed) != 8192 || metricValue(record.Metrics.BytesChanged) != 1024 {
+	if record.Metrics == nil || metricValue(record.Metrics.DurationMilliseconds) != 1500 || metricValue(record.Metrics.FilesExpected) != 123 || metricValue(record.Metrics.FilesProcessed) != 120 || metricValue(record.Metrics.FilesChanged) != 7 || metricValue(record.Metrics.BytesProcessed) != 8192 || metricValue(record.Metrics.BytesChanged) != 1024 {
 		t.Fatalf("metrics=%+v", record.Metrics)
 	}
 
@@ -168,7 +168,7 @@ func TestOpenAddsMetricColumnsToLegacyRunsTable(t *testing.T) {
 		columns[name] = true
 	}
 	_ = rows.Close()
-	for _, name := range []string{"duration_ms", "files_processed", "files_changed", "bytes_processed", "bytes_changed"} {
+	for _, name := range []string{"duration_ms", "files_expected", "files_processed", "files_changed", "bytes_processed", "bytes_changed"} {
 		if !columns[name] {
 			t.Fatalf("legacy migration omitted %s: %v", name, columns)
 		}

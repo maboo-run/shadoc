@@ -70,6 +70,13 @@ func main() {
 		}
 		return
 	}
+	if handled, err := runMigrateToRootCommand(); handled {
+		if err != nil {
+			slog.Error("migrate Shadoc to root system service", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := runLifecycleCommand(); handled {
 		if err != nil {
 			slog.Error("application lifecycle command", "error", err)
@@ -123,6 +130,10 @@ func runBackgroundServiceCommand() (bool, error) {
 	if len(os.Args) < 2 {
 		return false, nil
 	}
+	scope, err := backgroundCommandScope(os.Args[1:])
+	if err != nil {
+		return true, err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return true, err
@@ -131,8 +142,17 @@ func runBackgroundServiceCommand() (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	return handleServiceCommand(os.Args[1:], os.Stdout, executable, serviceinstall.Manager{}, func() (serviceLaunchConfig, error) {
-		cfg, err := config.Load(os.Getenv)
+	manager, err := serviceinstall.NewManager(serviceinstall.Scope(scope), nil)
+	if err != nil {
+		return true, err
+	}
+	return handleServiceCommand(os.Args[1:], os.Stdout, executable, manager, func() (serviceLaunchConfig, error) {
+		var cfg config.Config
+		if scope == systemServiceScope {
+			cfg, err = config.LoadSystem(os.Getenv, runtime.GOOS)
+		} else {
+			cfg, err = config.Load(os.Getenv)
+		}
 		if err != nil {
 			return serviceLaunchConfig{}, err
 		}
@@ -144,7 +164,22 @@ func runAdminPasswordCommand() (bool, error) {
 	if len(os.Args) < 2 || os.Args[1] != "reset-admin-password" {
 		return false, nil
 	}
-	cfg, err := config.Load(os.Getenv)
+	scope, err := adminCommandScope(os.Args[1:])
+	if err != nil {
+		return true, err
+	}
+	var cfg config.Config
+	if scope == systemServiceScope {
+		if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+			return true, errors.New("system administrator reset requires root on Linux")
+		}
+		cfg, err = config.LoadSystem(os.Getenv, runtime.GOOS)
+	} else {
+		if os.Geteuid() == 0 {
+			return true, errors.New("root administrator reset must use --system")
+		}
+		cfg, err = config.Load(os.Getenv)
+	}
 	if err != nil {
 		return true, err
 	}
@@ -161,7 +196,16 @@ func runLifecycleCommand() (bool, error) {
 	if len(os.Args) < 2 || (os.Args[1] != "install-app" && os.Args[1] != "update-app" && os.Args[1] != "uninstall-app") {
 		return false, nil
 	}
-	cfg, err := config.Load(os.Getenv)
+	scope, err := lifecycleCommandScope(os.Args[1:])
+	if err != nil {
+		return true, err
+	}
+	var cfg config.Config
+	if scope == systemServiceScope {
+		cfg, err = config.LoadSystem(os.Getenv, runtime.GOOS)
+	} else {
+		cfg, err = config.Load(os.Getenv)
+	}
 	if err != nil {
 		return true, err
 	}
@@ -187,7 +231,12 @@ func runLifecycleCommand() (bool, error) {
 	if os.Args[1] == "install-app" {
 		binary = newManagedApplicationBinary(cfg.DataDir)
 	}
-	lifecycle := appinstall.New(releases, serviceinstall.Manager{}, health, appinstall.Paths{
+	serviceArguments := serviceArgumentsForScope(scope, cfg.Listen, cfg.DataDir)
+	manager, err := serviceinstall.NewManager(serviceinstall.Scope(scope), serviceArguments)
+	if err != nil {
+		return true, err
+	}
+	lifecycle := appinstall.New(releases, manager, health, appinstall.Paths{
 		Binary:     binary,
 		Previous:   binary + ".previous",
 		DataDir:    cfg.DataDir,
@@ -197,6 +246,14 @@ func runLifecycleCommand() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	return handleLifecycleCommand(ctx, os.Args[1:], os.Stdin, os.Stdout, lifecycle, current)
+}
+
+func serviceArgumentsForScope(scope serviceScope, listen, dataDir string) []string {
+	arguments := []string{"serve"}
+	if scope == systemServiceScope {
+		arguments = append(arguments, "--service-scope", "system")
+	}
+	return append(arguments, "--listen", listen, "--data-dir", dataDir)
 }
 
 func lifecycleHealthURL(listen string) string {
@@ -212,6 +269,10 @@ func lifecycleHealthURL(listen string) string {
 }
 
 func run(serve serveOptions, overrideConfig bool) error {
+	scope := serve.ServiceScope
+	if scope == "" {
+		scope = userServiceScope
+	}
 	getenv := os.Getenv
 	if overrideConfig {
 		getenv = func(key string) string {
@@ -228,7 +289,16 @@ func run(serve serveOptions, overrideConfig bool) error {
 			return os.Getenv(key)
 		}
 	}
-	cfg, err := config.Load(getenv)
+	var cfg config.Config
+	var err error
+	if scope == systemServiceScope {
+		if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+			return errors.New("system service scope requires root on Linux")
+		}
+		cfg, err = config.LoadSystem(getenv, runtime.GOOS)
+	} else {
+		cfg, err = config.Load(getenv)
+	}
 	if err != nil {
 		return err
 	}
@@ -303,7 +373,10 @@ func run(serve serveOptions, overrideConfig bool) error {
 	if err != nil {
 		return fmt.Errorf("initialize local filesystem browser: %w", err)
 	}
-	taskPreviewService := taskpreview.New(s, secretManager, localFilesystemService, rsyncEngine, time.Now)
+	taskPreviewService, err := taskpreview.NewWithCatalogRoot(s, secretManager, localFilesystemService, rsyncEngine, time.Now, filepath.Join(tempRoot, "task-scope-previews"))
+	if err != nil {
+		return fmt.Errorf("initialize task scope preview catalog: %w", err)
+	}
 	rsyncService := rsync.NewService(s, secretManager, rsyncEngine, time.Now)
 	backupService := backup.New(s, secretManager, resticEngine, database.NewMySQL(tempRoot), database.NewPostgres(tempRoot), time.Now)
 	backupService.SetMetadataExecutor(executor)
@@ -339,6 +412,12 @@ func run(serve serveOptions, overrideConfig bool) error {
 		PostgresDump:    localToolPath("pg_dump"),
 		PostgresRestore: localToolPath("pg_restore"),
 	}
+	toolPathOverrides, err := compat.LoadToolPathOverrides(context.Background(), s)
+	if err != nil {
+		return err
+	}
+	toolPaths = compat.ApplyToolPathOverrides(toolPaths, toolPathOverrides)
+	rsyncEngine.SetProgram(toolPaths.Rsync)
 	compatibilityContext, cancelCompatibilityProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	initialCompatibility := compat.Merge(
 		compat.System(cfg.DataDir),
@@ -359,6 +438,7 @@ func run(serve serveOptions, overrideConfig bool) error {
 	}
 	initialAgentSettings := agentservice.Settings{ListenHost: "0.0.0.0", Port: agentservice.DefaultPort}
 	agentService := agentservice.New(s, secretManager, cfg.DataDir, agentArtifactDir, time.Now)
+	agentService.SetFilesystemScopeSink(taskPreviewService)
 	agentRestoreService := agentrestore.NewService(s, time.Now)
 	agentRestoreService.SetLocker(repositoryLocks)
 	if err := agentService.Start(context.Background(), initialAgentSettings); err != nil {
@@ -374,10 +454,13 @@ func run(serve serveOptions, overrideConfig bool) error {
 	controlPlaneService.SetImportToolChecker(controlplane.SystemToolChecker{ResticPath: resticPath})
 	releaseCatalog := appinstall.NewGitHubRelease(&http.Client{Timeout: 30 * time.Second}, appinstall.OfficialReleasesAPI, runtime.GOOS, runtime.GOARCH)
 	managedBinary := existingManagedApplicationBinary(cfg.DataDir)
-	applicationUpdater := appinstall.NewWebUpdater(executable, cfg.DataDir, cfg.Listen, runningFromManagedPath(executable, managedBinary), serviceinstall.LaunchUpdater)
+	launchUpdater := func(operationID, updaterExecutable string, arguments []string) error {
+		return serviceinstall.LaunchUpdaterForScope(serviceinstall.Scope(scope), operationID, updaterExecutable, arguments)
+	}
+	applicationUpdater := appinstall.NewWebUpdaterWithScope(executable, cfg.DataDir, cfg.Listen, runningFromManagedPath(executable, managedBinary), string(scope), launchUpdater)
 	apiServer := httpapi.NewWithRuntime(s, authManager, secretManager, httpapi.Runtime{
-		Runner: taskRunner, Repositories: repositoryService, Paths: toolPaths, Compatibility: initialCompatibility, Installer: resticInstaller, DatabaseBackupPreflighter: backupService,
-		SelectRestic: resticEngine.SetProgram, DatabaseRestore: databaseRestoreService, DumpFileRestore: dbrestore.NewDumpFileService(repositoryService), Ntfy: ntfyClient, Webhook: webhookClient,
+		Runner: taskRunner, Repositories: repositoryService, Paths: toolPaths, ToolPathOverrides: toolPathOverrides, Compatibility: initialCompatibility, Installer: resticInstaller, DatabaseBackupPreflighter: backupService,
+		SelectRestic: resticEngine.SetProgram, SelectRsync: rsyncEngine.SetProgram, DatabaseRestore: databaseRestoreService, DumpFileRestore: dbrestore.NewDumpFileService(repositoryService), Ntfy: ntfyClient, Webhook: webhookClient,
 		DataDir: cfg.DataDir, SetupToken: setupToken, ConsumeSetupToken: func() error {
 			return consumeSetupTokenFile(cfg.DataDir)
 		}, Vault: vaultController, Lifecycle: lifecycleService,

@@ -50,12 +50,15 @@ type Definition struct {
 }
 
 type Engine struct {
-	program  string
-	executor command.Executor
-	tempRoot string
+	programMu sync.RWMutex
+	program   string
+	executor  command.Executor
+	tempRoot  string
 }
 
 var rsyncVersionPattern = regexp.MustCompile(`(?i)version\s+(\d+)\.(\d+)`)
+var rsyncRegularFilesPattern = regexp.MustCompile(`(?:^|[(,]\s*)reg:\s*([0-9][0-9,]*)`)
+var rsyncDirectoriesPattern = regexp.MustCompile(`(?:^|[(,]\s*)dir:\s*([0-9][0-9,]*)`)
 
 const maxRsyncRawLogBytes = 4 << 20
 
@@ -68,11 +71,26 @@ func New(program string, executor command.Executor, tempRoot string) *Engine {
 
 func (e *Engine) Kind() execution.EngineKind { return "rsync" }
 
+func (e *Engine) SetProgram(program string) {
+	if program == "" {
+		program = "rsync"
+	}
+	e.programMu.Lock()
+	e.program = program
+	e.programMu.Unlock()
+}
+
+func (e *Engine) selectedProgram() string {
+	e.programMu.RLock()
+	defer e.programMu.RUnlock()
+	return e.program
+}
+
 func (e *Engine) Probe(ctx context.Context) error {
 	if e.executor == nil {
 		return errors.New("rsync command executor is required")
 	}
-	result, err := e.executor.Run(ctx, command.Spec{Program: e.program, Args: []string{"--version"}})
+	result, err := e.executor.Run(ctx, command.Spec{Program: e.selectedProgram(), Args: []string{"--version"}})
 	if err != nil {
 		return fmt.Errorf("probe rsync: %w", err)
 	}
@@ -136,7 +154,7 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 	}
 	args := buildArguments(definition, destination, sshCommand)
 	collector := &rsyncMetricsCollector{}
-	result, err := e.executor.Run(ctx, command.Spec{Program: e.program, Args: args, Env: map[string]string{"LC_ALL": "C"}, Stdout: collector})
+	result, err := e.executor.Run(ctx, command.Spec{Program: e.selectedProgram(), Args: args, Env: map[string]string{"LC_ALL": "C"}, Stdout: collector})
 	if !collector.sawOutput() {
 		_, _ = collector.Write([]byte(result.Stdout))
 	}
@@ -149,8 +167,8 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 		"targetIdentity": targetIdentity(definition), "truncated": truncated,
 		"filesChanged": int64(changedItems), "durationMilliseconds": result.Duration.Milliseconds(),
 	}
-	if metrics.filesProcessed != nil {
-		summary["filesProcessed"] = *metrics.filesProcessed
+	if metrics.itemsScanned != nil {
+		summary["itemsScanned"] = *metrics.itemsScanned
 	}
 	if metrics.bytesProcessed != nil {
 		summary["bytesProcessed"] = *metrics.bytesProcessed
@@ -161,9 +179,17 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 	if metrics.regularFilesTransferred != nil {
 		summary["regularFilesTransferred"] = *metrics.regularFilesTransferred
 	}
+	if !definition.DryRun && err == nil && result.ExitCode == 0 && metrics.filesInScope != nil {
+		summary["filesExpected"] = *metrics.filesInScope
+		summary["filesProcessed"] = *metrics.filesInScope
+		summary["filesFailed"] = int64(0)
+	}
 	outcome := execution.Outcome{Status: "succeeded", RawLog: boundedRsyncLog(result.Stdout, result.Stderr), Summary: summary}
-	if err != nil {
+	if err != nil || result.ExitCode != 0 {
 		outcome.Status = "failed"
+		if err == nil {
+			err = fmt.Errorf("exit status %d", result.ExitCode)
+		}
 		return outcome, fmt.Errorf("run rsync: %w", err)
 	}
 	return outcome, nil
@@ -201,7 +227,9 @@ type rsyncParsedMetrics struct {
 	changedItems            int
 	deleteFiles             int
 	deleteDirectories       int
-	filesProcessed          *int64
+	itemsScanned            *int64
+	regularFiles            *int64
+	filesInScope            *int64
 	regularFilesTransferred *int64
 	bytesProcessed          *int64
 	bytesChanged            *int64
@@ -272,8 +300,29 @@ func (c *rsyncMetricsCollector) consumeLine(value string) {
 	if len(line) >= 11 && strings.ContainsAny(line[:11], "<>ch.*") {
 		c.metrics.changedItems++
 	}
+	if strings.HasPrefix(line, "Number of files:") {
+		value := strings.TrimSpace(strings.TrimPrefix(line, "Number of files:"))
+		if parsed, ok := parseRsyncStat(value); ok {
+			c.metrics.itemsScanned = &parsed
+			if parsed == 0 {
+				files := int64(0)
+				c.metrics.filesInScope = &files
+			}
+			if match := rsyncDirectoriesPattern.FindStringSubmatch(value); len(match) == 2 {
+				if directories, ok := parseRsyncStat(match[1]); ok && directories <= parsed {
+					files := parsed - directories
+					c.metrics.filesInScope = &files
+				}
+			}
+		}
+		if match := rsyncRegularFilesPattern.FindStringSubmatch(value); len(match) == 2 {
+			if parsed, ok := parseRsyncStat(match[1]); ok {
+				c.metrics.regularFiles = &parsed
+			}
+		}
+		return
+	}
 	for prefix, target := range map[string]**int64{
-		"Number of files:":                     &c.metrics.filesProcessed,
 		"Number of regular files transferred:": &c.metrics.regularFilesTransferred,
 		"Total file size:":                     &c.metrics.bytesProcessed,
 		"Total transferred file size:":         &c.metrics.bytesChanged,

@@ -20,15 +20,18 @@ describe("RunHistoryPage", () => {
         page: requestedPage, pageSize: 50, total: 500, truncated: requestedPage < 10, generatedAt: "2026-07-15T15:00:00Z", filter: {},
       };
       return {
-        items: [{ recordType: "run", id: "run-new", kind: "backup", engine: "restic", status: "failed", trigger: "manual", objectName: "照片", occurredAt: "2026-07-15T01:00:00Z", startedAt: "2026-07-15T01:00:00Z", finishedAt: "2026-07-15T01:01:00Z", attemptCount: 2, errorSummary: "safe failure", metrics: { durationMilliseconds: 60000, bytesChanged: 2048 } }],
+        items: [{ recordType: "run", id: "run-new", kind: "backup", engine: "restic", status: "partial", trigger: "manual", objectName: "照片", occurredAt: "2026-07-15T01:00:00Z", startedAt: "2026-07-15T01:00:00Z", finishedAt: "2026-07-15T01:01:00Z", attemptCount: 2, errorSummary: "safe failure", metrics: { durationMilliseconds: 60000, filesExpected: 8354, filesProcessed: 8353, bytesChanged: 2048 } }],
         page: 1, pageSize: 50, total: 500, truncated: true, generatedAt: "2026-07-15T15:00:00Z", filter: {},
       };
     });
-    render(<RunHistoryPage api={{ action, runDetail: vi.fn(), runLog: vi.fn() } as unknown as AppAPI} locale="zh-CN" />);
+    render(<RunHistoryPage api={{ action, runDetail: vi.fn(), runLog: vi.fn() } as unknown as AppAPI} locale="zh-CN" timeZone="Asia/Shanghai" />);
 
     expect(await screen.findByText("run-new")).toBeVisible();
+    expect(screen.getByText(/2026.*7.*15.*09:00:00/)).toBeVisible();
     expect(action).toHaveBeenCalledWith(expect.stringMatching(/^\/api\/activity\?.*engine=restic.*status=failed/));
     expect(screen.getByText("2.0 KiB")).toBeVisible();
+    expect(screen.getByText("范围内总文件 8,354")).toBeVisible();
+    expect(screen.getByText("实际备份或同步文件 8,353")).toBeVisible();
     expect(screen.queryByRole("heading", { name: "运行记录" })).not.toBeInTheDocument();
     expect(screen.getByText("共 500 条 · 第 1/10 页")).toBeVisible();
     expect(screen.getByRole("button", { name: "1" })).toHaveAttribute("aria-current", "page");
@@ -65,9 +68,10 @@ describe("RunHistoryPage", () => {
     const runDetail = vi.fn(async () => ({ id: "run-one", status: "failed", attemptCount: 2, summary: { error: "safe failure" }, rawLogExpired: false }));
     const runLog = vi.fn(async () => "safe log line");
     const action = vi.fn(async () => ({ items: [{ recordType: "run", id: "run-one", kind: "backup", status: "failed", objectName: "任务", occurredAt: "2026-07-15T01:00:00Z", attemptCount: 2 }], truncated: false, generatedAt: "2026-07-15T15:00:00Z", filter: {} }));
-    render(<RunHistoryPage api={{ action, runDetail, runLog } as unknown as AppAPI} locale="zh-CN" />);
+    render(<RunHistoryPage api={{ action, runDetail, runLog } as unknown as AppAPI} locale="zh-CN" timeZone="Asia/Shanghai" />);
 
     const row = (await screen.findByText("run-one")).closest("tr")!;
+    expect(within(row).getByText(/2026.*7.*15.*09:00:00/)).toBeVisible();
     expect(runDetail).not.toHaveBeenCalled();
     await user.click(within(row).getByRole("button", { name: "查看详情" }));
     expect(await screen.findByText("safe log line")).toBeVisible();

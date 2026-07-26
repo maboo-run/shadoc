@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -145,6 +146,79 @@ func TestInstallCopiesCurrentBinaryAndRegistersStablePath(t *testing.T) {
 	got, _ := os.ReadFile(paths.Binary)
 	if string(got) != "current" || len(services.installs) != 1 || services.installs[0] != paths.Binary {
 		t.Fatalf("binary=%q installs=%v", got, services.installs)
+	}
+	if err := VerifyInstalledBinary(paths.Binary); err != nil {
+		t.Fatalf("installed integrity record: %v", err)
+	}
+	checksumInfo, err := os.Stat(ChecksumPath(paths.Binary))
+	if err != nil || checksumInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("checksum info=%v err=%v", checksumInfo, err)
+	}
+}
+
+func TestVerifyInstalledBinaryRejectsMissingMalformedAndMismatchedRecords(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "shadoc")
+	if err := os.WriteFile(binary, []byte("official"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyInstalledBinary(binary); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing integrity record error=%v", err)
+	}
+	if err := os.WriteFile(ChecksumPath(binary), []byte("not-a-checksum\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyInstalledBinary(binary); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("malformed integrity record error=%v", err)
+	}
+	checksum := sha256.Sum256([]byte("different"))
+	if err := writeInstalledChecksum(binary, checksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyInstalledBinary(binary); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched integrity record error=%v", err)
+	}
+}
+
+func TestUpdateRefreshesLocalIntegrityRecordAndRollbackRestoresIt(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "shadoc")
+	if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstalledChecksumForFile(binary); err != nil {
+		t.Fatal(err)
+	}
+	updated := []byte("updated")
+	service := New(
+		fakeRelease{binary: updated, checksum: sha256.Sum256(updated)},
+		&fakeServices{},
+		nil,
+		Paths{Binary: binary, Previous: binary + ".previous"},
+	)
+	if err := service.Update(context.Background(), "1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyInstalledBinary(binary); err != nil {
+		t.Fatalf("updated integrity record: %v", err)
+	}
+
+	broken := []byte("broken")
+	health := &fakeHealth{errors: []error{errors.New("unhealthy"), nil}}
+	service = New(
+		fakeRelease{binary: broken, checksum: sha256.Sum256(broken)},
+		&fakeServices{},
+		health,
+		Paths{Binary: binary, Previous: binary + ".previous", HealthURL: "http://health"},
+	)
+	if err := service.Update(context.Background(), "1.2.4"); err == nil {
+		t.Fatal("unhealthy update accepted")
+	}
+	if err := VerifyInstalledBinary(binary); err != nil {
+		t.Fatalf("rolled back integrity record: %v", err)
+	}
+	got, err := os.ReadFile(binary)
+	if err != nil || string(got) != "updated" {
+		t.Fatalf("rolled back binary=%q err=%v", got, err)
 	}
 }
 
@@ -296,6 +370,9 @@ func TestUninstallRemovesProgramButPreservesDataByDefault(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Binary); !os.IsNotExist(err) {
 		t.Fatalf("binary still present: %v", err)
+	}
+	if _, err := os.Stat(ChecksumPath(paths.Binary)); !os.IsNotExist(err) {
+		t.Fatalf("integrity record still present: %v", err)
 	}
 	if _, err := os.Stat(installedAgent); !os.IsNotExist(err) {
 		t.Fatalf("Agent artifact still present: %v", err)

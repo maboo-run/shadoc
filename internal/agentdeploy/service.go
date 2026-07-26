@@ -146,6 +146,7 @@ type EnrollmentControl interface {
 type DeploymentRemote interface {
 	Probe(context.Context) (Platform, error)
 	Upload(context.Context, RemoteFile, []byte) error
+	PrepareReenrollment(context.Context, Platform) error
 	Activate(context.Context, Platform) error
 	Finalize(context.Context, Platform) error
 	Cleanup(context.Context, Platform) error
@@ -209,6 +210,7 @@ func NewService(storage DeploymentStorage, secrets DeploymentSecrets, control En
 }
 
 var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var errManagedRemoteHostMissing = errors.New("Agent 关联的远程主机已被删除；请先停止远端旧 Agent，再撤销凭据并重新部署")
 
 func (s *Service) Deploy(ctx context.Context, request DeployRequest, report StageReporter) (result DeployResult, resultErr error) {
 	if s == nil || s.store == nil || s.secrets == nil || s.control == nil || s.artifacts == nil || s.dialer == nil {
@@ -265,15 +267,24 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 		return result, err
 	}
 	existingCapabilities := []string(nil)
+	// A managed deployment must consume the newly issued enrollment token
+	// unless it is an in-place migration of the same still-active identity.
+	// This also prevents credentials left by a deleted Agent record (or by a
+	// different Agent on the host) from silently bypassing enrollment.
+	replaceIdentity := true
 	existingAgents, err := s.store.ListAgents(ctx)
 	if err != nil {
 		return result, err
 	}
 	for _, agent := range existingAgents {
-		if agent.ID == request.AgentID && agent.RevokedAt == nil {
-			existingCapabilities = append(existingCapabilities, agent.Capabilities...)
-			break
+		if agent.ID != request.AgentID {
+			continue
 		}
+		replaceIdentity = agent.RevokedAt != nil || agent.UninstalledAt != nil || agent.Status == "revoked"
+		if !replaceIdentity {
+			existingCapabilities = append(existingCapabilities, agent.Capabilities...)
+		}
+		break
 	}
 	succeeded := false
 	defer func() {
@@ -317,6 +328,11 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 	}
 	if report != nil {
 		report("activating")
+	}
+	if replaceIdentity {
+		if err := remote.PrepareReenrollment(ctx, platform); err != nil {
+			return result, err
+		}
 	}
 	if err := remote.Activate(ctx, platform); err != nil {
 		return result, err

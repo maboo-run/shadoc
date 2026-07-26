@@ -150,6 +150,86 @@ describe("Agent fleet health", () => {
     expect(screen.queryByText("正在重启 Agent 以主动探测心跳")).not.toBeInTheDocument();
   });
 
+  it("offers credential revocation when the managed remote host was deleted", async () => {
+    const user = userEvent.setup();
+    const onRemove = vi.fn();
+    render(<AgentFleet
+      agents={[{
+        id: "orphaned-agent", remoteHostId: "deleted-host", status: "offline", runtimeStatus: "unknown",
+        platform: "linux/amd64", certificateStatus: "valid",
+      }]}
+      remoteHosts={[{ id: "replacement-host", name: "新连接", host: "192.168.0.105", port: 22, username: "backup" }]}
+      remoteHostsLoaded
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy={false}
+      onUpgrade={vi.fn()}
+      onProbeHeartbeat={vi.fn()}
+      onRedeploy={vi.fn()}
+      onRemove={onRemove}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "orphaned-agent 查看详情" }));
+
+    expect(screen.getByRole("heading", { name: "远程主机连接已失效" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "主动探测心跳" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停止并卸载" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "撤销凭据" }));
+    expect(onRemove).toHaveBeenCalledWith(expect.objectContaining({ id: "orphaned-agent" }), "revoke");
+  });
+
+  it("offers same-ID redeployment after an orphaned Agent binding is repaired and revoked", async () => {
+    const user = userEvent.setup();
+    const onRedeploy = vi.fn();
+    render(<AgentFleet
+      agents={[{
+        id: "orphaned-agent", status: "revoked", runtimeStatus: "unknown",
+        revokedAt: "2026-07-25T12:30:00Z", platform: "linux/amd64",
+      }]}
+      remoteHosts={[{ id: "replacement-host", name: "新连接", host: "192.168.0.105", port: 22, username: "backup" }]}
+      remoteHostsLoaded
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy={false}
+      onUpgrade={vi.fn()}
+      onRedeploy={onRedeploy}
+      onRemove={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "orphaned-agent 查看详情" }));
+    await user.click(screen.getByRole("button", { name: "重新部署" }));
+
+    expect(onRedeploy).toHaveBeenCalledWith(expect.objectContaining({ id: "orphaned-agent" }));
+  });
+
+  it("offers record deletion only after Agent credentials are revoked", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<AgentFleet
+      agents={[{
+        id: "retired-agent", status: "revoked", runtimeStatus: "stopped",
+        revokedAt: "2026-07-25T14:30:00Z", platform: "linux/amd64",
+      }]}
+      remoteHosts={[]}
+      remoteHostsLoaded
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy={false}
+      onUpgrade={vi.fn()}
+      onRedeploy={vi.fn()}
+      onRemove={vi.fn()}
+      onDelete={onDelete}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "retired-agent 查看详情" }));
+    await user.click(screen.getByRole("button", { name: "删除记录" }));
+
+    expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: "retired-agent" }));
+  });
+
   it("omits no-action Restic and Service health confirmations", async () => {
     const user = userEvent.setup();
     render(<AgentFleet

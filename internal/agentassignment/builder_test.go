@@ -39,6 +39,28 @@ func TestBuilderPreservesControlledResticResourceArguments(t *testing.T) {
 	}
 }
 
+func TestBuilderCarriesPendingPartialProtectionWithoutStartingASecondBackupFirst(t *testing.T) {
+	storage := capacityStorage{execution: store.TaskExecution{
+		Task: domain.Task{
+			ID: "task", Kind: domain.DirectoryTask,
+			Directory: &domain.DirectorySource{Path: "/srv/photos"},
+		},
+		Repository:                 domain.Repository{ID: "repo", Kind: domain.LocalRepository, Path: "/backup/repo", Status: "unprotected-partial:partial-1"},
+		RepositoryPasswordSecretID: "repo-password",
+	}}
+	raw, err := New(storage, capacitySecrets{"repo-password": []byte("secret")}).Build(context.Background(), store.AgentLease{TaskID: "task", Engine: string(domain.ResticEngine)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var definition resticagent.Definition
+	if err := json.Unmarshal(raw, &definition); err != nil {
+		t.Fatal(err)
+	}
+	if definition.PendingPartialSnapshotID != "partial-1" {
+		t.Fatalf("definition=%+v", definition)
+	}
+}
+
 func TestBuilderHydratesStructuredS3AssignmentAfterClaim(t *testing.T) {
 	credentials, err := s3backend.EncodeCredentials(s3backend.Credentials{AccessKey: "access-private", SecretKey: "secret-private"})
 	if err != nil {

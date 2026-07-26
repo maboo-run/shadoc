@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { translate, type Locale } from "../i18n";
 import { StatusIndicator } from "./StatusIndicator";
+import { formatEmbeddedDateTimes } from "./dateTime";
 
 type HealthAPI = {
   action(path: string, payload?: Record<string, unknown>): Promise<unknown>;
@@ -107,13 +108,13 @@ export function HealthEvents({
       <ul className="health-alert-list">
         {data.active.map((item) => <li key={item.stateKey} className={`health-alert ${item.severity}`}>
           <div className="health-alert-heading"><strong>{item.objectName}</strong><StatusIndicator value={item.severity} locale={locale} label={severity(item.severity)} variant="pill" /></div>
-          <p>{item.message}</p>
+          <p>{formatEmbeddedDateTimes(item.message, locale, timeZone)}</p>
           <dl>
-            <div><dt>{t("原因")}</dt><dd>{item.reason}</dd></div>
+            <div><dt>{t("原因")}</dt><dd>{formatEmbeddedDateTimes(item.reason, locale, timeZone)}</dd></div>
             <div><dt>{t("首次发生")}</dt><dd>{date(item.firstAt)}</dd></div>
             <div><dt>{t("最近发生")}</dt><dd>{date(item.lastAt)}</dd></div>
             <div><dt>{t("发生次数")}</dt><dd>{new Intl.NumberFormat(locale).format(item.occurrenceCount)}</dd></div>
-            <div className="wide"><dt>{t("恢复条件")}</dt><dd>{item.recoveryCondition}</dd></div>
+            <div className="wide"><dt>{t("恢复条件")}</dt><dd>{formatEmbeddedDateTimes(item.recoveryCondition, locale, timeZone)}</dd></div>
             <div><dt>{t("处理入口")}</dt><dd>{t(item.targetPage)}</dd></div>
           </dl>
           {onNavigate && item.targetPage && <button className="text-button" type="button" onClick={() => void onNavigate(item.targetPage, item.objectId, item.kind)}>{t("处理")}</button>}
@@ -126,7 +127,7 @@ export function HealthEvents({
       <div className="table-frame"><table>
         <thead><tr><th>{t("时间")}</th><th>{t("变化")}</th><th>{t("级别")}</th><th>{t("对象")}</th><th>{t("原因")}</th><th>{t("恢复条件")}</th></tr></thead>
         <tbody>
-          {data.events.map((event) => <tr key={event.id}><td>{date(event.occurredAt)}</td><td>{transition(event.transition)}</td><td>{severity(event.severity)}</td><td>{event.objectName}</td><td>{event.reason}</td><td>{event.recoveryCondition}</td></tr>)}
+          {data.events.map((event) => <tr key={event.id}><td>{date(event.occurredAt)}</td><td>{transition(event.transition)}</td><td>{severity(event.severity)}</td><td>{event.objectName}</td><td>{formatEmbeddedDateTimes(event.reason, locale, timeZone)}</td><td>{formatEmbeddedDateTimes(event.recoveryCondition, locale, timeZone)}</td></tr>)}
           {!loading && data.events.length === 0 && <tr><td className="empty-row" colSpan={6}>{t("尚无告警历史")}</td></tr>}
         </tbody>
       </table></div>

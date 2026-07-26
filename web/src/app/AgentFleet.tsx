@@ -5,6 +5,7 @@ import { OperationFeedback, type OperationController } from "./OperationFeedback
 
 type AgentRecord = Record<string, unknown>;
 type Tone = "healthy" | "warning" | "danger" | "neutral";
+type AgentRemovalMode = "uninstall" | "revoke";
 type AgentResticOperation = {
   agentId: string;
   active: boolean;
@@ -22,6 +23,7 @@ type AgentOperation = {
 type AgentFleetProps = {
   agents: AgentRecord[];
   remoteHosts: AgentRecord[];
+  remoteHostsLoaded?: boolean;
   locale: Locale;
   timeZone: string;
   currentServiceURL: string;
@@ -37,10 +39,11 @@ type AgentFleetProps = {
   onReprobeTools?(agent: AgentRecord): void;
   onProbeHeartbeat?(agent: AgentRecord): void;
   onRedeploy(agent: AgentRecord): void;
-  onRemove(agent: AgentRecord): void;
+  onRemove(agent: AgentRecord, mode: AgentRemovalMode): void;
+  onDelete?(agent: AgentRecord): void;
 };
 
-export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServiceURL, latestResticVersion, busy, upgradeOperation, toolProbeOperation, heartbeatOperation, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onProbeHeartbeat, onRedeploy, onRemove }: AgentFleetProps) {
+export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, locale, timeZone, currentServiceURL, latestResticVersion, busy, upgradeOperation, toolProbeOperation, heartbeatOperation, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onProbeHeartbeat, onRedeploy, onRemove, onDelete }: AgentFleetProps) {
   const t = (source: string) => translate(locale, source);
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => new Set());
   if (!agents.length) {
@@ -49,9 +52,13 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
   return <ul className="agent-fleet" aria-label={t("Agent 节点列表")}>
     {agents.map((agent) => {
       const id = String(agent.id ?? "");
-      const managed = Boolean(agent.remoteHostId);
+      const remoteHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent.remoteHostId ?? ""));
+      const managedInstallation = Boolean(agent.remoteHostId);
+      const missingManagedHost = remoteHostsLoaded && managedInstallation && !remoteHost;
+      const managed = managedInstallation && !missingManagedHost;
       const uninstalled = Boolean(agent.uninstalledAt);
       const revoked = agent.status === "revoked" || Boolean(agent.revokedAt);
+      const canRedeploy = uninstalled || (revoked && remoteHostsLoaded && remoteHosts.length > 0);
       const readiness = readinessState(String(agent.compatibilityStatus ?? (revoked || uninstalled ? "revoked" : "unknown")), Boolean(agent.taskEligible), locale);
       const targetVersion = String(agent.targetVersion ?? "");
       const upgradeAvailable = Boolean(agent.upgradeAvailable) && !uninstalled && !revoked;
@@ -74,7 +81,6 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
         : "";
       const expanded = expandedAgents.has(id);
       const detailID = `agent-${id}-details`;
-      const remoteHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent.remoteHostId ?? ""));
       const address = remoteAddress(remoteHost, agent, locale);
       const agentUpgradeOperation = scopedOperation(upgradeOperation, id);
       const agentToolProbeOperation = scopedOperation(toolProbeOperation, id);
@@ -123,7 +129,7 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
             <dl className="agent-runtime-facts">
               <div><dt>{t("任务状态")}</dt><dd><span className={`agent-readiness agent-readiness-${readiness.tone}`}><span className="status-dot" />{readiness.label}</span></dd></div>
               <div><dt>{t("远程主机")}</dt><dd>{remoteHostDetail(remoteHost, agent, locale)}</dd></div>
-              <div><dt>{t("版本与平台")}</dt><dd><code>{String(agent.buildVersion || t("版本未报告"))}</code><span aria-hidden="true"> · </span>{String(agent.platform || t("平台未报告"))}<span aria-hidden="true"> · </span>{managed ? t("托管安装") : t("手动安装")}{revoked && <><span aria-hidden="true"> · </span><span className="agent-credential-revoked">{t("凭据已撤销")}</span></>}</dd></div>
+              <div><dt>{t("版本与平台")}</dt><dd><code>{String(agent.buildVersion || t("版本未报告"))}</code><span aria-hidden="true"> · </span>{String(agent.platform || t("平台未报告"))}<span aria-hidden="true"> · </span>{managedInstallation ? t("托管安装") : t("手动安装")}{revoked && <><span aria-hidden="true"> · </span><span className="agent-credential-revoked">{t("凭据已撤销")}</span></>}</dd></div>
               <div><dt>{t("通信兼容性")}</dt><dd><span className={agent.protocolCompatible === false ? "agent-detail-danger" : undefined}>{compatibilityLabel(agent, locale)}</span></dd></div>
               <div><dt>{t("证书")}</dt><dd><span>{certificateLabel(agent, locale)}</span><span aria-hidden="true"> · </span>{formatTime(agent.certificateNotAfter, locale, timeZone)}</dd></div>
               <div><dt>{t("证书续期")}</dt><dd>{t(agent.renewalStatus === "failed" ? "续期失败，旧证书仍有效" : agent.renewalStatus === "healthy" ? "续期通道正常" : "尚无续期状态")}</dd></div>
@@ -138,19 +144,36 @@ export function AgentFleet({ agents, remoteHosts, locale, timeZone, currentServi
               {managed && !uninstalled && !revoked && <button className="secondary-button" type="button" disabled={busy || !canReprobeTools} onClick={() => onReprobeTools?.(agent)}>{t("重新探测工具")}</button>}
               {showResticAction && <button className="primary-button" type="button" disabled={busy || !canInstallRestic} onClick={() => onInstallRestic?.(agent)}>{t(currentResticVersion ? "升级 Agent Restic" : "安装 Agent Restic")}</button>}
               {managed && upgradeAvailable && <button className="primary-button" type="button" disabled={busy} onClick={() => onUpgrade(agent)}>{managedResticRepair ? t("更新 Agent 以启用 Restic 安装") : locale === "en-US" ? `Upgrade Agent to ${targetVersion}` : `升级 Agent 至 ${targetVersion}`}</button>}
-              {uninstalled
+              {canRedeploy
                 ? <button className="secondary-button" type="button" disabled={busy} onClick={() => onRedeploy(agent)}>{t("重新部署")}</button>
-                : <button className="danger-text text-button" type="button" disabled={busy || (revoked && !managed)} onClick={() => onRemove(agent)}>{t(managed ? "停止并卸载" : revoked ? "凭据已撤销" : "撤销凭据")}</button>}
+                : <button className="danger-text text-button" type="button" disabled={busy || (revoked && !managed)} onClick={() => onRemove(agent, managed ? "uninstall" : "revoke")}>{t(managed ? "停止并卸载" : revoked ? "凭据已撤销" : "撤销凭据")}</button>}
+              {(revoked || uninstalled) && onDelete && <button className="danger-text text-button" type="button" disabled={busy} onClick={() => onDelete(agent)}>{t("删除记录")}</button>}
             </div>
             {resticAvailability && <p className="field-hint">{t(resticAvailability)}</p>}
-            {agent.endpointStatus === "migration_required" && <EndpointMigration agent={agent} managed={managed} locale={locale} currentServiceURL={currentServiceURL} />}
-            {!managed && upgradeAvailable && <ManualUpgrade agent={agent} locale={locale} />}
-            {!currentResticVersion && (!managed || !linux) && <ManualResticInstall locale={locale} />}
+            {missingManagedHost
+              ? <MissingManagedHost locale={locale} />
+              : agent.endpointStatus === "migration_required" && <EndpointMigration agent={agent} managed={managed} locale={locale} currentServiceURL={currentServiceURL} />}
+            {!revoked && !uninstalled && !managedInstallation && upgradeAvailable && <ManualUpgrade agent={agent} locale={locale} />}
+            {!revoked && !uninstalled && !currentResticVersion && (!managedInstallation || !linux) && <ManualResticInstall locale={locale} />}
           </div>}
         </article>
       </li>;
     })}
   </ul>;
+}
+
+function MissingManagedHost({ locale }: { locale: Locale }) {
+  const t = (source: string) => translate(locale, source);
+  return <section className="agent-remediation" role="note">
+    <div>
+      <h3>{t("远程主机连接已失效")}</h3>
+      <p>{t("这个 Agent 仍引用已删除的远程主机，无法执行主动探测、升级或远程卸载。")}</p>
+    </div>
+    <ol>
+      <li>{t("先在源端停止并清理旧 Agent 服务。")}</li>
+      <li>{t("撤销当前凭据后，使用原 Agent ID 和新的远程主机连接重新部署。")}</li>
+    </ol>
+  </section>;
 }
 
 function scopedOperation(value: AgentOperation | undefined, agentID: string): OperationController | undefined {

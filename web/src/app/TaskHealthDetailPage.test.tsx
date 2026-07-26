@@ -29,7 +29,7 @@ const activityPage = {
     {
       recordType: "run", id: "run-complete", kind: "backup", engine: "restic", status: "success", trigger: "manual",
       objectId: "task-a", objectName: "照片备份", occurredAt: "2026-07-16T13:29:55Z", startedAt: "2026-07-16T13:29:55Z", finishedAt: "2026-07-16T13:30:00Z", attemptCount: 1,
-      metrics: { durationMilliseconds: 5000, filesProcessed: 120, filesChanged: 8, bytesProcessed: 10485760, bytesChanged: 2097152 },
+      metrics: { durationMilliseconds: 5000, filesExpected: 123, filesProcessed: 120, filesChanged: 8, bytesProcessed: 10485760, bytesChanged: 2097152 },
     },
     {
       recordType: "run", id: "run-old", kind: "backup", engine: "restic", status: "success", trigger: "schedule",
@@ -43,17 +43,20 @@ describe("TaskHealthDetailPage", () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     const action = vi.fn(async (path: string) => path === "/api/task-trends" ? trendReport : activityPage);
-    render(<TaskHealthDetailPage taskId="task-a" api={{ action } as unknown as AppAPI} locale="zh-CN" onBack={onBack} />);
+    render(<TaskHealthDetailPage taskId="task-a" api={{ action } as unknown as AppAPI} locale="zh-CN" timeZone="Asia/Shanghai" onBack={onBack} />);
 
     expect(await screen.findByRole("heading", { name: "照片备份" })).toBeVisible();
+    expect(screen.getByText(/2026.*7.*16.*21:30:00/)).toBeVisible();
     expect(screen.getByText("66.7%（2/3）")).toBeVisible();
     expect(await screen.findByText("10.0 MiB")).toBeVisible();
+    expect(screen.getByText(/2026.*7.*16.*21:29:55/)).toBeVisible();
     expect(screen.getByText("2.0 MiB")).toBeVisible();
     expect(screen.getByText("120")).toBeVisible();
+    expect(screen.getByText("123")).toBeVisible();
     expect(screen.getByText("8")).toBeVisible();
 
     const oldRow = screen.getByText("run-old").closest("tr")!;
-    expect(within(oldRow).getAllByText("—")).toHaveLength(6);
+    expect(within(oldRow).getAllByText("—")).toHaveLength(7);
     expect(screen.queryByText("指标不可用")).not.toBeInTheDocument();
     expect(action).toHaveBeenCalledWith("/api/task-trends");
     expect(action.mock.calls.some(([path]) => String(path).startsWith("/api/activity?recordType=run&objectId=task-a"))).toBe(true);
@@ -77,7 +80,7 @@ describe("TaskHealthDetailPage", () => {
     const action = vi.fn(async (path: string) => path === "/api/task-trends" ? trendReport : failurePage);
     const runDetail = vi.fn(async () => ({ id: "run-failed", status: "failed", summary: { error: failurePage.items[0].errorSummary }, rawLogExpired: false }));
     const runLog = vi.fn(async () => "rsync: unrecognized option `--protect-args'");
-    render(<TaskHealthDetailPage taskId="task-a" api={{ action, runDetail, runLog } as unknown as AppAPI} locale="zh-CN" onBack={() => undefined} />);
+    render(<TaskHealthDetailPage taskId="task-a" api={{ action, runDetail, runLog } as unknown as AppAPI} locale="zh-CN" timeZone="Asia/Shanghai" onBack={() => undefined} />);
 
     const row = (await screen.findByText("run-failed")).closest("tr")!;
     expect(within(row).getByText("run rsync: exit status 1: rsync: unrecognized option `--protect-args'")).toBeVisible();

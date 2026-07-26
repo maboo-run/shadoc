@@ -39,9 +39,10 @@ describe("RestoreVerificationPanel", () => {
     const user = userEvent.setup();
     const saveRestoreVerificationPolicy = vi.fn(async () => policy);
     const api = apiFixture({ saveRestoreVerificationPolicy });
-    render(<RestoreVerificationPanel api={api} locale="zh-CN" />);
+    render(<RestoreVerificationPanel api={api} locale="zh-CN" timeZone="Asia/Shanghai" />);
 
     expect(await screen.findAllByText("snapshot-a")).toHaveLength(2);
+    expect(screen.getByText(/2026.*7.*16.*10:00:00/)).toBeVisible();
     expect(screen.getByText("sha256:verified")).toBeVisible();
     expect(screen.getByText("已清理")).toBeVisible();
     await user.clear(screen.getByLabelText("验证路径"));
@@ -71,7 +72,7 @@ describe("RestoreVerificationPanel", () => {
       if (path === "/api/operations/operation-cleanup") return { id: "operation-cleanup", kind: "restore_verification_cleanup", status: "success", stage: "success" };
       return {};
     });
-    render(<RestoreVerificationPanel api={apiFixture({ action })} locale="zh-CN" />);
+    render(<RestoreVerificationPanel api={apiFixture({ action })} locale="zh-CN" timeZone="Asia/Shanghai" />);
 
     await user.click(await screen.findByRole("button", { name: "立即执行恢复验证" }));
     await waitFor(() => expect(action).toHaveBeenCalledWith("/api/tasks/task-a/restore-verification/run", {}));

@@ -49,6 +49,31 @@ func TestHTTPControlClientLeasesAndCompletesWork(t *testing.T) {
 	}
 }
 
+func TestHTTPControlUploadsFilesystemScopeEntryChunk(t *testing.T) {
+	var received agentprotocol.FilesystemScopeEntryChunk
+	clientTransport := roundTripFunc(func(r *http.Request) *http.Response {
+		response := &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}
+		if r.URL.Path != "/filesystem/scope-entries" || json.NewDecoder(r.Body).Decode(&received) != nil {
+			response.StatusCode = http.StatusUnprocessableEntity
+		}
+		return response
+	})
+	client, err := NewHTTPControl("https://service.example", &http.Client{Transport: clientTransport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := agentprotocol.FilesystemScopeEntryChunk{
+		Version: agentprotocol.Version, AssignmentID: "scope-1", AgentID: "agent-1",
+		Entries: []agentprotocol.FilesystemScopeEntry{{Ordinal: 1, Path: "photos/a.jpg", Type: "file", Disposition: "included"}},
+	}
+	if err := client.UploadFilesystemScopeEntries(t.Context(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	if received.AssignmentID != "scope-1" || len(received.Entries) != 1 || received.Entries[0].Path != "photos/a.jpg" {
+		t.Fatalf("received=%+v", received)
+	}
+}
+
 type roundTripFunc func(*http.Request) *http.Response
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

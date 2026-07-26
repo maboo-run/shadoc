@@ -83,6 +83,16 @@ func TestSystemProbeReportsWritableDataDirectoryTimezoneAndSpace(t *testing.T) {
 	}
 }
 
+func TestRootServiceIdentityIsReportedAsAWarning(t *testing.T) {
+	finding := serviceIdentityFinding(0)
+	if finding == nil || finding.Severity != Warning || finding.Tool != "root" {
+		t.Fatalf("finding=%+v", finding)
+	}
+	if finding := serviceIdentityFinding(1000); finding != nil {
+		t.Fatalf("non-root identity warning=%+v", finding)
+	}
+}
+
 func TestResticBeforeCommandBackupSupportIsBlocked(t *testing.T) {
 	probe := NewProbe(fakeExecutor{results: map[string]command.Result{
 		"/tools/restic": {ExitCode: 0, Stdout: "restic 0.16.5"},

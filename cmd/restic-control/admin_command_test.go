@@ -39,6 +39,18 @@ func TestResetAdminPasswordReadsTwiceWithoutAcceptingPasswordArgument(t *testing
 	}
 }
 
+func TestResetAdminPasswordAcceptsOnlyTheExplicitSystemScopeFlag(t *testing.T) {
+	scope, err := adminCommandScope([]string{"reset-admin-password", "--system"})
+	if err != nil || scope != systemServiceScope {
+		t.Fatalf("scope=%q err=%v", scope, err)
+	}
+	reader := &fakePasswordReader{values: [][]byte{[]byte("new-password-long-enough"), []byte("new-password-long-enough")}}
+	handled, err := handleAdminCommand(context.Background(), []string{"reset-admin-password", "--system"}, reader, &fakePasswordResetter{})
+	if err != nil || !handled {
+		t.Fatalf("handled=%t err=%v", handled, err)
+	}
+}
+
 func TestResetAdminPasswordRejectsMismatch(t *testing.T) {
 	reader := &fakePasswordReader{values: [][]byte{[]byte("new-password-long-enough"), []byte("different-password-long")}}
 	resetter := &fakePasswordResetter{}

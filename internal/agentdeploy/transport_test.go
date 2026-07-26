@@ -115,6 +115,50 @@ func TestActivationMigratesCredentialsAndCleanupCanRemoveOnlyTheStagedCopy(t *te
 	}
 }
 
+func TestSSHTransportPreparesRevokedAgentForFreshEnrollment(t *testing.T) {
+	for _, platform := range []Platform{{OS: "linux"}, {OS: "darwin"}, {OS: "windows"}} {
+		t.Run(platform.OS, func(t *testing.T) {
+			runner := &recordingRunner{}
+			remote := NewRemote(runner)
+			preparer, ok := any(remote).(interface {
+				PrepareReenrollment(context.Context, Platform) error
+			})
+			if !ok {
+				t.Fatal("SSH transport does not support preparing a fresh Agent enrollment")
+			}
+			if err := preparer.PrepareReenrollment(t.Context(), platform); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("calls=%+v", runner.calls)
+			}
+			command := runner.calls[0].command
+			for _, required := range []string{".force-enrollment", "agent.crt", "agent.key", "ca.crt"} {
+				if !strings.Contains(command, required) {
+					t.Errorf("%s re-enrollment command missing %q: %s", platform.OS, required, command)
+				}
+			}
+			if len(runner.calls[0].stdin) != 0 {
+				t.Fatalf("re-enrollment command unexpectedly received stdin: %q", runner.calls[0].stdin)
+			}
+		})
+	}
+}
+
+func TestReenrollmentMarkerIsRemovedAfterSuccessOrCleanup(t *testing.T) {
+	for name, commands := range map[string][]string{
+		"linux":   {linuxCleanupCommand, linuxFinalizeCommand},
+		"darwin":  {darwinCleanupCommand, darwinFinalizeCommand},
+		"windows": {windowsCleanupCommand, windowsFinalizeCommand},
+	} {
+		for _, command := range commands {
+			if !strings.Contains(command, ".force-enrollment") {
+				t.Errorf("%s command leaves the re-enrollment marker behind: %s", name, command)
+			}
+		}
+	}
+}
+
 func TestMigrationProtectsWindowsCredentialsAndFinalizationDeletesUnusedEnrollmentToken(t *testing.T) {
 	if !strings.Contains(windowsActivateCommand, "icacls.exe") || !strings.Contains(windowsActivateCommand, "/inheritance:r") {
 		t.Fatalf("Windows credential migration lacks fixed ACL hardening: %s", windowsActivateCommand)

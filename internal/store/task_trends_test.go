@@ -78,6 +78,44 @@ func TestTaskTrendsUseExplicitWindowDenominatorAndMetricCoverage(t *testing.T) {
 	}
 }
 
+func TestTaskTrendsReadLongAverageDurationAsIntegerMilliseconds(t *testing.T) {
+	s, task := createIdentityFixture(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 13, 27, 34, 0, time.UTC)
+	duration := 58*time.Minute + 8*time.Second
+	started := now.Add(-duration)
+	if err := s.StartRun(ctx, RunRecord{
+		ID: "long-run", TaskID: task.ID, Trigger: "manual",
+		Status: "running", StartedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishRun(ctx, "long-run", "success", now, 1, "", map[string]any{
+		"filesExpected":  int64(22859),
+		"filesProcessed": int64(22859),
+		"filesChanged":   int64(22859),
+		"bytesProcessed": int64(317398237184),
+		"bytesChanged":   int64(292809474048),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.TaskTrends(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	week := trendWindow(t, report.Tasks[0], 7)
+	if got, want := metricValue(week.AverageDurationMilliseconds), duration.Milliseconds(); got != want {
+		t.Fatalf("average duration = %d, want %d", got, want)
+	}
+	if len(report.Tasks[0].Daily) != 1 {
+		t.Fatalf("daily trends = %+v", report.Tasks[0].Daily)
+	}
+	if got, want := metricValue(report.Tasks[0].Daily[0].AverageDurationMilliseconds), duration.Milliseconds(); got != want {
+		t.Fatalf("daily average duration = %d, want %d", got, want)
+	}
+}
+
 func trendWindow(t *testing.T, trend TaskTrend, days int) TaskTrendWindow {
 	t.Helper()
 	for _, window := range trend.Windows {

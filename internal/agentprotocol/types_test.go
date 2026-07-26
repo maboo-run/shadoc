@@ -59,3 +59,31 @@ func TestCertificateRenewalRequestRequiresMatchingCSRIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestFilesystemScopeEntryChunkRequiresBoundedRelativeInventory(t *testing.T) {
+	valid := FilesystemScopeEntryChunk{
+		Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Sequence: 0,
+		Entries: []FilesystemScopeEntry{
+			{Ordinal: 1, Path: "photos/2026/a.jpg", Type: "file", Disposition: "included", Size: 12},
+			{Ordinal: 2, Path: "private.key", Type: "file", Disposition: "unreadable", ReasonCode: "permission_denied"},
+		},
+	}
+	if err := valid.ValidateFor("agent-a"); err != nil {
+		t.Fatalf("valid chunk rejected: %v", err)
+	}
+
+	invalid := []FilesystemScopeEntryChunk{
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-b", Entries: valid.Entries},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Sequence: -1, Entries: valid.Entries},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a"},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Entries: []FilesystemScopeEntry{{Ordinal: 1, Path: "/srv/private.key", Type: "file", Disposition: "included"}}},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Entries: []FilesystemScopeEntry{{Ordinal: 1, Path: "../private.key", Type: "file", Disposition: "included"}}},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Entries: []FilesystemScopeEntry{{Ordinal: 1, Path: "a", Type: "socket", Disposition: "included"}}},
+		{Version: Version, AssignmentID: "scope-1", AgentID: "agent-a", Entries: []FilesystemScopeEntry{{Ordinal: 1, Path: "a", Type: "file", Disposition: "copied"}}},
+	}
+	for index, chunk := range invalid {
+		if err := chunk.ValidateFor("agent-a"); err == nil {
+			t.Fatalf("invalid chunk %d accepted: %+v", index, chunk)
+		}
+	}
+}

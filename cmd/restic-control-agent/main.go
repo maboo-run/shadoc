@@ -162,7 +162,10 @@ func probeAgentToolVersion(ctx context.Context, executor command.Executor, progr
 }
 
 func filesystemCapabilities(pathStyle string) []string {
-	return []string{"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview", "filesystem-restore-target", "path-style:" + pathStyle}
+	return []string{
+		"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview",
+		agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", "path-style:" + pathStyle,
+	}
 }
 
 func agentCapabilities(pathStyle, goos string) []string {

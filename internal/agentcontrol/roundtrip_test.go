@@ -34,6 +34,8 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := NewWithStore(authority, storage, func() time.Time { return now })
+	scopeSink := &recordingScopeSink{}
+	service.SetFilesystemScopeSink(scopeSink)
 	serverCertificate, err := LoadOrCreateServerCertificate(t.TempDir(), authority, "127.0.0.1:9443", nil, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +92,18 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 	if err != nil || len(agents) != 1 || agents[0].BuildVersion != "v1.4.0" || agents[0].CertificateNotAfter == nil || !agents[0].CertificateNotAfter.Equal(clientLeaf.NotAfter) {
 		t.Fatalf("structured heartbeat facts=%+v err=%v certificate=%+v", agents, err, clientLeaf)
 	}
+	scopeChunk := agentprotocol.FilesystemScopeEntryChunk{
+		Version: agentprotocol.Version, AssignmentID: "scope-1", AgentID: "agent-1",
+		Entries: []agentprotocol.FilesystemScopeEntry{{Ordinal: 1, Path: "photos/a.jpg", Type: "file", Disposition: "included"}},
+	}
+	scopeResponse := postAgentJSON(t, client, server.URL+"/filesystem/scope-entries", scopeChunk)
+	if scopeResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("scope entry status=%d", scopeResponse.StatusCode)
+	}
+	scopeResponse.Body.Close()
+	if scopeSink.agentID != "agent-1" || scopeSink.chunk.AssignmentID != "scope-1" {
+		t.Fatalf("scope sink=%+v", scopeSink)
+	}
 
 	task := domain.Task{ID: "task-1", Name: "sync", Engine: domain.RsyncEngine, Kind: domain.RsyncTask, ExecutionTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"}, Rsync: &domain.RsyncSource{Path: "/source", DestinationHostID: "host-1", DestinationPath: "/target"}, CreatedAt: now, UpdatedAt: now}
 	if err := storage.CreateTask(context.Background(), task); err != nil {
@@ -107,15 +121,25 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaseResponse.Body.Close()
-	resultResponse := postAgentJSON(t, client, server.URL+"/result", agentprotocol.Result{Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: "agent-1", Status: "succeeded"})
+	resultResponse := postAgentJSON(t, client, server.URL+"/result", agentprotocol.Result{Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: "agent-1", Status: "partial"})
 	if resultResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("result status=%d", resultResponse.StatusCode)
 	}
 	resultResponse.Body.Close()
 	lease, err := storage.AgentLeaseStatus(context.Background(), "lease-1")
-	if err != nil || lease.Status != "succeeded" || lease.CompletedAt == nil {
+	if err != nil || lease.Status != "partial" || lease.CompletedAt == nil {
 		t.Fatalf("lease=%+v err=%v", lease, err)
 	}
+}
+
+type recordingScopeSink struct {
+	agentID string
+	chunk   agentprotocol.FilesystemScopeEntryChunk
+}
+
+func (s *recordingScopeSink) AppendFilesystemScopeEntries(_ context.Context, agentID string, chunk agentprotocol.FilesystemScopeEntryChunk) error {
+	s.agentID, s.chunk = agentID, chunk
+	return nil
 }
 
 func postAgentJSON(t *testing.T, client *http.Client, target string, value any) *http.Response {

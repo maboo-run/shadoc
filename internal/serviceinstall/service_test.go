@@ -58,17 +58,30 @@ func TestUpdaterRunsInSeparateNativeServiceWithoutShellOrArbitraryIdentity(t *te
 	arguments := []string{"managed-update", "--operation-id", "op_0123456789abcdef01234567", "--version", "v1.2.3"}
 	for _, test := range []struct {
 		goos, program string
+		scope         Scope
+		wantUserFlag  bool
 	}{
-		{goos: "linux", program: "systemd-run"},
-		{goos: "darwin", program: "launchctl"},
+		{goos: "linux", program: "systemd-run", scope: UserScope, wantUserFlag: true},
+		{goos: "linux", program: "systemd-run", scope: SystemScope},
+		{goos: "darwin", program: "launchctl", scope: UserScope},
 	} {
-		program, args, err := updaterCommand(test.goos, 501, "op_0123456789abcdef01234567", "/opt/restic-control", arguments)
+		program, args, err := updaterCommand(test.goos, test.scope, 501, "op_0123456789abcdef01234567", "/opt/restic-control", arguments)
 		if err != nil || program != test.program || strings.Contains(strings.Join(args, " "), "/bin/sh") || !strings.Contains(strings.Join(args, " "), "/opt/restic-control managed-update") {
 			t.Fatalf("goos=%s program=%q args=%v err=%v", test.goos, program, args, err)
 		}
+		hasUserFlag := false
+		for _, argument := range args {
+			hasUserFlag = hasUserFlag || argument == "--user"
+		}
+		if hasUserFlag != test.wantUserFlag {
+			t.Fatalf("goos=%s scope=%s args=%v user flag=%t", test.goos, test.scope, args, hasUserFlag)
+		}
 	}
-	if _, _, err := updaterCommand("linux", 501, "../../unsafe", "/opt/restic-control", arguments); err == nil {
+	if _, _, err := updaterCommand("linux", UserScope, 501, "../../unsafe", "/opt/restic-control", arguments); err == nil {
 		t.Fatal("unsafe updater identity accepted")
+	}
+	if _, _, err := updaterCommand("darwin", SystemScope, 0, "op_0123456789abcdef01234567", "/opt/restic-control", arguments); err == nil {
+		t.Fatal("unsupported macOS system updater accepted")
 	}
 }
 
@@ -84,6 +97,117 @@ func TestSystemdDefinitionEscapesDirectiveAndSpecifierCharacters(t *testing.T) {
 		t.Fatalf("unsafe systemd definition: %s", unit)
 	}
 }
+
+func TestLinuxSystemServiceUsesRootOwnedDefinitionAndSystemManager(t *testing.T) {
+	if got := definitionPathForScope("linux", SystemScope, "/home/example", "shadoc"); got != "/etc/systemd/system/shadoc.service" {
+		t.Fatalf("system definition path=%q", got)
+	}
+	for _, test := range []struct {
+		action string
+		want   string
+	}{
+		{action: "stop", want: "systemctl stop shadoc.service"},
+		{action: "restart", want: "systemctl restart shadoc.service"},
+		{action: "status", want: "systemctl is-active shadoc.service"},
+	} {
+		program, arguments, err := serviceActionCommandForScope("linux", SystemScope, 0, "/root", test.action, "shadoc")
+		if err != nil {
+			t.Fatalf("action=%s err=%v", test.action, err)
+		}
+		if got := strings.Join(append([]string{program}, arguments...), " "); got != test.want {
+			t.Fatalf("action=%s command=%q", test.action, got)
+		}
+	}
+}
+
+func TestLinuxSystemUnitRunsOnlyTheFixedRootService(t *testing.T) {
+	unit := systemdUnitForScope(SystemScope, "/var/lib/shadoc/app/shadoc", []string{
+		"serve", "--service-scope", "system", "--listen", "127.0.0.1:8585", "--data-dir", "/var/lib/shadoc",
+	})
+	for _, expected := range []string{
+		"User=root",
+		"Group=root",
+		"UMask=0077",
+		"WantedBy=multi-user.target",
+		`ExecStart="/var/lib/shadoc/app/shadoc" "serve" "--service-scope" "system"`,
+		"NoNewPrivileges=true",
+		"PrivateTmp=true",
+	} {
+		if !strings.Contains(unit, expected) {
+			t.Fatalf("system unit missing %q:\n%s", expected, unit)
+		}
+	}
+	if strings.Contains(unit, "/bin/sh") || strings.Contains(unit, "WantedBy=default.target") {
+		t.Fatalf("unsafe system unit:\n%s", unit)
+	}
+}
+
+func TestScopeValidationRejectsRootUserServicesAndNonLinuxSystemServices(t *testing.T) {
+	if err := validateScopeRuntime("linux", UserScope, 0); err == nil || !strings.Contains(err.Error(), "--system") {
+		t.Fatalf("root user service error=%v", err)
+	}
+	if err := validateScopeRuntime("darwin", SystemScope, 0); err == nil {
+		t.Fatal("macOS system scope accepted")
+	}
+	if err := validateScopeRuntime("linux", SystemScope, 1000); err == nil {
+		t.Fatal("unprivileged system scope accepted")
+	}
+	if err := validateScopeRuntime("linux", SystemScope, 0); err != nil {
+		t.Fatalf("root Linux system scope rejected: %v", err)
+	}
+}
+
+func TestOwnedExecutableValidationRejectsWritableOrSymlinkedPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(root, "data", "app")
+	executable := filepath.Join(app, "shadoc")
+	if err := os.MkdirAll(app, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOwnedExecutablePath(executable, os.Geteuid()); err != nil {
+		t.Fatalf("safe executable rejected: %v", err)
+	}
+	if err := os.Chmod(app, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOwnedExecutablePath(executable, os.Geteuid()); err == nil {
+		t.Fatal("world-writable executable parent accepted")
+	}
+	if err := os.Chmod(app, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked-app")
+	if err := os.Symlink(app, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOwnedExecutablePath(filepath.Join(link, "shadoc"), os.Geteuid()); err == nil {
+		t.Fatal("symlinked executable path accepted")
+	}
+}
+
+func TestSystemServiceArgumentsAreLimitedToFixedRootServeCommand(t *testing.T) {
+	valid := []string{"serve", "--service-scope", "system", "--listen", "127.0.0.1:8585", "--data-dir", "/var/lib/shadoc"}
+	if err := validateSystemServiceArguments(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		nil,
+		{"serve", "--listen", "127.0.0.1:8585", "--data-dir", "/tmp/shadoc"},
+		{"serve", "--service-scope", "system", "--listen", "bad", "--data-dir", "/var/lib/shadoc"},
+		{"managed-update", "--data-dir", "/var/lib/shadoc"},
+	} {
+		if err := validateSystemServiceArguments(arguments); err == nil {
+			t.Fatalf("unsafe system service arguments accepted: %v", arguments)
+		}
+	}
+}
+
 func TestRemovingServiceDefinitionPreservesApplicationData(t *testing.T) {
 	home := t.TempDir()
 	path := definitionPath("linux", home)

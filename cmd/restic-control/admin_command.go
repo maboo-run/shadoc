@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"golang.org/x/term"
@@ -31,8 +33,14 @@ func handleAdminCommand(ctx context.Context, args []string, reader passwordReade
 	if len(args) == 0 || args[0] != "reset-admin-password" {
 		return false, nil
 	}
-	if len(args) != 1 {
-		return true, errors.New("reset-admin-password does not accept arguments")
+	flags := flag.NewFlagSet("reset-admin-password", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	_ = flags.Bool("system", false, "use the Linux root system service data")
+	if err := flags.Parse(args[1:]); err != nil {
+		return true, err
+	}
+	if flags.NArg() != 0 {
+		return true, errors.New("reset-admin-password does not accept positional arguments")
 	}
 	first, err := reader.ReadPassword("New administrator password: ")
 	if err != nil {
@@ -51,4 +59,23 @@ func handleAdminCommand(ctx context.Context, args []string, reader passwordReade
 		return true, err
 	}
 	return true, nil
+}
+
+func adminCommandScope(args []string) (serviceScope, error) {
+	if len(args) == 0 || args[0] != "reset-admin-password" {
+		return "", errors.New("administrator command is required")
+	}
+	flags := flag.NewFlagSet("reset-admin-password", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	system := flags.Bool("system", false, "use the Linux root system service data")
+	if err := flags.Parse(args[1:]); err != nil {
+		return "", err
+	}
+	if flags.NArg() != 0 {
+		return "", errors.New("reset-admin-password does not accept positional arguments")
+	}
+	if *system {
+		return systemServiceScope, nil
+	}
+	return userServiceScope, nil
 }

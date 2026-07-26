@@ -26,6 +26,10 @@ type AgentStore interface {
 	SaveAgent(context.Context, store.AgentRecord) error
 }
 
+type FilesystemScopeSink interface {
+	AppendFilesystemScopeEntries(context.Context, string, agentprotocol.FilesystemScopeEntryChunk) error
+}
+
 type Service struct {
 	authority *Authority
 	now       func() time.Time
@@ -34,10 +38,18 @@ type Service struct {
 	agents    map[string]struct{}
 	storage   AgentStore
 	hydrate   func(context.Context, store.AgentLease) (json.RawMessage, error)
+	scopeMu   sync.RWMutex
+	scopeSink FilesystemScopeSink
 }
 
 func (s *Service) SetAssignmentHydrator(hydrate func(context.Context, store.AgentLease) (json.RawMessage, error)) {
 	s.hydrate = hydrate
+}
+
+func (s *Service) SetFilesystemScopeSink(sink FilesystemScopeSink) {
+	s.scopeMu.Lock()
+	s.scopeSink = sink
+	s.scopeMu.Unlock()
 }
 
 func NewWithStore(authority *Authority, storage AgentStore, now func() time.Time) *Service {
@@ -301,6 +313,22 @@ func (s *Service) CompleteFilesystem(ctx context.Context, result agentprotocol.R
 		return err
 	}
 	return storage.CompleteAgentFilesystemRequest(ctx, result.AssignmentID, result.AgentID, result.Status, encoded, s.now().UTC())
+}
+
+func (s *Service) AppendFilesystemScopeEntries(ctx context.Context, agentID string, chunk agentprotocol.FilesystemScopeEntryChunk) error {
+	if s == nil {
+		return errors.New("filesystem scope inventory sink is unavailable")
+	}
+	s.scopeMu.RLock()
+	sink := s.scopeSink
+	s.scopeMu.RUnlock()
+	if sink == nil {
+		return errors.New("filesystem scope inventory sink is unavailable")
+	}
+	if err := chunk.ValidateFor(agentID); err != nil {
+		return err
+	}
+	return sink.AppendFilesystemScopeEntries(ctx, agentID, chunk)
 }
 
 func (s *Service) ClaimRestore(ctx context.Context, agentID string) (agentprotocol.Assignment, error) {
