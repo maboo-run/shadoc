@@ -333,12 +333,21 @@ func validateSystemServiceArguments(arguments []string) error {
 }
 
 func validateOwnedExecutablePath(path string, expectedUID int) error {
+	return validateOwnedExecutablePathFrom(path, expectedUID, string(filepath.Separator))
+}
+
+func validateOwnedExecutablePathFrom(path string, expectedUID int, trustedRoot string) error {
 	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) || path == string(filepath.Separator) || expectedUID < 0 {
+	trustedRoot = filepath.Clean(trustedRoot)
+	if !filepath.IsAbs(path) || !filepath.IsAbs(trustedRoot) || path == trustedRoot || expectedUID < 0 {
 		return errors.New("owned executable path must be a safe absolute path")
 	}
-	current := string(filepath.Separator)
-	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+	relative, err := filepath.Rel(trustedRoot, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("owned executable path must stay within the trusted root")
+	}
+	current := trustedRoot
+	components := strings.Split(relative, string(filepath.Separator))
 	for index, component := range components {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)

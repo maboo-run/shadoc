@@ -170,13 +170,13 @@ func TestOwnedExecutableValidationRejectsWritableOrSymlinkedPaths(t *testing.T) 
 	if err := os.WriteFile(executable, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateOwnedExecutablePath(executable, os.Geteuid()); err != nil {
+	if err := validateOwnedExecutablePathFrom(executable, os.Geteuid(), root); err != nil {
 		t.Fatalf("safe executable rejected: %v", err)
 	}
 	if err := os.Chmod(app, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateOwnedExecutablePath(executable, os.Geteuid()); err == nil {
+	if err := validateOwnedExecutablePathFrom(executable, os.Geteuid(), root); err == nil {
 		t.Fatal("world-writable executable parent accepted")
 	}
 	if err := os.Chmod(app, 0o700); err != nil {
@@ -186,8 +186,11 @@ func TestOwnedExecutableValidationRejectsWritableOrSymlinkedPaths(t *testing.T) 
 	if err := os.Symlink(app, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateOwnedExecutablePath(filepath.Join(link, "shadoc"), os.Geteuid()); err == nil {
+	if err := validateOwnedExecutablePathFrom(filepath.Join(link, "shadoc"), os.Geteuid(), root); err == nil {
 		t.Fatal("symlinked executable path accepted")
+	}
+	if err := validateOwnedExecutablePathFrom(executable, os.Geteuid(), filepath.Join(root, "outside")); err == nil {
+		t.Fatal("executable outside trusted root accepted")
 	}
 }
 
