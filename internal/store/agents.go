@@ -221,6 +221,19 @@ func (s *Store) CompleteAgentFilesystemRequest(ctx context.Context, id, agentID,
 	return nil
 }
 
+func (s *Store) ExpireAgentFilesystemRequest(ctx context.Context, id, reason string, at time.Time) error {
+	result, _ := json.Marshal(map[string]any{"version": 1, "assignmentId": id, "status": "failed", "error": reason})
+	updated, err := s.db.ExecContext(ctx, `UPDATE agent_filesystem_requests SET status='failed',result_json=?,completed_at=? WHERE id=? AND completed_at IS NULL`, string(result), formatTime(at), id)
+	if err != nil {
+		return err
+	}
+	count, _ := updated.RowsAffected()
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) AgentFilesystemRequestStatus(ctx context.Context, id string) (AgentFilesystemRequest, error) {
 	var request AgentFilesystemRequest
 	var definition, result, expires, created string
@@ -676,8 +689,8 @@ func (s *Store) ClaimAgentLease(ctx context.Context, agentID string, at time.Tim
 }
 
 func (s *Store) CompleteAgentLease(ctx context.Context, leaseID, agentID, status string, resultJSON json.RawMessage, at time.Time) error {
-	if status != "succeeded" && status != "failed" {
-		return errors.New("agent lease completion status must be succeeded or failed")
+	if status != "succeeded" && status != "partial" && status != "failed" {
+		return errors.New("agent lease completion status must be succeeded, partial, or failed")
 	}
 	if !json.Valid(resultJSON) {
 		return errors.New("agent lease result must be valid JSON")

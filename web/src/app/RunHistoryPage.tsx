@@ -5,9 +5,16 @@ import { ModalPortal } from "./ModalPortal";
 import { Toast } from "./Toast";
 import { useModalFocus } from "./useModalFocus";
 import { StatusIndicator, statusLabel } from "./StatusIndicator";
+import {
+  formatDateTime as formatConfiguredDateTime,
+  instantToZonedDateTimeInput,
+  isRFC3339Timestamp,
+  zonedDateTimeInputToISOString,
+} from "./dateTime";
 
 type ActivityMetrics = {
   durationMilliseconds?: number;
+  filesExpected?: number;
   filesProcessed?: number;
   filesChanged?: number;
   bytesProcessed?: number;
@@ -68,7 +75,7 @@ const emptyFilters: ActivityFilters = {
 
 const statuses = ["queued", "running", "success", "partial", "failed", "cancelled", "cleanup_required", "skipped", "blocker", "interrupted"];
 
-export function RunHistoryPage({ api, locale }: { api: AppAPI; locale: Locale }) {
+export function RunHistoryPage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; timeZone: string }) {
   const t = (source: string) => translate(locale, source);
   const initial = useRef(filtersFromLocation());
   const [draft, setDraft] = useState<ActivityFilters>(initial.current);
@@ -232,8 +239,8 @@ export function RunHistoryPage({ api, locale }: { api: AppAPI; locale: Locale })
               <option value="schedule">{t("计划调度")}</option>
             </select>
           </label>
-          <label>{t("开始时间")}<input type="datetime-local" value={dateTimeInputValue(draft.from)} onChange={(event) => setDraft({ ...draft, from: dateTimeQueryValue(event.target.value) })} /></label>
-          <label>{t("结束时间")}<input type="datetime-local" value={dateTimeInputValue(draft.to)} onChange={(event) => setDraft({ ...draft, to: dateTimeQueryValue(event.target.value) })} /></label>
+          <label>{t("开始时间")}<input type="datetime-local" value={instantToZonedDateTimeInput(draft.from, timeZone)} onChange={(event) => setDraft({ ...draft, from: zonedDateTimeInputToISOString(event.target.value, timeZone) })} /></label>
+          <label>{t("结束时间")}<input type="datetime-local" value={instantToZonedDateTimeInput(draft.to, timeZone)} onChange={(event) => setDraft({ ...draft, to: zonedDateTimeInputToISOString(event.target.value, timeZone) })} /></label>
           <label>{t("每页数量")}
             <select value={draft.limit} onChange={(event) => setDraft({ ...draft, limit: event.target.value })}>
               {[25, 50, 100, 200].map((value) => <option key={value} value={value}>{value}</option>)}
@@ -248,7 +255,7 @@ export function RunHistoryPage({ api, locale }: { api: AppAPI; locale: Locale })
         <div className="run-history-page-state" role="status" aria-live="polite">
           {loading
             ? t("正在读取统一活动记录…")
-            : loadError || activityFreshness(page, locale)}
+            : loadError || activityFreshness(page, locale, timeZone)}
         </div>
         {loadError && <p className="error-message" role="alert">{loadError}</p>}
         <div className="table-frame"><table className="run-history-table">
@@ -262,8 +269,8 @@ export function RunHistoryPage({ api, locale }: { api: AppAPI; locale: Locale })
               <td><ActivityStatus value={item.status} locale={locale} /></td>
               <td>{triggerLabel(item.trigger, locale)}</td>
               <td><span className="run-history-object">{item.objectName || item.objectId || "—"}{item.objectId && item.objectName !== item.objectId ? <small>{item.objectId}</small> : null}</span></td>
-              <td>{formatDateTime(item.startedAt || item.occurredAt, locale)}</td>
-              <td>{formatDateTime(item.finishedAt, locale)}</td>
+              <td>{formatConfiguredDateTime(item.startedAt || item.occurredAt, locale, timeZone)}</td>
+              <td>{formatConfiguredDateTime(item.finishedAt, locale, timeZone)}</td>
               <td>{new Intl.NumberFormat(locale).format(item.attemptCount ?? 0)}</td>
               <td><ActivityEvidence item={item} locale={locale} /></td>
               <td><button className="text-button" type="button" disabled={openingID === item.id} onClick={() => void openDetail(item)}>{openingID === item.id ? t("正在读取…") : t("查看详情")}</button></td>
@@ -288,7 +295,7 @@ export function RunHistoryPage({ api, locale }: { api: AppAPI; locale: Locale })
         </nav>
       </section>
       <Toast message={message} locale={locale} onClose={() => setMessage("")} />
-      {detail && <RunDetailDialog recordType={detailRecordType} detail={detail} log={log} error={detailError} locale={locale} onClose={() => { setDetail(null); setLog(""); setDetailError(""); }} />}
+      {detail && <RunDetailDialog recordType={detailRecordType} detail={detail} log={log} error={detailError} locale={locale} timeZone={timeZone} onClose={() => { setDetail(null); setLog(""); setDetailError(""); }} />}
     </>
   );
 }
@@ -302,7 +309,8 @@ function ActivityEvidence({ item, locale }: { item: ActivityItem; locale: Locale
     {metrics?.bytesChanged != null && <small>{t("变化数据")} <strong>{formatBytes(metrics.bytesChanged)}</strong></small>}
     {metrics?.bytesProcessed != null && <small>{t("处理数据")} <strong>{formatBytes(metrics.bytesProcessed)}</strong></small>}
     {metrics?.filesChanged != null && <small>{t("变化文件")} {new Intl.NumberFormat(locale).format(metrics.filesChanged)}</small>}
-    {metrics?.filesProcessed != null && <small>{t("处理文件")} {new Intl.NumberFormat(locale).format(metrics.filesProcessed)}</small>}
+    {metrics?.filesExpected != null && <small>{t("范围内总文件")} {new Intl.NumberFormat(locale).format(metrics.filesExpected)}</small>}
+    {metrics?.filesProcessed != null && <small>{t("实际备份或同步文件")} {new Intl.NumberFormat(locale).format(metrics.filesProcessed)}</small>}
     {item.errorSummary && <span className="run-history-error">{item.errorSummary}</span>}
   </span>;
 }
@@ -311,7 +319,7 @@ function ActivityStatus({ value, locale }: { value: string; locale: Locale }) {
   return <StatusIndicator value={value} locale={locale} />;
 }
 
-export function RunDetailDialog({ recordType, detail, log, error, locale, onClose }: { recordType: "run" | "operation"; detail: Record<string, unknown>; log: string; error: string; locale: Locale; onClose(): void }) {
+export function RunDetailDialog({ recordType, detail, log, error, locale, timeZone, onClose }: { recordType: "run" | "operation"; detail: Record<string, unknown>; log: string; error: string; locale: Locale; timeZone: string; onClose(): void }) {
   const t = (source: string) => translate(locale, source);
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleID = useId();
@@ -324,11 +332,11 @@ export function RunDetailDialog({ recordType, detail, log, error, locale, onClos
           <div><dt>{t("记录 ID")}</dt><dd><span className="technical-identifier">{String(detail.id ?? "—")}</span></dd></div>
           <div><dt>{t("状态")}</dt><dd><StatusIndicator value={String(detail.status ?? "unknown")} locale={locale} /></dd></div>
           <div><dt>{t("阶段")}</dt><dd>{stageLabel(detail.stage, locale)}</dd></div>
-          <div><dt>{t("尝试次数")}</dt><dd>{detailValue(detail.attemptCount, locale)}</dd></div>
+          <div><dt>{t("尝试次数")}</dt><dd>{detailValue(detail.attemptCount, locale, timeZone)}</dd></div>
         </dl>
         <section className="run-detail-summary" aria-labelledby={`${titleID}-summary`}>
           <h3 id={`${titleID}-summary`}>{t("摘要")}</h3>
-          <StructuredDetail value={detail.summary ?? detail.detail ?? detail.errorSummary} locale={locale} />
+          <StructuredDetail value={detail.summary ?? detail.detail ?? detail.errorSummary} locale={locale} timeZone={timeZone} />
         </section>
         {recordType === "run" && detail.rawLogExpired
           ? <p className="warning-text">{t("原始日志已按生命周期策略过期。")}</p>
@@ -413,30 +421,11 @@ function validDateQuery(value: string | null): string {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
-function dateTimeInputValue(value: string): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
-function dateTimeQueryValue(value: string): string {
-  return value ? validDateQuery(new Date(value).toISOString()) : "";
-}
-
-function activityFreshness(page: ActivityPage | null, locale: Locale): string {
+function activityFreshness(page: ActivityPage | null, locale: Locale, timeZone: string): string {
   if (!page) return "";
-  const generated = formatDateTime(page.generatedAt, locale);
+  const generated = formatConfiguredDateTime(page.generatedAt, locale, timeZone);
   if (page.truncated) return locale === "en-US" ? `Generated ${generated}. More matching records are available.` : `数据生成于 ${generated}；仍有更早的匹配记录。`;
   return locale === "en-US" ? `Generated ${generated}. This is the end of the matching history.` : `数据生成于 ${generated}；已到匹配历史末尾。`;
-}
-
-function formatDateTime(value: string | undefined, locale: Locale): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "medium" }).format(date);
 }
 
 function formatBytes(value: number): string {
@@ -494,25 +483,26 @@ function stageLabel(value: unknown, locale: Locale): string {
   return translate(locale, source);
 }
 
-function detailValue(value: unknown, locale: Locale): string {
+function detailValue(value: unknown, locale: Locale, timeZone: string): string {
   if (value == null || value === "") return "—";
-  if (Array.isArray(value)) return value.length ? value.map(String).join(locale === "en-US" ? ", " : "、") : "—";
+  if (Array.isArray(value)) return value.length ? value.map((item) => detailValue(item, locale, timeZone)).join(locale === "en-US" ? ", " : "、") : "—";
   if (typeof value === "object") return translate(locale, "结构化详情");
+  if (isRFC3339Timestamp(value)) return formatConfiguredDateTime(value, locale, timeZone);
   return String(value);
 }
 
-function StructuredDetail({ value, locale }: { value: unknown; locale: Locale }): ReactNode {
+function StructuredDetail({ value, locale, timeZone }: { value: unknown; locale: Locale; timeZone: string }): ReactNode {
   if (value == null || value === "") return <p>—</p>;
   if (Array.isArray(value)) {
     if (!value.length) return <p>—</p>;
-    return <ul className="structured-detail-list">{value.map((item, index) => <li key={index}>{detailValue(item, locale)}</li>)}</ul>;
+    return <ul className="structured-detail-list">{value.map((item, index) => <li key={index}>{detailValue(item, locale, timeZone)}</li>)}</ul>;
   }
   if (typeof value !== "object") return <p>{String(value)}</p>;
   const entries = Object.entries(value as Record<string, unknown>);
   if (!entries.length) return <p>—</p>;
   return <dl className="structured-detail-grid">{entries.map(([key, item]) => <div key={key}>
     <dt>{detailFieldLabel(key, locale)}</dt>
-    <dd>{detailValue(item, locale)}</dd>
+    <dd>{detailValue(item, locale, timeZone)}</dd>
   </div>)}</dl>;
 }
 
@@ -524,8 +514,12 @@ function detailFieldLabel(key: string, locale: Locale): string {
     snapshot_id: "快照 ID",
     filesChanged: "变化文件",
     files_changed: "变化文件",
-    filesProcessed: "处理文件",
-    files_processed: "处理文件",
+    filesProcessed: "实际备份或同步文件",
+    files_processed: "实际备份或同步文件",
+    filesExpected: "范围内总文件",
+    files_expected: "范围内总文件",
+    filesFailed: "未处理文件",
+    files_failed: "未处理文件",
     bytesChanged: "变化数据",
     bytes_changed: "变化数据",
     durationMilliseconds: "耗时",

@@ -10,6 +10,7 @@ import { HealthEvents, type AlertState } from "./HealthEvents";
 import { ControlPlaneRecovery } from "./ControlPlaneRecovery";
 import { SnapshotBrowser, SnapshotDiffPanel, type SnapshotContentsPage } from "./SnapshotBrowser";
 import { TaskHealthDetailPage } from "./TaskHealthDetailPage";
+import { TaskScopePage } from "./TaskScopePage";
 import { RunHistoryPage } from "./RunHistoryPage";
 import { AgentFleet } from "./AgentFleet";
 import { NotificationChannels } from "./NotificationChannels";
@@ -18,8 +19,14 @@ import { Sidebar, navigationGroups, navigation } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { CommandPalette } from "./CommandPalette";
 import { StatusIndicator, statusLabel } from "./StatusIndicator";
-import { isRFC3339Timestamp, timestampAtSecond } from "./dateTime";
+import {
+  formatDateTime,
+  isRFC3339Timestamp,
+  timestampAtSecond,
+  zonedDateTimeInputToISOString,
+} from "./dateTime";
 import { Dashboard } from "./Dashboard";
+import { LocalToolDetectionPanel } from "./LocalToolDetectionPanel";
 import type {
   ControlPlaneExportRequest,
   ControlPlaneImportPreview,
@@ -60,6 +67,25 @@ export type Dashboard = {
   runOverview?: { total: number; succeeded: number; failed: number; partial: number; successRate: number };
 };
 
+export type CompatibilityReport = {
+  blocked: boolean;
+  configuredPaths?: {
+    rsync?: string;
+    mysqlDump?: string;
+    mysqlRestore?: string;
+    postgresDump?: string;
+    postgresRestore?: string;
+  };
+  findings: Array<{
+    capability: string;
+    tool: string;
+    path?: string;
+    severity: string;
+    message: string;
+    version?: string;
+  }>;
+};
+
 export type AppAPI = {
   setupStatus(): Promise<{ initialized: boolean; tokenRequired?: boolean }>;
   setup(
@@ -90,17 +116,7 @@ export type AppAPI = {
   applicationReleases(): Promise<ApplicationReleaseState>;
   exportDiagnostics(): Promise<{ blob: Blob; filename: string }>;
   dashboard(): Promise<Dashboard>;
-  compatibility(): Promise<{
-    blocked: boolean;
-    findings: Array<{
-      capability: string;
-      tool: string;
-      path?: string;
-      severity: string;
-      message: string;
-      version?: string;
-    }>;
-  }>;
+  compatibility(): Promise<CompatibilityReport>;
   runTask(taskId: string): Promise<void>;
   listResource(resource: string): Promise<Array<Record<string, unknown>>>;
   createResource(
@@ -168,6 +184,12 @@ function taskEditorTargetFromLocation(page = pageFromLocation(), search = window
   return query.get("view") === "edit" ? query.get("task") ?? "" : "";
 }
 
+function taskScopeTargetFromLocation(page = pageFromLocation(), search = window.location.search) {
+  if (page !== "备份任务") return "";
+  const query = new URLSearchParams(search);
+  return query.get("view") === "scope" ? query.get("task") ?? "" : "";
+}
+
 export function App({ api }: AppProps) {
   const [locale, setLocale] = useState<Locale>(loadLocale);
   const [timeZone, setTimeZone] = useState(loadTimeZone);
@@ -185,6 +207,7 @@ export function App({ api }: AppProps) {
   const [activePage, setActivePage] = useState(pageFromLocation);
   const [taskHealthTarget, setTaskHealthTarget] = useState(taskHealthTargetFromLocation);
   const [taskEditorTarget, setTaskEditorTarget] = useState(taskEditorTargetFromLocation);
+  const [taskScopeTarget, setTaskScopeTarget] = useState(taskScopeTargetFromLocation);
   const [compatibility, setCompatibility] = useState<Awaited<
     ReturnType<AppAPI["compatibility"]>
   > | null>(null);
@@ -242,6 +265,7 @@ export function App({ api }: AppProps) {
     const normalizedSearch = search && !search.startsWith("?") ? `?${search}` : search;
     setTaskHealthTarget(taskHealthTargetFromLocation(item, normalizedSearch));
     setTaskEditorTarget(taskEditorTargetFromLocation(item, normalizedSearch));
+    setTaskScopeTarget(taskScopeTargetFromLocation(item, normalizedSearch));
     if (updateHistory) {
       const path = `/admin/${pagePaths[item] ?? pagePaths.仪表盘}${normalizedSearch}`;
       if (`${window.location.pathname}${window.location.search}` !== path) window.history.pushState({}, "", path);
@@ -509,6 +533,7 @@ export function App({ api }: AppProps) {
             onNavigate={(page, search) => openPage(page, true, search)}
             taskHealthTarget={taskHealthTarget}
             taskEditorTarget={taskEditorTarget}
+            taskScopeTarget={taskScopeTarget}
             locale={locale}
             timeZone={timeZone}
           />
@@ -586,11 +611,15 @@ function CompatibilityPage({
   locale: Locale;
 }) {
   const t = (source: string) => translate(locale, source);
+  const [currentReport, setCurrentReport] = useState(report);
   const [message, setMessage] = useState("");
   const [versions, setVersions] = useState<string[]>([]);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const installation = useOperation(api);
   const handledInstallation = useRef("");
+  useEffect(() => {
+    setCurrentReport(report);
+  }, [report]);
   useEffect(() => {
     let active = true;
     void api
@@ -651,6 +680,12 @@ function CompatibilityPage({
       <header className="system-page-intro">
         <p>{t("启动和任务运行所需的关键能力检测。")}</p>
       </header>
+      <LocalToolDetectionPanel
+        api={api}
+        locale={locale}
+        report={currentReport}
+        onReport={setCurrentReport}
+      />
       <section className="content-section">
         <div className="table-frame">
           <table>
@@ -665,7 +700,7 @@ function CompatibilityPage({
               </tr>
             </thead>
             <tbody>
-              {report?.findings.map((finding) => (
+              {currentReport?.findings.map((finding) => (
                 <tr key={finding.capability}>
                   <td className="strong-cell">{t(finding.capability)}</td>
                   <td>{finding.tool}</td>
@@ -680,7 +715,7 @@ function CompatibilityPage({
                   <td>{t(finding.message)}</td>
                 </tr>
               ))}
-              {!report && (
+              {!currentReport && (
                 <tr>
                   <td colSpan={6} className="empty-row">
                     {t("正在检测…")}
@@ -765,7 +800,9 @@ function AgentPage({
   const t = (source: string) => translate(locale, source);
   const [enrollment, setEnrollment] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState("");
-  const [actionTarget, setActionTarget] = useState<Record<string, unknown> | null>(null);
+  const [actionTarget, setActionTarget] = useState<{ agent: Record<string, unknown>; mode: "uninstall" | "revoke" } | null>(null);
+  const [agentDeletePreview, setAgentDeletePreview] = useState<Record<string, unknown> | null>(null);
+  const [deletingAgent, setDeletingAgent] = useState(false);
   const [upgradeTarget, setUpgradeTarget] = useState<Record<string, unknown> | null>(null);
   const [resticTarget, setResticTarget] = useState<Record<string, unknown> | null>(null);
   const [toolProbeTarget, setToolProbeTarget] = useState<Record<string, unknown> | null>(null);
@@ -778,6 +815,7 @@ function AgentPage({
   const [revoking, setRevoking] = useState(false);
   const [deployDialog, setDeployDialog] = useState(false);
   const [remoteHosts, setRemoteHosts] = useState<Array<Record<string, unknown>>>([]);
+  const [remoteHostsLoaded, setRemoteHostsLoaded] = useState(false);
   const [deploymentHost, setDeploymentHost] = useState("");
   const [deploymentAgentID, setDeploymentAgentID] = useState("");
   const [redeploying, setRedeploying] = useState(false);
@@ -802,9 +840,11 @@ function AgentPage({
   reloadRef.current = reload;
   useEffect(() => {
     let active = true;
+    setRemoteHostsLoaded(false);
     void api.listResource("remote-hosts").then((hosts) => {
       if (active) {
         setRemoteHosts(hosts);
+        setRemoteHostsLoaded(true);
         setDeploymentHost((current) => current || String(hosts[0]?.id ?? ""));
       }
     }).catch((cause) => {
@@ -944,17 +984,19 @@ function AgentPage({
   }, [heartbeatProbe.error]);
 
   function openDeployment(agent?: Record<string, unknown>) {
-    const isRedeploy = Boolean(agent?.uninstalledAt);
+    const isRedeploy = Boolean(agent && (agent.uninstalledAt || agent.revokedAt || agent.status === "revoked"));
+    const boundHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent?.remoteHostId ?? ""));
     setRedeploying(isRedeploy);
     setDeploymentAgentID(String(agent?.id ?? ""));
-    setDeploymentHost(String(agent?.remoteHostId ?? remoteHosts[0]?.id ?? ""));
+    setDeploymentHost(String(boundHost?.id ?? remoteHosts[0]?.id ?? ""));
     setDeployDialog(true);
   }
 
-  async function confirmAgentAction(agent: Record<string, unknown>) {
+  async function confirmAgentAction(target: { agent: Record<string, unknown>; mode: "uninstall" | "revoke" }) {
     setActionTarget(null);
+    const { agent, mode } = target;
     const id = encodeURIComponent(String(agent.id));
-    if (agent.remoteHostId) {
+    if (mode === "uninstall") {
       setMessage(t("正在停止并卸载 Agent…"));
       await uninstall.start(`/api/agents/${id}/uninstall`, {});
       return;
@@ -968,6 +1010,33 @@ function AgentPage({
       setMessage(cause instanceof Error ? cause.message : t("无法撤销 Agent"));
     } finally {
       setRevoking(false);
+    }
+  }
+  async function beginAgentDelete(agent: Record<string, unknown>) {
+    setMessage("");
+    const id = encodeURIComponent(String(agent.id));
+    try {
+      const preview = await api.action(`/api/delete-previews/agents/${id}`) as Record<string, unknown>;
+      setAgentDeletePreview(preview);
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : t("无法读取 Agent 删除影响"));
+    }
+  }
+  async function confirmAgentDelete() {
+    if (!agentDeletePreview) return;
+    const id = encodeURIComponent(String(agentDeletePreview.id));
+    setDeletingAgent(true);
+    try {
+      await api.action(`/api/delete-previews/agents/${id}/confirm`, {
+        expectedUpdatedAt: String(agentDeletePreview.updatedAt ?? ""),
+      });
+      setAgentDeletePreview(null);
+      setMessage(t("Agent 记录已删除"));
+      await reload();
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : t("无法删除 Agent 记录"));
+    } finally {
+      setDeletingAgent(false);
     }
   }
   async function confirmAgentUpgrade(agent: Record<string, unknown>) {
@@ -1059,11 +1128,12 @@ function AgentPage({
     <AgentFleet
       agents={data}
       remoteHosts={remoteHosts}
+      remoteHostsLoaded={remoteHostsLoaded}
       locale={locale}
       timeZone={timeZone}
       currentServiceURL={String(agentService?.serviceUrl ?? "")}
       latestResticVersion={latestResticVersion}
-      busy={revoking || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active || heartbeatProbeStarting || heartbeatProbe.active}
+      busy={revoking || deletingAgent || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active || heartbeatProbeStarting || heartbeatProbe.active}
       upgradeOperation={upgradeOperationAgentID ? { agentId: upgradeOperationAgentID, operation: upgrade } : undefined}
       toolProbeOperation={toolProbeOperationAgentID ? { agentId: toolProbeOperationAgentID, operation: toolProbe } : undefined}
       heartbeatOperation={heartbeatOperationAgentID ? { agentId: heartbeatOperationAgentID, operation: heartbeatProbe, starting: heartbeatProbeStarting } : undefined}
@@ -1081,9 +1151,11 @@ function AgentPage({
       onReprobeTools={setToolProbeTarget}
       onProbeHeartbeat={(agent) => void probeAgentHeartbeat(agent)}
       onRedeploy={openDeployment}
-      onRemove={setActionTarget}
+      onRemove={(agent, mode) => setActionTarget({ agent, mode })}
+      onDelete={(agent) => void beginAgentDelete(agent)}
     />
-    {actionTarget && <AgentActionDialog agent={actionTarget} active={revoking || uninstall.active} locale={locale} onClose={() => setActionTarget(null)} onConfirm={() => void confirmAgentAction(actionTarget)} />}
+    {actionTarget && <AgentActionDialog agent={actionTarget.agent} managed={actionTarget.mode === "uninstall"} active={revoking || uninstall.active} locale={locale} onClose={() => setActionTarget(null)} onConfirm={() => void confirmAgentAction(actionTarget)} />}
+    {agentDeletePreview && <AgentDeleteDialog preview={agentDeletePreview} deleting={deletingAgent} locale={locale} onClose={() => setAgentDeletePreview(null)} onConfirm={() => void confirmAgentDelete()} />}
     {upgradeTarget && <AgentUpgradeDialog agent={upgradeTarget} active={upgrade.active} locale={locale} onClose={() => setUpgradeTarget(null)} onConfirm={() => void confirmAgentUpgrade(upgradeTarget)} />}
     {resticTarget && <AgentResticInstallDialog agent={resticTarget} targetVersion={latestResticVersion ?? ""} active={resticInstall.active} locale={locale} onClose={() => setResticTarget(null)} onConfirm={() => void confirmAgentResticInstall(resticTarget)} />}
     {toolProbeTarget && <AgentToolProbeDialog agent={toolProbeTarget} active={toolProbe.active} locale={locale} onClose={() => setToolProbeTarget(null)} onConfirm={() => void confirmAgentToolProbe(toolProbeTarget)} />}
@@ -1155,19 +1227,20 @@ function AgentUpgradeDialog({ agent, active, locale, onClose, onConfirm }: { age
 
 function AgentActionDialog({
   agent,
+  managed,
   active,
   locale,
   onClose,
   onConfirm,
 }: {
   agent: Record<string, unknown>;
+  managed: boolean;
   active: boolean;
   locale: Locale;
   onClose(): void;
   onConfirm(): void;
 }) {
   const t = (source: string) => translate(locale, source);
-  const managed = Boolean(agent.remoteHostId);
   const dialogRef = useRef<HTMLFormElement>(null);
   useModalFocus(dialogRef, () => { if (!active) onClose(); });
   const title = managed ? "确认停止并卸载 Agent" : "确认撤销 Agent 凭据";
@@ -1183,6 +1256,53 @@ function AgentActionDialog({
   </ModalPortal>;
 }
 
+function AgentDeleteDialog({
+  preview,
+  deleting,
+  locale,
+  onClose,
+  onConfirm,
+}: {
+  preview: Record<string, unknown>;
+  deleting: boolean;
+  locale: Locale;
+  onClose(): void;
+  onConfirm(): void;
+}) {
+  const t = (source: string) => translate(locale, source);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useModalFocus(dialogRef, () => { if (!deleting) onClose(); });
+  const dependencies = Array.isArray(preview.dependencies) ? preview.dependencies as Array<Record<string, unknown>> : [];
+  const deletable = preview.deletable === true;
+  return <ModalPortal>
+    <form ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="agent-delete-title" onSubmit={(event) => { event.preventDefault(); if (deletable) onConfirm(); }}>
+      <header><div><h2 id="agent-delete-title">{t("确认删除 Agent 记录")}</h2><p>{t("只删除控制服务中的 Agent 记录和证书历史，不会停止远程进程或删除远端文件。")}</p></div></header>
+      <div className="dialog-body">
+        <dl className="agent-upgrade-summary"><div><dt>Agent ID</dt><dd><code>{String(preview.id)}</code></dd></div></dl>
+        {dependencies.length > 0 && <div className="dependency-preview">
+          <strong>{t("当前依赖")}</strong>
+          <ul>{dependencies.map((dependency) => <li key={String(dependency.type)}>{agentDependencyLabel(String(dependency.type), locale)}：{String(dependency.count)}（{Array.isArray(dependency.names) ? dependency.names.join(locale === "en-US" ? ", " : "、") : ""}）</li>)}</ul>
+        </div>}
+        {!deletable && <p className="warning-text">{t(String(preview.blockedReason || "Agent 当前不能删除"))}</p>}
+        <p className="warning-text">{t("删除后页面不再保留该 Agent 的证书生命周期记录；已有审计和操作记录仍会保留。")}</p>
+      </div>
+      <footer>
+        <button className="secondary-button" type="button" disabled={deleting} onClick={onClose}>{t("取消删除")}</button>
+        <button className="danger-button" type="submit" disabled={deleting || !deletable}>{t(deleting ? "正在删除…" : "确认删除记录")}</button>
+      </footer>
+    </form>
+  </ModalPortal>;
+}
+
+function agentDependencyLabel(type: string, locale: Locale) {
+  const source = ({
+    tasks: "备份任务",
+    "active-agent-operations": "进行中的 Agent 管理操作",
+    "active-agent-work": "进行中的 Agent 工作",
+  } as Record<string, string>)[type] ?? type;
+  return translate(locale, source);
+}
+
 function ManagementPage({
   name,
   data,
@@ -1191,6 +1311,7 @@ function ManagementPage({
   onNavigate,
   taskHealthTarget,
   taskEditorTarget,
+  taskScopeTarget,
   locale,
   timeZone,
 }: {
@@ -1201,6 +1322,7 @@ function ManagementPage({
   onNavigate(page: string, search?: string): Promise<void>;
   taskHealthTarget?: string;
   taskEditorTarget?: string;
+  taskScopeTarget?: string;
   locale: Locale;
   timeZone: string;
 }) {
@@ -1296,29 +1418,47 @@ function ManagementPage({
     setRunningTaskId("");
     runningTaskGuard.current = "";
   }, [runningTaskId, taskRun.error]);
-  if (name === "快照与恢复") return <RestorePage api={api} locale={locale} />;
+  if (name === "快照与恢复") return <RestorePage api={api} locale={locale} timeZone={timeZone} />;
   if (name === "Agent 节点") return <AgentPage data={data} api={api} reload={reload} onNavigate={onNavigate} locale={locale} timeZone={timeZone} />;
-  if (name === "运行记录") return <RunHistoryPage api={api} locale={locale} />;
-  if (name === "备份任务" && taskHealthTarget) return <TaskHealthDetailPage taskId={taskHealthTarget} api={api} locale={locale} onBack={() => void onNavigate("备份任务")} />;
+  if (name === "运行记录") return <RunHistoryPage api={api} locale={locale} timeZone={timeZone} />;
+  if (name === "备份任务" && taskHealthTarget) return <TaskHealthDetailPage taskId={taskHealthTarget} api={api} locale={locale} timeZone={timeZone} onBack={() => void onNavigate("备份任务")} />;
+  if (name === "备份任务" && taskScopeTarget) {
+    const task = data.find((item) => String(item.id ?? "") === taskScopeTarget);
+    if (!task) return <p className="field-hint" role="status">{t("正在读取…")}</p>;
+    return <TaskScopePage
+      key={taskScopeTarget}
+      taskId={taskScopeTarget}
+      taskName={String(task.name ?? taskScopeTarget)}
+      task={task}
+      api={api}
+      locale={locale}
+      onBack={() => void onNavigate("备份任务", `?view=edit&task=${encodeURIComponent(taskScopeTarget)}`)}
+      onSaved={() => reload()}
+    />;
+  }
   if (name === "备份任务" && taskEditorTarget) {
     const task = taskEditorTarget === "create" ? null : data.find((item) => String(item.id ?? "") === taskEditorTarget) ?? null;
     if (taskEditorTarget !== "create" && !task) return <p className="field-hint" role="status">{t("正在读取…")}</p>;
     return <TaskEditor
       api={api}
       initial={task}
-      onClose={() => { void onNavigate("备份任务"); }}
+      onClose={() => {
+        void onNavigate("备份任务");
+      }}
       onDraftSaved={reload}
       onSaved={async () => {
         await reload();
         await onNavigate("备份任务");
       }}
+      onOpenScope={(taskId) => { void onNavigate("备份任务", `?view=scope&task=${encodeURIComponent(taskId)}`); }}
       locale={locale}
+      timeZone={timeZone}
     />;
   }
   if (name === "通知配置") return <NotificationChannels api={api} locale={locale} />;
   if (name === "告警历史") return <HealthEvents api={api} locale={locale} timeZone={timeZone} view="alerts" onNavigate={(page) => onNavigate(page, "")} />;
   if (name === "投递记录") return <HealthEvents api={api} locale={locale} timeZone={timeZone} view="deliveries" />;
-  if (name === "审计日志") return <AuditTable api={api} locale={locale} />;
+  if (name === "审计日志") return <AuditTable api={api} locale={locale} timeZone={timeZone} />;
   const creatable = [
     "远程主机",
     "备份仓库",
@@ -1416,7 +1556,7 @@ function ManagementPage({
     }
   }
   if (dialog && name === "备份仓库") {
-    return <RepositoryEditor api={api} initial={editing} locale={locale} onClose={() => { setDialog(false); setEditing(null); }} onSubmit={submit} />;
+    return <RepositoryEditor api={api} initial={editing} locale={locale} timeZone={timeZone} onClose={() => { setDialog(false); setEditing(null); }} onSubmit={submit} />;
   }
   return (
     <>
@@ -1473,7 +1613,7 @@ function ManagementPage({
                           </button>
                         </span>
                       ) : column.key === "preflight" ? (
-                        databasePreflightDisplay(item.preflight, locale)
+                        databasePreflightDisplay(item.preflight, locale, timeZone)
                       ) : column.key === "capacity" ? (
                         <RepositoryCapacityCell
                           value={item.capacity}
@@ -1487,9 +1627,9 @@ function ManagementPage({
                       ) : column.key === "lastRun" ? (
                         name === "备份仓库" && String(item.id ?? "") === initializingRepositoryId && initializationPhase !== "idle"
                           ? <RepositoryOperationState phase={initializationPhase} locale={locale} />
-                          : repositoryRunDisplay(item.lastRun, locale)
+                          : repositoryRunDisplay(item.lastRun, locale, timeZone)
                       ) : (
-                        resourceValue(name, column.key, item, locale)
+                        resourceValue(name, column.key, item, locale, timeZone)
                       )}
                     </td>
                   ))}
@@ -1518,6 +1658,7 @@ function ManagementPage({
                       taskRunActive={String(item.id ?? "") === runningTaskId}
                       onRun={() => runTask(String(item.id ?? ""))}
                       onOpenTaskHealth={() => void onNavigate("备份任务", `?task=${encodeURIComponent(String(item.id ?? ""))}&view=health`)}
+                      onOpenTaskScope={() => void onNavigate("备份任务", `?task=${encodeURIComponent(String(item.id ?? ""))}&view=scope`)}
                       locale={locale}
                     />
                   </td>
@@ -1769,7 +1910,7 @@ function MaintenancePage({ api, onNavigate }: { api: AppAPI; onNavigate(page: st
     </>
   );
 }
-function AuditTable({ api, locale }: { api: AppAPI; locale: Locale }) {
+function AuditTable({ api, locale, timeZone }: { api: AppAPI; locale: Locale; timeZone: string }) {
   const t = (source: string) => translate(locale, source);
   const [action, setAction] = useState("");
   const [from, setFrom] = useState("");
@@ -1783,8 +1924,8 @@ function AuditTable({ api, locale }: { api: AppAPI; locale: Locale }) {
   const [loadError, setLoadError] = useState("");
   const query = new URLSearchParams();
   if (action) query.set("action", action);
-  if (from) query.set("from", new Date(from).toISOString());
-  if (to) query.set("to", new Date(to).toISOString());
+  if (from) query.set("from", zonedDateTimeInputToISOString(from, timeZone));
+  if (to) query.set("to", zonedDateTimeInputToISOString(to, timeZone));
   const filterQuery = query.toString();
   useEffect(() => {
     let active = true;
@@ -1828,7 +1969,7 @@ function AuditTable({ api, locale }: { api: AppAPI; locale: Locale }) {
           <tbody>
             {items.map((item, index) => (
               <tr key={String(item.id ?? index)}>
-                <td>{adminTime(item.occurredAt, locale)}</td>
+                <td>{adminTime(item.occurredAt, locale, timeZone)}</td>
                 <td>{display(item.actor)}</td>
                 <td>{display(item.action)}</td>
                 <td>{display(item.targetType)}</td>
@@ -1860,7 +2001,7 @@ export function adminTime(value: unknown, locale: Locale = "zh-CN", timeZone?: s
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) return display(value, locale);
   const exactTime = timestampAtSecond(date);
-  return <time dateTime={exactTime} title={exactTime}>{new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "medium", timeZone }).format(date)}</time>;
+  return <time dateTime={exactTime} title={exactTime}>{formatDateTime(date, locale, timeZone ?? "UTC")}</time>;
 }
 
 function restoreAgentCandidates(items: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -1874,7 +2015,7 @@ function cacheSnapshotContentsPage(current: Record<string, SnapshotContentsPage>
   return Object.fromEntries([...retained, [key, page]]);
 }
 
-function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
+function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; timeZone: string }) {
   const t = (source: string) => translate(locale, source);
   const [repositories, setRepositories] = useState<Array<Record<string, unknown>>>([]);
   const [connections, setConnections] = useState<Array<Record<string, unknown>>>([]);
@@ -2013,11 +2154,11 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
   const dumpFilePayload = { snapshotId: dbSnapshot, target: dumpFileDirectory };
   if (view === "browse" && dirSnapshot) return <>
     <header className="page-header"><div><button className="text-button restore-back" type="button" onClick={() => setView("restore")}>← {t("返回恢复设置")}</button><h1>{t("浏览快照内容")}</h1><p>{t("进入文件夹并选择要恢复的目录或文件。")}</p></div></header>
-    <section className="content-section snapshot-secondary-page"><SnapshotBrowser api={api} repositoryID={repo} snapshotID={dirSnapshot} sourcePath={directorySourcePath} snapshots={directorySnapshots.map((item) => ({ id: String(item.id), time: String(item.time ?? ""), paths: (item.paths as string[] | undefined) ?? [] }))} cachedPage={snapshotContentsCache[snapshotContentsCacheKey]} onPageChange={(page) => setSnapshotContentsCache((current) => cacheSnapshotContentsPage(current, snapshotContentsCacheKey, page))} selectedIncludes={selectedIncludes} onSelectedIncludesChange={(value) => { setSelectedIncludes(value); invalidate(); }} locale={locale} /></section>
+    <section className="content-section snapshot-secondary-page"><SnapshotBrowser api={api} repositoryID={repo} snapshotID={dirSnapshot} sourcePath={directorySourcePath} snapshots={directorySnapshots.map((item) => ({ id: String(item.id), time: String(item.time ?? ""), paths: (item.paths as string[] | undefined) ?? [] }))} cachedPage={snapshotContentsCache[snapshotContentsCacheKey]} onPageChange={(page) => setSnapshotContentsCache((current) => cacheSnapshotContentsPage(current, snapshotContentsCacheKey, page))} selectedIncludes={selectedIncludes} onSelectedIncludesChange={(value) => { setSelectedIncludes(value); invalidate(); }} locale={locale} timeZone={timeZone} /></section>
   </>;
   if (view === "diff" && dirSnapshot) return <>
     <header className="page-header"><div><button className="text-button restore-back" type="button" onClick={() => setView("restore")}>← {t("返回恢复设置")}</button><h1>{t("快照差异")}</h1><p>{t("将当前快照与较早快照比较；结果只用于核对，不会改变恢复选择。")}</p></div></header>
-    <section className="content-section snapshot-secondary-page"><SnapshotDiffPanel api={api} repositoryID={repo} snapshotID={dirSnapshot} sourcePath={directorySourcePath} snapshots={directorySnapshots.map((item) => ({ id: String(item.id), time: String(item.time ?? ""), paths: (item.paths as string[] | undefined) ?? [] }))} locale={locale} /></section>
+    <section className="content-section snapshot-secondary-page"><SnapshotDiffPanel api={api} repositoryID={repo} snapshotID={dirSnapshot} sourcePath={directorySourcePath} snapshots={directorySnapshots.map((item) => ({ id: String(item.id), time: String(item.time ?? ""), paths: (item.paths as string[] | undefined) ?? [] }))} locale={locale} timeZone={timeZone} /></section>
   </>;
   return (
     <>
@@ -2042,14 +2183,14 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
             {t("目录快照")}
             <select value={dirSnapshot} onChange={(event) => { setDirSnapshot(event.target.value); setSelectedIncludes([]); invalidate(); }} required>
               <option value="">{t("请选择目录快照")}</option>
-              {directorySnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time)}</option>)}
+              {directorySnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time, locale, timeZone)}</option>)}
             </select>
           </label>}
           {!loading && restoreKind === "database" && <label className="full-field">
             {t("数据库快照")}
             <select value={dbSnapshot} onChange={(event) => { setDbSnapshot(event.target.value); invalidate(); }} required>
               <option value="">{t("请选择数据库快照")}</option>
-              {databaseSnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time)}</option>)}
+              {databaseSnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time, locale, timeZone)}</option>)}
             </select>
           </label>}
           {!loading && restoreKind === "directory" && dirSnapshot && <div className="full-field snapshot-tools">
@@ -2087,7 +2228,7 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
             <AgentRestoreTargetPicker api={api} agent={agents.find((item) => String(item.id) === agentID)} onChange={(value) => { setDirTarget(value); invalidate(); }} locale={locale} />
           </>}
           <div className="full-field restore-preflight-bar"><span className="restore-step-number" aria-hidden="true">3</span><div><strong>{t("只读预检")}</strong><small>{t("预检不会写入恢复目标。")}</small></div><button className="primary-button" type="submit" disabled={!repo || !dirSnapshot || !dirTarget || operation.active}>{t("执行只读预检")}</button></div>
-          {confirmationKind === "directory" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始目录恢复")} locale={locale} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("directory", directoryPayload)} />}
+          {confirmationKind === "directory" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始目录恢复")} locale={locale} timeZone={timeZone} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("directory", directoryPayload)} />}
         </form>
       </section>}
       {!loading && restoreKind === "database" && <section className="restore-step-card restore-target-step">
@@ -2170,12 +2311,12 @@ function RestorePage({ api, locale }: { api: AppAPI; locale: Locale }) {
             <input value={database} onChange={(event) => { setDatabase(event.target.value); invalidate(); }} required />
           </label>
           <div className="full-field restore-preflight-bar"><span className="restore-step-number" aria-hidden="true">3</span><div><strong>{t("只读预检")}</strong><small>{t("预检不会写入恢复目标。")}</small></div><button className="primary-button" type="submit" disabled={!repo || !dbSnapshot || !database || operation.active || (connectionMode === "saved" ? !connection : !temporaryName || !temporaryHost || !temporaryUsername || !temporaryPassword)}>{t("执行数据库只读预检")}</button></div>
-          {confirmationKind === "database" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始数据库恢复")} locale={locale} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("database", { snapshotId: dbSnapshot, connectionId: preparedDatabaseConnection || connection, database })} />}
+          {confirmationKind === "database" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始数据库恢复")} locale={locale} timeZone={timeZone} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("database", { snapshotId: dbSnapshot, connectionId: preparedDatabaseConnection || connection, database })} />}
           </> : <>
             <label className="full-field">{t("dump 文件输出目录")}<input value={dumpFileDirectory} onChange={(event) => { setDumpFileDirectory(event.target.value); invalidate(); }} required /></label>
             <p className="field-hint full-field">{t("输出目录必须已存在；不能覆盖其中同名文件；恢复完成后自动生成完整的 .sql 或 .dump 文件。")}</p>
             <div className="full-field restore-preflight-bar"><span className="restore-step-number" aria-hidden="true">3</span><div><strong>{t("只读预检")}</strong><small>{t("预检不会写入恢复目标。")}</small></div><button className="primary-button" type="submit" disabled={!repo || !dbSnapshot || !dumpFileDirectory || operation.active}>{t("执行 dump 文件只读预检")}</button></div>
-            {confirmationKind === "dump-file" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始 dump 文件恢复")} locale={locale} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("dump-file", dumpFilePayload)} />}
+            {confirmationKind === "dump-file" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始 dump 文件恢复")} locale={locale} timeZone={timeZone} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("dump-file", dumpFilePayload)} />}
           </>}
         </form>
       </section>}
@@ -2243,14 +2384,13 @@ function joinAgentPath(parent: string, name: string, windows: boolean): string {
   return `${parent.replace(/[\\/]+$/, "")}${separator}${name.replace(/^[\\/]+/, "")}`;
 }
 
-function snapshotOptionLabel(id: unknown, time: unknown): string {
+function snapshotOptionLabel(id: unknown, time: unknown, locale: Locale, timeZone: string): string {
   const identifier = String(id);
   const shortID = identifier.length > 12 ? `${identifier.slice(0, 12)}…` : identifier;
-  const match = String(time).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
-  return `${shortID} · ${match ? `${match[1]} ${match[2]}` : display(time)}`;
+  return `${shortID} · ${formatDateTime(time, locale, timeZone, { dateStyle: "medium", timeStyle: "short" })}`;
 }
 
-function RestoreConfirmation({ confirmation, password, setPassword, label, locale, onClose, onConfirm }: { confirmation: Record<string, any> | null; password: string; setPassword(value: string): void; label: string; locale: Locale; onClose(): void; onConfirm(): void }) {
+function RestoreConfirmation({ confirmation, password, setPassword, label, locale, timeZone, onClose, onConfirm }: { confirmation: Record<string, any> | null; password: string; setPassword(value: string): void; label: string; locale: Locale; timeZone: string; onClose(): void; onConfirm(): void }) {
   const t = (source: string) => translate(locale, source);
   const dialogRef = useRef<HTMLDivElement>(null);
   const downloadLimit = Number(confirmation?.summary?.downloadKiBPerSecond ?? 0);
@@ -2262,7 +2402,7 @@ function RestoreConfirmation({ confirmation, password, setPassword, label, local
       <header><div><h2 id="restore-confirmation-title">{label}</h2><p>{t("恢复前请核对预检结果并重新验证管理员身份。")}</p></div></header>
       <div className="dialog-body">
         <strong>{t("预检通过")}</strong>
-        <p>{t("该确认只对当前仓库、快照和目标有效，并将在")} {display(confirmation?.expiresAt)} {t("失效。")}</p>
+        <p>{t("该确认只对当前仓库、快照和目标有效，并将在")} {display(confirmation?.expiresAt, locale, timeZone)} {t("失效。")}</p>
         <p>{downloadLimit > 0
           ? locale === "en-US"
             ? `Effective download limit: ${new Intl.NumberFormat(locale).format(downloadLimit)} KiB/s${policySource === "task" ? " (from the bound task)" : ""}`
@@ -2360,7 +2500,7 @@ function columns(name: string) {
   };
   return map[name] ?? [];
 }
-function display(value: unknown, locale: Locale = "zh-CN") {
+function display(value: unknown, locale: Locale = "zh-CN", timeZone?: string) {
   const t = (source: string) => translate(locale, source);
   if (value === true) return t("是");
   if (value === false) return t("否");
@@ -2375,7 +2515,7 @@ function display(value: unknown, locale: Locale = "zh-CN") {
   if (value === "manual") return t("手动运行");
   if (value === "tcp") return t("TCP 网络");
   if (value === "unix") return "Unix Socket";
-  if (isRFC3339Timestamp(value)) return timestampAtSecond(value);
+  if (isRFC3339Timestamp(value)) return timeZone ? formatDateTime(value, locale, timeZone) : timestampAtSecond(value);
   if (typeof value === "object") {
     const item = value as Record<string, unknown>;
     if (item.kind === "daily") return locale === "en-US" ? `Daily at ${String(item.timeOfDay)}` : `每日 ${String(item.timeOfDay)}`;
@@ -2388,7 +2528,7 @@ function display(value: unknown, locale: Locale = "zh-CN") {
   return String(value);
 }
 
-function resourceValue(name: string, key: string, item: Record<string, unknown>, locale: Locale): ReactNode {
+function resourceValue(name: string, key: string, item: Record<string, unknown>, locale: Locale, timeZone: string): ReactNode {
   const t = (source: string) => translate(locale, source);
   const value = item[key];
   if (key === "engine") {
@@ -2420,14 +2560,14 @@ function resourceValue(name: string, key: string, item: Record<string, unknown>,
     return <StatusIndicator value={String(value || "unknown")} locale={locale} variant="pill" />;
   }
   if (value && typeof value === "object") return t("未知配置");
-  return display(value, locale);
+  return display(value, locale, timeZone);
 }
 
-function databasePreflightDisplay(value: unknown, locale: Locale = "zh-CN") {
+function databasePreflightDisplay(value: unknown, locale: Locale, timeZone: string) {
 		if (!value || typeof value !== "object") return translate(locale, "尚未预检");
 		const result = value as Record<string, unknown>;
 		const versions = [result.clientVersion ? `${locale === "en-US" ? "Client" : "客户端"} ${result.clientVersion}` : "", result.serverVersion ? `${locale === "en-US" ? "Server" : "服务端"} ${result.serverVersion}` : ""].filter(Boolean).join(locale === "en-US" ? ", " : "，");
-		return [versions, result.error ? `${locale === "en-US" ? "Failed" : "失败"}：${result.error}` : translate(locale, "验证成功"), result.checkedAt ? `${locale === "en-US" ? "Checked at" : "检查于"} ${display(result.checkedAt, locale)}` : ""].filter(Boolean).join(locale === "en-US" ? "; " : "；");
+		return [versions, result.error ? `${locale === "en-US" ? "Failed" : "失败"}：${result.error}` : translate(locale, "验证成功"), result.checkedAt ? `${locale === "en-US" ? "Checked at" : "检查于"} ${display(result.checkedAt, locale, timeZone)}` : ""].filter(Boolean).join(locale === "en-US" ? "; " : "；");
 }
 
 function RepositoryCapacityCell({
@@ -2490,7 +2630,7 @@ function RepositoryCapacityCell({
   );
 }
 
-function repositoryRunDisplay(value: unknown, locale: Locale = "zh-CN") {
+function repositoryRunDisplay(value: unknown, locale: Locale, timeZone: string) {
   if (!value || typeof value !== "object") return translate(locale, "尚未运行");
   const run = value as Record<string, unknown>;
   const summary = (run.summary ?? {}) as Record<string, unknown>;
@@ -2498,7 +2638,7 @@ function repositoryRunDisplay(value: unknown, locale: Locale = "zh-CN") {
     summary.changedItems != null ? (locale === "en-US" ? `${String(summary.changedItems)} files changed` : `${String(summary.changedItems)} 个文件变更`) : "",
     summary.dataAdded != null ? formatBytes(Number(summary.dataAdded)) : "",
   ].filter(Boolean).join(" · ");
-  return <span className="capacity-cell"><strong>{statusLabel(String(run.status), locale)}</strong><small>{display(run.startedAt, locale)}{metrics ? ` · ${metrics}` : ""}</small></span>;
+  return <span className="capacity-cell"><strong>{statusLabel(String(run.status), locale)}</strong><small>{display(run.startedAt, locale, timeZone)}{metrics ? ` · ${metrics}` : ""}</small></span>;
 }
 
 function RepositoryOperationState({ phase, locale }: { phase: "running" | "success"; locale: Locale }) {
@@ -2571,6 +2711,7 @@ function RowActions({
   taskRunActive,
   onRun,
   onOpenTaskHealth,
+  onOpenTaskScope,
   locale,
 }: {
   name: string;
@@ -2589,6 +2730,7 @@ function RowActions({
   taskRunActive: boolean;
   onRun(): void;
   onOpenTaskHealth(): void;
+  onOpenTaskScope(): void;
   locale: Locale;
 }) {
   const t = (source: string) => translate(locale, source);
@@ -2629,6 +2771,7 @@ function RowActions({
       {name === "备份任务" && (
         <>
           <button className="text-button" type="button" onClick={onOpenTaskHealth}>{t("详情")}</button>
+          <button className="text-button" type="button" onClick={onOpenTaskScope}>{t("保护范围")}</button>
           <button className="text-button" type="button" disabled={taskRunBusy || item.enabled !== true} title={item.enabled === true ? undefined : t("任务未启用，不能立即运行")} onClick={onRun}>
             {t(taskRunActive ? "运行中…" : "立即运行")}
           </button>

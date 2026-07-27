@@ -118,7 +118,21 @@ func (b *Builder) Build(ctx context.Context, lease store.AgentLease) (json.RawMe
 		if aggregate.Task.Resources.ReadConcurrency > 0 {
 			arguments = append(arguments, "--read-concurrency", fmt.Sprint(aggregate.Task.Resources.ReadConcurrency))
 		}
-		return json.Marshal(resticagent.Definition{Repository: repository, Directory: restic.DirectoryBackup{Path: directory.Path, Exclusions: directory.Exclusions, SkipIfUnchanged: directory.SkipIfUnchanged, Compression: aggregate.Task.Resources.Compression}, Arguments: arguments})
+		pendingPartial := ""
+		if strings.HasPrefix(aggregate.Repository.Status, "unprotected-partial:") {
+			pendingPartial = strings.TrimPrefix(aggregate.Repository.Status, "unprotected-partial:")
+		}
+		if aggregate.Repository.Status != "" && aggregate.Repository.Status != "ready" && pendingPartial == "" {
+			return nil, fmt.Errorf("repository is not writable: %s", aggregate.Repository.Status)
+		}
+		return json.Marshal(resticagent.Definition{
+			Repository: repository,
+			Directory: restic.DirectoryBackup{
+				Path: directory.Path, Exclusions: directory.Exclusions,
+				SkipIfUnchanged: directory.SkipIfUnchanged, Compression: aggregate.Task.Resources.Compression,
+			},
+			Arguments: arguments, PendingPartialSnapshotID: pendingPartial,
+		})
 	default:
 		return nil, fmt.Errorf("unsupported agent engine %q", lease.Engine)
 	}

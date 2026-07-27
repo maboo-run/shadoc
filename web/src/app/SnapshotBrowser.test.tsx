@@ -21,6 +21,7 @@ function Harness({ action }: { action: (path: string) => Promise<unknown> }) {
       selectedIncludes={selected}
       onSelectedIncludesChange={setSelected}
       locale="zh-CN"
+      timeZone="Asia/Shanghai"
     />
     <output aria-label="已选路径">{selected.join(",")}</output>
   </>;
@@ -60,9 +61,10 @@ describe("SnapshotBrowser", () => {
       }
       return { items: [], path: "/srv/photos", recursive: false, truncated: false };
     });
-    render(<SnapshotDiffPanel api={{ action }} repositoryID="repo" snapshotID="current" sourcePath="/srv/photos" snapshots={snapshots} locale="zh-CN" />);
+    render(<SnapshotDiffPanel api={{ action }} repositoryID="repo" snapshotID="current" sourcePath="/srv/photos" snapshots={snapshots} locale="zh-CN" timeZone="Asia/Shanghai" />);
 
     const comparison = await screen.findByRole("region", { name: "快照差异" });
+    expect(within(comparison).getByRole("option", { name: /old.*2026.*7.*10.*09:00/ })).toBeVisible();
     await user.selectOptions(within(comparison).getByLabelText("对比基线快照"), "old");
     await user.click(within(comparison).getByRole("button", { name: "比较快照" }));
     expect(await within(comparison).findByText("新增 12 · 修改 3 · 删除 2")).toBeVisible();

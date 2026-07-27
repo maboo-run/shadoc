@@ -21,6 +21,7 @@ type Storage interface {
 	ExpireAgentLease(context.Context, string, string, time.Time) error
 	StartRun(context.Context, store.RunRecord) error
 	FinishRun(context.Context, string, string, time.Time, int, string, map[string]any, string) error
+	UpdateRepositoryStatus(context.Context, string, string) error
 }
 
 type Service struct {
@@ -71,7 +72,7 @@ func (s *Service) Run(ctx context.Context, taskID, planID, trigger string) (stor
 		select {
 		case <-ctx.Done():
 			_ = s.store.ExpireAgentLease(context.Background(), leaseID, ctx.Err().Error(), s.now().UTC())
-			return s.finish(record, agentprotocol.Result{Status: "failed", Error: ctx.Err().Error()}, ctx.Err(), task.ScopeConfirmation)
+			return s.finish(record, agentprotocol.Result{Status: "failed", Error: ctx.Err().Error()}, ctx.Err(), task)
 		case <-ticker.C:
 			current, err := s.store.AgentLeaseStatus(ctx, leaseID)
 			if err != nil {
@@ -80,25 +81,33 @@ func (s *Service) Run(ctx context.Context, taskID, planID, trigger string) (stor
 			if current.CompletedAt == nil {
 				if !current.ExpiresAt.After(s.now().UTC()) {
 					_ = s.store.ExpireAgentLease(context.Background(), leaseID, "agent assignment expired", s.now().UTC())
-					return s.finish(record, agentprotocol.Result{Status: "failed", Error: "agent assignment expired"}, errors.New("agent assignment expired"), task.ScopeConfirmation)
+					return s.finish(record, agentprotocol.Result{Status: "failed", Error: "agent assignment expired"}, errors.New("agent assignment expired"), task)
 				}
 				continue
 			}
 			var result agentprotocol.Result
 			if err := json.Unmarshal(current.Result, &result); err != nil {
-				return s.finish(record, agentprotocol.Result{Status: "failed", Error: "invalid agent result"}, err, task.ScopeConfirmation)
+				return s.finish(record, agentprotocol.Result{Status: "failed", Error: "invalid agent result"}, err, task)
 			}
 			var runErr error
 			if result.Status == "failed" {
-				runErr = errors.New(result.Error)
+				if result.Error == "" {
+					runErr = errors.New("Agent task failed")
+				} else {
+					runErr = errors.New(result.Error)
+				}
 			}
-			return s.finish(record, result, runErr, task.ScopeConfirmation)
+			return s.finish(record, result, runErr, task)
 		}
 	}
 }
 
-func (s *Service) finish(record store.RunRecord, result agentprotocol.Result, runErr error, confirmation domain.TaskScopeConfirmation) (store.RunRecord, error) {
+func (s *Service) finish(record store.RunRecord, result agentprotocol.Result, runErr error, task domain.Task) (store.RunRecord, error) {
 	finished := s.now().UTC()
+	if protectionErr := s.applyRepositoryProtectionState(task, result); protectionErr != nil {
+		result.Status = "failed"
+		runErr = errors.Join(runErr, protectionErr)
+	}
 	status, validStatus := runcontrol.NormalizeTerminalStatus(result.Status)
 	record.Status, record.SnapshotID, record.Summary, record.RawLog, record.AttemptCount, record.FinishedAt = string(status), result.SnapshotID, result.Summary, result.RawLog, 1, &finished
 	if !validStatus && runErr == nil {
@@ -110,9 +119,28 @@ func (s *Service) finish(record store.RunRecord, result agentprotocol.Result, ru
 	if result.Error != "" {
 		record.Summary["error"] = result.Error
 	}
-	if confirmation.Present() {
-		record.Summary["scopeConfirmation"] = confirmation
+	if task.ScopeConfirmation.Present() {
+		record.Summary["scopeConfirmation"] = task.ScopeConfirmation
 	}
 	finishErr := s.store.FinishRun(context.Background(), record.ID, record.Status, finished, 1, record.SnapshotID, record.Summary, record.RawLog)
 	return record, errors.Join(runErr, finishErr)
+}
+
+func (s *Service) applyRepositoryProtectionState(task domain.Task, result agentprotocol.Result) error {
+	if task.EffectiveEngine() != domain.ResticEngine || task.RepositoryID == "" || result.Summary == nil {
+		return nil
+	}
+	if snapshotID, ok := result.Summary["unprotectedPartialSnapshot"].(string); ok {
+		if snapshotID == "" || snapshotID != result.SnapshotID {
+			return errors.New("Agent returned invalid partial snapshot protection state")
+		}
+		return s.store.UpdateRepositoryStatus(context.Background(), task.RepositoryID, "unprotected-partial:"+snapshotID)
+	}
+	if snapshotID, ok := result.Summary["pendingPartialProtected"].(string); ok {
+		if snapshotID == "" {
+			return errors.New("Agent returned invalid pending partial snapshot protection state")
+		}
+		return s.store.UpdateRepositoryStatus(context.Background(), task.RepositoryID, "ready")
+	}
+	return nil
 }

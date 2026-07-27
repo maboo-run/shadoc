@@ -366,7 +366,7 @@ func (s *UpgradeService) findManagedAgent(ctx context.Context, agentID string) (
 			return agent, host, nil
 		}
 	}
-	return agent, domain.RemoteHost{}, sql.ErrNoRows
+	return agent, domain.RemoteHost{}, errManagedRemoteHostMissing
 }
 
 func (s *UpgradeService) waitForDrain(ctx context.Context, agentID string) error {

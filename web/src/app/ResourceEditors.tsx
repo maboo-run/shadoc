@@ -14,6 +14,7 @@ import {
   type RetentionPolicy,
 } from "./ProtectionPolicyEditor";
 import { translate, type Locale } from "../i18n";
+import { formatDateTime } from "./dateTime";
 
 type ResourceAPI = {
   listResource(resource: string): Promise<Array<Record<string, unknown>>>;
@@ -29,11 +30,13 @@ type EditorProps = {
   onClose(): void;
   onSubmit(payload: Record<string, unknown>): Promise<void>;
   locale?: Locale;
+  timeZone?: string;
 };
 
 type TaskEditorProps = Omit<EditorProps, "onSubmit"> & {
   onDraftSaved(): Promise<void>;
   onSaved(): Promise<void>;
+  onOpenScope?(taskId: string): void;
 };
 
 type TaskScopeImpact = {
@@ -289,7 +292,7 @@ function AgentDirectoryInput({ api, agentId, name, label, initialValue, placehol
   </div>;
 }
 
-export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh-CN" }: EditorProps) {
+export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh-CN", timeZone = "UTC" }: EditorProps) {
 	const t = (source: string) => translate(locale, source);
 	const [engine, setEngine] = useState<"restic" | "rsync">(initial?.engine === "rsync" ? "rsync" : "restic");
   const [connectionMode, setConnectionMode] = useState<"create" | "existing">("create");
@@ -653,7 +656,7 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
               locale={locale}
             />
             {policy.policyFingerprint && <p className="full-field field-hint">{t("当前策略版本：")}<code>{String(policy.policyFingerprint)}</code></p>}
-            {initial && <p className="full-field field-hint">{t("下次执行：")}{policy.enabled && policy.nextRun ? String(policy.nextRun) : t("维护计划已停用")}</p>}
+            {initial && <p className="full-field field-hint">{t("下次执行：")}{policy.enabled && policy.nextRun ? formatDateTime(policy.nextRun, locale, timeZone) : t("维护计划已停用")}</p>}
             {readyRepository ? <button className="secondary-button" type="button" disabled={previewing} onClick={(event) => {
               const form = event.currentTarget.form;
               if (!form || !initial?.id) return;
@@ -694,12 +697,6 @@ function formatTaskPreviewBytes(bytes: number, locale: Locale): string {
   return `${new Intl.NumberFormat(locale, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value)} ${units[unit]}`;
 }
 
-function taskPreviewImpact(impact: TaskScopeImpact, locale: Locale): string {
-  const files = new Intl.NumberFormat(locale).format(Number(impact.matchedFiles ?? 0));
-  const bytes = formatTaskPreviewBytes(Number(impact.estimatedBytes ?? 0), locale);
-  return locale === "en-US" ? `${files} files, ${bytes}` : `${files} 个文件，${bytes}`;
-}
-
 function confirmedTaskPreview(initial: Record<string, unknown> | null): TaskScopePreview | null {
   const confirmation = initial?.scopeConfirmation as Record<string, unknown> | undefined;
   if (!confirmation?.previewId || !confirmation?.fingerprint) return null;
@@ -712,14 +709,14 @@ function confirmedTaskPreview(initial: Record<string, unknown> | null): TaskScop
   };
 }
 
-function TaskScopePreviewPanel({ preview, valid, exclusions, deleteConfirmed, locale, onExclusionsChange, onDeleteConfirmed }: {
+function TaskScopePreviewPanel({ preview, valid, ruleCount, deleteConfirmed, locale, onDeleteConfirmed, onOpenEntries }: {
   preview: TaskScopePreview;
   valid: boolean;
-  exclusions: string[];
+  ruleCount: number;
   deleteConfirmed: boolean;
   locale: Locale;
-  onExclusionsChange(rules: string[]): void;
   onDeleteConfirmed(confirmed: boolean): void;
+  onOpenEntries?(): void;
 }) {
   const t = (source: string) => translate(locale, source);
   const summary = preview.summary;
@@ -740,26 +737,13 @@ function TaskScopePreviewPanel({ preview, valid, exclusions, deleteConfirmed, lo
       <span><small>{t("纳入大小")}</small><strong>{formatTaskPreviewBytes(Number(summary.includedBytes ?? 0), locale)}</strong></span>
       <span><small>{t("排除大小")}</small><strong>{formatTaskPreviewBytes(Number(summary.excludedBytes ?? 0), locale)}</strong></span>
     </div>
+    <div className="task-scope-preview-actions">
+      <span>{locale === "en-US"
+        ? `${number(ruleCount)} exclusion rules configured`
+        : `当前有 ${number(ruleCount)} 条排除规则`}</span>
+      {onOpenEntries && <button className="secondary-button task-scope-open-entries" type="button" onClick={onOpenEntries}>{t("查看并调整保护范围")}</button>}
+    </div>
     {summary.truncated && <p className="task-scope-truncated" role="alert">{t("预览达到扫描上限，结果已截断；不能把这些数量视为完整范围。")}</p>}
-    {!!summary.activeRules?.length && <div className="task-scope-rules">
-      <strong>{t("当前生效规则及影响")}</strong>
-      <ul>{summary.activeRules.map((impact) => <li key={impact.rule}><code>{impact.rule}</code><span>{taskPreviewImpact(impact, locale)}</span></li>)}</ul>
-    </div>}
-    {!!summary.suggestions?.length && <div className="task-scope-suggestions">
-      <div><strong>{t("可选排除建议")}</strong><p>{t("建议不会自动应用。勾选后会修改规则，并要求重新预览。")}</p></div>
-      {summary.suggestions.map((suggestion) => {
-        const selected = exclusions.includes(suggestion.rule);
-        return <label key={suggestion.rule}>
-          <input type="checkbox" aria-label={`${t("采用建议")} ${suggestion.rule}`} checked={selected} onChange={(event) => {
-            onExclusionsChange(event.target.checked
-              ? [...exclusions, suggestion.rule]
-              : exclusions.filter((rule) => rule !== suggestion.rule));
-          }} />
-          <span><code>{suggestion.rule}</code><small>{t(String(suggestion.reason ?? ""))}</small></span>
-          <em>{taskPreviewImpact(suggestion, locale)}</em>
-        </label>;
-      })}
-    </div>}
     {preview.requiresDeleteConfirmation && <div className="task-scope-delete">
       <strong>{locale === "en-US"
         ? `Target ${String(summary.targetIdentity ?? "—")} will delete ${number(summary.deleteFiles)} files and ${number(summary.deleteDirectories)} directories.`
@@ -769,7 +753,7 @@ function TaskScopePreviewPanel({ preview, valid, exclusions, deleteConfirmed, lo
   </section>;
 }
 
-export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, locale = "zh-CN" }: TaskEditorProps) {
+export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, onOpenScope, locale = "zh-CN" }: TaskEditorProps) {
   const t = (source: string) => translate(locale, source);
   const formRef = useRef<HTMLFormElement>(null);
   const basicSectionRef = useRef<HTMLElement>(null);
@@ -1237,12 +1221,6 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
             <label className="full-field">{t("目标绝对路径")}<input name="destinationPath" defaultValue={String(initialRsync?.destinationPath ?? "")} onChange={invalidateScope} placeholder="/srv/archive" required /></label>
             {rsyncDestinationKind === "local" && <p className="field-hint full-field">{t("源目录和目标目录都位于所选 Agent，且不能相同或互相嵌套。")}</p>}
           </>}
-          <label className="full-field">{t("排除规则（每行一条）")}
-            <textarea name="exclusions" value={exclusions} onChange={(event) => {
-              setExclusions(event.target.value);
-              invalidateScope();
-            }} placeholder={t("默认不排除任何内容；每条规则都需要通过预览确认影响。")} />
-          </label>
           {engine === "rsync" && <label>{t("目标清理策略")}<select name="delete" value={String(deleteMode)} onChange={(event) => {
             setDeleteMode(event.target.value === "true");
             invalidateScope();
@@ -1286,14 +1264,11 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
         {preview && <TaskScopePreviewPanel
           preview={preview}
           valid={previewValid}
-          exclusions={exclusionRules}
+          ruleCount={exclusionRules.length}
           deleteConfirmed={deleteConfirmed}
           locale={locale}
-          onExclusionsChange={(rules) => {
-            setExclusions(rules.join("\n"));
-            invalidateScope();
-          }}
           onDeleteConfirmed={setDeleteConfirmed}
+          onOpenEntries={taskID && onOpenScope ? () => onOpenScope(taskID) : undefined}
         />}
         </div>
       </section>
@@ -1329,13 +1304,9 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, local
           <TaskScopePreviewPanel
             preview={preview}
             valid={previewValid}
-            exclusions={exclusionRules}
+            ruleCount={exclusionRules.length}
             deleteConfirmed={deleteConfirmed}
             locale={locale}
-            onExclusionsChange={(rules) => {
-              setExclusions(rules.join("\n"));
-              invalidateScope();
-            }}
             onDeleteConfirmed={setDeleteConfirmed}
           />
           {error && <p className="form-error" role="alert">{error}</p>}

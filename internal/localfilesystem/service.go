@@ -127,6 +127,10 @@ func (s *Service) Run(ctx context.Context, assignment execution.Assignment) (exe
 	return agentfilesystem.New(s.style, s.Settings().Roots).Run(ctx, assignment)
 }
 
+func (s *Service) PreviewScope(ctx context.Context, path string, exclusions []string, limit int, visit agentfilesystem.ScopeVisitor) (agentfilesystem.ScopeSummary, error) {
+	return agentfilesystem.New(s.style, s.Settings().Roots).PreviewScope(ctx, path, exclusions, limit, visit)
+}
+
 func normalizeRoots(values []string, style string, requireAccessible bool) ([]string, error) {
 	if len(values) == 0 || len(values) > maximumRootCount {
 		return nil, errors.New("至少配置一个、最多配置 32 个允许根目录")

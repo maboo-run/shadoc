@@ -44,6 +44,25 @@ func TestStartWithoutPortPreservesConfiguredListenAddress(t *testing.T) {
 	}
 }
 
+func TestSystemLifecycleCommandsUseExplicitSystemScope(t *testing.T) {
+	service := &backgroundServiceFake{status: "running"}
+	var stdout bytes.Buffer
+	handled, err := handleServiceCommand([]string{"start", "--system"}, &stdout, "/var/lib/shadoc/app/shadoc", service, testSystemLaunchConfig)
+	if err != nil || !handled {
+		t.Fatalf("start handled=%t err=%v", handled, err)
+	}
+	want := []string{"serve", "--service-scope", "system", "--listen", "127.0.0.1:8585", "--data-dir", "/var/lib/shadoc"}
+	if service.executable != "/var/lib/shadoc/app/shadoc" || !reflect.DeepEqual(service.arguments, want) {
+		t.Fatalf("executable=%q arguments=%v", service.executable, service.arguments)
+	}
+	for _, command := range []string{"stop", "restart", "status"} {
+		handled, err := handleServiceCommand([]string{command, "--system"}, &stdout, "/var/lib/shadoc/app/shadoc", service, testSystemLaunchConfig)
+		if err != nil || !handled {
+			t.Fatalf("command=%s handled=%t err=%v", command, handled, err)
+		}
+	}
+}
+
 func TestStartPrintsPersistedLANSetupToken(t *testing.T) {
 	dataDir := t.TempDir()
 	token := "MTExMTExMTExMTExMTExMTExMTExMTEx"
@@ -138,8 +157,48 @@ func TestServeCommandReplacesOnlyConfiguredPort(t *testing.T) {
 	}
 }
 
+func TestServiceCommandsAndServeCarryOnlyKnownScopes(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want serviceScope
+	}{
+		{args: []string{"start"}, want: userServiceScope},
+		{args: []string{"start", "--system"}, want: systemServiceScope},
+		{args: []string{"restart", "--system"}, want: systemServiceScope},
+		{args: []string{"status"}, want: userServiceScope},
+	} {
+		got, err := serviceCommandScope(test.args)
+		if err != nil || got != test.want {
+			t.Fatalf("args=%v scope=%q err=%v", test.args, got, err)
+		}
+	}
+	options, handled, err := parseServeCommand([]string{"serve", "--service-scope", "system", "--listen", "127.0.0.1:8585", "--data-dir", "/var/lib/shadoc"})
+	if err != nil || !handled || options.ServiceScope != systemServiceScope {
+		t.Fatalf("options=%+v handled=%t err=%v", options, handled, err)
+	}
+	if _, _, err := parseServeCommand([]string{"serve", "--service-scope", "administrator"}); err == nil {
+		t.Fatal("unknown serve service scope accepted")
+	}
+}
+
+func TestHelpAndUnknownCommandsStillReachTheBackgroundDispatcher(t *testing.T) {
+	for _, args := range [][]string{{"help"}, {"--help"}, {"unknown"}} {
+		scope, err := backgroundCommandScope(args)
+		if err != nil || scope != userServiceScope {
+			t.Fatalf("args=%v scope=%q err=%v", args, scope, err)
+		}
+	}
+	if _, err := backgroundCommandScope([]string{"start", "--unknown"}); err == nil {
+		t.Fatal("invalid start flags were ignored")
+	}
+}
+
 func testLaunchConfig() (serviceLaunchConfig, error) {
 	return serviceLaunchConfig{DataDir: "/srv/shadoc", Listen: "10.0.0.5:8585"}, nil
+}
+
+func testSystemLaunchConfig() (serviceLaunchConfig, error) {
+	return serviceLaunchConfig{DataDir: "/var/lib/shadoc", Listen: "127.0.0.1:8585"}, nil
 }
 
 type backgroundServiceFake struct {

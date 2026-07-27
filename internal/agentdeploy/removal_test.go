@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,23 @@ func TestRemovalServiceKeepsConfirmedStoppedStateWhenFileRemovalFails(t *testing
 	}
 	if want := []string{"stop", "mark-stopped", "remove"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("events=%v want=%v", events, want)
+	}
+}
+
+func TestRemovalServiceExplainsMissingManagedRemoteHost(t *testing.T) {
+	events := []string{}
+	storage := &removalStore{
+		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "deleted-host", Status: "offline"},
+		events: &events,
+	}
+	service := NewRemovalService(storage, removalSecrets{}, removalDialer{remote: &removalRemote{events: &events}}, time.Now)
+
+	_, err := service.Uninstall(t.Context(), "agent-1", nil)
+	if err == nil {
+		t.Fatal("missing managed remote host was accepted")
+	}
+	if !strings.Contains(err.Error(), "关联的远程主机已被删除") {
+		t.Fatalf("unexpected diagnostic: %v", err)
 	}
 }
 

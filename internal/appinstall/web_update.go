@@ -19,11 +19,16 @@ type WebUpdater struct {
 	dataDir    string
 	listen     string
 	managed    bool
+	scope      string
 	start      HelperStarter
 }
 
 func NewWebUpdater(executable, dataDir, listen string, managed bool, start HelperStarter) *WebUpdater {
-	return &WebUpdater{executable: executable, dataDir: dataDir, listen: listen, managed: managed, start: start}
+	return NewWebUpdaterWithScope(executable, dataDir, listen, managed, "user", start)
+}
+
+func NewWebUpdaterWithScope(executable, dataDir, listen string, managed bool, scope string, start HelperStarter) *WebUpdater {
+	return &WebUpdater{executable: executable, dataDir: dataDir, listen: listen, managed: managed, scope: scope, start: start}
 }
 
 func (u *WebUpdater) Managed() bool { return u != nil && u.managed }
@@ -35,7 +40,7 @@ func (u *WebUpdater) Launch(ctx context.Context, operationID, version string) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if u.start == nil || !managedOperationIDPattern.MatchString(operationID) || !releaseVersionPattern.MatchString(version) || !filepath.IsAbs(u.executable) || !filepath.IsAbs(u.dataDir) {
+	if u.start == nil || !managedOperationIDPattern.MatchString(operationID) || !releaseVersionPattern.MatchString(version) || !filepath.IsAbs(u.executable) || !filepath.IsAbs(u.dataDir) || u.scope != "user" && u.scope != "system" {
 		return errors.New("managed application update configuration is invalid")
 	}
 	if _, _, err := net.SplitHostPort(u.listen); err != nil {
@@ -47,6 +52,9 @@ func (u *WebUpdater) Launch(ctx context.Context, operationID, version string) er
 		"--version", version,
 		"--data-dir", u.dataDir,
 		"--listen", u.listen,
+	}
+	if u.scope == "system" {
+		arguments = append(arguments, "--service-scope", "system")
 	}
 	return u.start(operationID, u.executable, arguments)
 }

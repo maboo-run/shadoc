@@ -92,3 +92,23 @@ func TestPerformManagedUpdateRejectsMismatchedDurableOperation(t *testing.T) {
 		t.Fatalf("err=%v installer.called=%t", err, installer.called)
 	}
 }
+
+func TestManagedUpdateSystemScopeRequiresTheFixedRootInstallation(t *testing.T) {
+	scope, err := validateManagedUpdateScope("system", "linux", 0, "/var/lib/shadoc", "/var/lib/shadoc/app/shadoc")
+	if err != nil || scope != systemServiceScope {
+		t.Fatalf("scope=%q err=%v", scope, err)
+	}
+	for _, test := range []struct {
+		scope, goos, dataDir, executable string
+		euid                             int
+	}{
+		{scope: "system", goos: "linux", euid: 1000, dataDir: "/var/lib/shadoc", executable: "/var/lib/shadoc/app/shadoc"},
+		{scope: "system", goos: "darwin", euid: 0, dataDir: "/var/lib/shadoc", executable: "/var/lib/shadoc/app/shadoc"},
+		{scope: "system", goos: "linux", euid: 0, dataDir: "/home/user/.config/shadoc", executable: "/home/user/.config/shadoc/app/shadoc"},
+		{scope: "administrator", goos: "linux", euid: 0, dataDir: "/var/lib/shadoc", executable: "/var/lib/shadoc/app/shadoc"},
+	} {
+		if _, err := validateManagedUpdateScope(test.scope, test.goos, test.euid, test.dataDir, test.executable); err == nil {
+			t.Fatalf("unsafe managed update accepted: %+v", test)
+		}
+	}
+}

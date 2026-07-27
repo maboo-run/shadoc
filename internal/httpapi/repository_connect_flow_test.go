@@ -59,10 +59,16 @@ func TestConnectExistingRepositoryQueuesVerificationBeforePersistence(t *testing
 			"password": "existing-password", "passwordConfirmed": true,
 		}, cookie)
 	}()
+	select {
+	case <-manager.started:
+	case <-time.After(10 * time.Second):
+		close(manager.release)
+		t.Fatal("repository verification did not start")
+	}
 	var response *httptest.ResponseRecorder
 	select {
 	case response = <-responseChannel:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(10 * time.Second):
 		close(manager.release)
 		t.Fatal("connect handler waited for repository verification")
 	}
@@ -73,11 +79,6 @@ func TestConnectExistingRepositoryQueuesVerificationBeforePersistence(t *testing
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil || response.Code != http.StatusAccepted || accepted.RepositoryID == "" || accepted.OperationID == "" || accepted.Status != "queued" {
 		t.Fatalf("response=%d %s err=%v", response.Code, response.Body.String(), err)
-	}
-	select {
-	case <-manager.started:
-	case <-time.After(time.Second):
-		t.Fatal("repository verification did not start")
 	}
 	close(manager.release)
 	operation := waitForOperation(t, srv, cookie, accepted.OperationID, "success")

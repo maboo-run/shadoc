@@ -25,10 +25,11 @@ const (
 )
 
 type Definition struct {
-	Operation  Operation `json:"operation"`
-	Path       string    `json:"path"`
-	Exclusions []string  `json:"exclusions,omitempty"`
-	Limit      int       `json:"limit,omitempty"`
+	Operation      Operation `json:"operation"`
+	Path           string    `json:"path"`
+	Exclusions     []string  `json:"exclusions,omitempty"`
+	Limit          int       `json:"limit,omitempty"`
+	IncludeEntries bool      `json:"includeEntries,omitempty"`
 }
 
 type Entry struct {
@@ -133,6 +134,27 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 	}
 }
 
+// PreviewScope visits a read-only inventory of a source while applying the
+// same allowed-root and symlink-boundary checks as the execution engine.
+func (e *Engine) PreviewScope(ctx context.Context, value string, exclusions []string, limit int, visit ScopeVisitor) (ScopeSummary, error) {
+	definition, err := e.decode(mustScopeDefinition(value, exclusions, limit))
+	if err != nil || !e.allowed(definition.Path) {
+		return ScopeSummary{}, errors.Join(err, errors.New("filesystem path is outside allowed roots"))
+	}
+	if e.style == "windows" && os.PathSeparator != '\\' {
+		return ScopeSummary{}, errors.New("Windows filesystem request requires a Windows Agent")
+	}
+	if err := e.ensureResolvedAllowed(definition.Path, false); err != nil {
+		return ScopeSummary{}, err
+	}
+	return ScanScope(ctx, definition.Path, definition.Exclusions, definition.Limit, visit)
+}
+
+func mustScopeDefinition(value string, exclusions []string, limit int) json.RawMessage {
+	encoded, _ := json.Marshal(Definition{Operation: PreviewScope, Path: value, Exclusions: exclusions, Limit: limit})
+	return encoded
+}
+
 func (e *Engine) ensureResolvedAllowed(value string, allowMissing bool) error {
 	if e.style == "windows" {
 		// filepath.EvalSymlinks uses the host path syntax. Windows junctions and
@@ -174,7 +196,7 @@ func (e *Engine) decode(raw json.RawMessage) (Definition, error) {
 	if !json.Valid(raw) || json.Unmarshal(raw, &definition) != nil || (definition.Operation != Browse && definition.Operation != CreateDirectory && definition.Operation != PreviewScope && definition.Operation != ValidateRestoreTarget) || strings.TrimSpace(definition.Path) == "" || strings.ContainsAny(definition.Path, "\x00\r\n") {
 		return definition, errors.New("valid filesystem definition is required")
 	}
-	if definition.Operation != PreviewScope && (len(definition.Exclusions) != 0 || definition.Limit != 0) {
+	if definition.Operation != PreviewScope && (len(definition.Exclusions) != 0 || definition.Limit != 0 || definition.IncludeEntries) {
 		return definition, errors.New("filesystem operation contains unsupported scope options")
 	}
 	if definition.Limit < 0 || definition.Limit > MaxScopeItems || len(definition.Exclusions) > 256 {

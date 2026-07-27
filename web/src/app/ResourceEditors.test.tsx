@@ -157,6 +157,46 @@ describe("TaskEditor health policy", () => {
 });
 
 describe("TaskEditor activation guidance", () => {
+  it("keeps scope rules as an overview and opens the dedicated scope page", async () => {
+    const user = userEvent.setup();
+    const updateResource = vi.fn(async () => undefined);
+    const action = vi.fn(async () => ({}));
+    const onOpenScope = vi.fn();
+    const api = {
+      listResource: async (resource: string) => resource === "repositories"
+        ? [{ id: "repo-scope", name: "范围仓库", engine: "restic", kind: "local", path: "/backup/scope", status: "ready" }]
+        : [],
+      createResource: async () => ({}),
+      updateResource,
+      action,
+      saveMaintenance: async () => undefined,
+    };
+    const initial = {
+      id: "task-scope", name: "资料", engine: "restic", kind: "directory", repositoryId: "repo-scope", enabled: true,
+      executionTarget: { kind: "local" }, directory: { path: "/srv/data", exclusions: ["cache"], skipIfUnchanged: true },
+      retention: {}, resources: { compression: "auto" }, health: { maxSuccessAgeHours: 48 },
+      scopeConfirmation: {
+        previewId: "old-preview", fingerprint: "old-fingerprint", confirmedBy: "admin", confirmedAt: "2026-07-25T00:00:00Z",
+        summary: { includedFiles: 5, excludedFiles: 1, unreadableItems: 0 },
+      },
+    };
+    render(<TaskEditor
+      api={api}
+      initial={initial}
+      onOpenScope={onOpenScope}
+      onClose={() => undefined}
+      onDraftSaved={async () => undefined}
+      onSaved={async () => undefined}
+    />);
+
+    expect(await screen.findByText("当前有 1 条排除规则")).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: /排除规则/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看并调整保护范围" }));
+    expect(onOpenScope).toHaveBeenCalledWith("task-scope");
+    expect(updateResource).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+  });
+
   it("saves a disabled database draft, runs the backup preflight, and enables only after success", async () => {
     const user = userEvent.setup();
     const updateResource = vi.fn(async (_resource: string, _id: string, _payload: Record<string, unknown>) => undefined);

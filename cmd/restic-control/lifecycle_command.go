@@ -24,6 +24,7 @@ func handleLifecycleCommand(ctx context.Context, args []string, stdin io.Reader,
 	case "install-app":
 		flags := flag.NewFlagSet("install-app", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
+		_ = flags.Bool("system", false, "install the Linux root system service")
 		if err := flags.Parse(args[1:]); err != nil {
 			return true, err
 		}
@@ -39,6 +40,7 @@ func handleLifecycleCommand(ctx context.Context, args []string, stdin io.Reader,
 		flags := flag.NewFlagSet("update-app", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		version := flags.String("version", "latest", "release version")
+		_ = flags.Bool("system", false, "update the Linux root system service")
 		if err := flags.Parse(args[1:]); err != nil {
 			return true, err
 		}
@@ -54,6 +56,7 @@ func handleLifecycleCommand(ctx context.Context, args []string, stdin io.Reader,
 		flags := flag.NewFlagSet("uninstall-app", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		removeData := flags.Bool("remove-data", false, "also permanently remove application data")
+		_ = flags.Bool("system", false, "uninstall the Linux root system service")
 		if err := flags.Parse(args[1:]); err != nil {
 			return true, err
 		}
@@ -78,4 +81,32 @@ func handleLifecycleCommand(ctx context.Context, args []string, stdin io.Reader,
 	default:
 		return false, nil
 	}
+}
+
+func lifecycleCommandScope(args []string) (serviceScope, error) {
+	if len(args) == 0 {
+		return "", errors.New("application lifecycle command is required")
+	}
+	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	system := flags.Bool("system", false, "manage the Linux root system service")
+	switch args[0] {
+	case "install-app":
+	case "update-app":
+		_ = flags.String("version", "latest", "release version")
+	case "uninstall-app":
+		_ = flags.Bool("remove-data", false, "also permanently remove application data")
+	default:
+		return "", fmt.Errorf("%s is not an application lifecycle command", args[0])
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		return "", err
+	}
+	if flags.NArg() != 0 {
+		return "", fmt.Errorf("%s does not accept positional arguments", args[0])
+	}
+	if *system {
+		return systemServiceScope, nil
+	}
+	return userServiceScope, nil
 }

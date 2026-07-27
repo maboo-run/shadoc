@@ -13,8 +13,46 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
+
+type Scope string
+
+const (
+	UserScope   Scope = "user"
+	SystemScope Scope = "system"
+)
+
+func normalizeScope(scope Scope) (Scope, error) {
+	if scope == "" {
+		return UserScope, nil
+	}
+	if scope != UserScope && scope != SystemScope {
+		return "", fmt.Errorf("unsupported service scope %q", scope)
+	}
+	return scope, nil
+}
+
+func validateScopeRuntime(goos string, scope Scope, euid int) error {
+	scope, err := normalizeScope(scope)
+	if err != nil {
+		return err
+	}
+	if scope == SystemScope {
+		if goos != "linux" {
+			return fmt.Errorf("system service scope is unsupported on %s", goos)
+		}
+		if euid != 0 {
+			return errors.New("system service scope requires root")
+		}
+		return nil
+	}
+	if euid == 0 {
+		return errors.New("root cannot manage a user service; use --system")
+	}
+	return nil
+}
 
 func Install() error {
 	executable, err := os.Executable()
@@ -24,34 +62,66 @@ func Install() error {
 	return InstallExecutable(executable)
 }
 
-// Manager adapts native user services to the application lifecycle manager.
-type Manager struct{}
+// Manager adapts one fixed native service scope to the application lifecycle manager.
+type Manager struct {
+	scope            Scope
+	installArguments []string
+}
+
+func NewManager(scope Scope, installArguments []string) (Manager, error) {
+	scope, err := normalizeScope(scope)
+	if err != nil {
+		return Manager{}, err
+	}
+	if err := validateServiceArguments(installArguments); err != nil {
+		return Manager{}, err
+	}
+	return Manager{scope: scope, installArguments: append([]string(nil), installArguments...)}, nil
+}
+
+func (m Manager) Scope() Scope {
+	scope, err := normalizeScope(m.scope)
+	if err != nil {
+		return UserScope
+	}
+	return scope
+}
 
 var operationIDPattern = regexp.MustCompile(`^op_[0-9a-f]{24}$`)
 
-func (Manager) Install(executable string) error { return InstallExecutable(executable) }
-func (Manager) Start(executable string, arguments []string) error {
-	return StartExecutable(executable, arguments)
+func (m Manager) Install(executable string) error {
+	return installExecutableForScope(m.Scope(), executable, m.installArguments)
 }
-func (Manager) Stop() error             { return Stop() }
-func (Manager) Restart() error          { return Restart() }
-func (Manager) Status() (string, error) { return Status() }
-func (Manager) Uninstall() error        { return Uninstall() }
+func (m Manager) Start(executable string, arguments []string) error {
+	return installExecutableForScope(m.Scope(), executable, arguments)
+}
+func (m Manager) Stop() error             { return stopForScope(m.Scope()) }
+func (m Manager) Restart() error          { return restartForScope(m.Scope()) }
+func (m Manager) Status() (string, error) { return statusForScope(m.Scope()) }
+func (m Manager) Uninstall() error        { return uninstallForScope(m.Scope()) }
 
 // LaunchUpdater starts the fixed self-update helper in a separate native
 // service so restarting restic-control cannot terminate its own rollback and
 // health-check supervisor.
 func LaunchUpdater(operationID, executable string, arguments []string) error {
-	program, args, err := updaterCommand(runtime.GOOS, os.Getuid(), operationID, executable, arguments)
+	return LaunchUpdaterForScope(UserScope, operationID, executable, arguments)
+}
+
+func LaunchUpdaterForScope(scope Scope, operationID, executable string, arguments []string) error {
+	program, args, err := updaterCommand(runtime.GOOS, scope, os.Getuid(), operationID, executable, arguments)
 	if err != nil {
 		return err
 	}
 	return exec.Command(program, args...).Run()
 }
 
-func updaterCommand(goos string, uid int, operationID, executable string, arguments []string) (string, []string, error) {
+func updaterCommand(goos string, scope Scope, uid int, operationID, executable string, arguments []string) (string, []string, error) {
 	if !operationIDPattern.MatchString(operationID) || !filepath.IsAbs(executable) || len(arguments) == 0 {
 		return "", nil, errors.New("safe updater identity, executable, and arguments are required")
+	}
+	scope, err := normalizeScope(scope)
+	if err != nil {
+		return "", nil, err
 	}
 	for _, argument := range arguments {
 		if strings.ContainsRune(argument, '\x00') {
@@ -61,9 +131,15 @@ func updaterCommand(goos string, uid int, operationID, executable string, argume
 	suffix := strings.TrimPrefix(operationID, "op_")
 	switch goos {
 	case "linux":
-		args := []string{"--user", "--unit", "shadoc-update-" + suffix, "--collect", "--property=Type=exec", executable}
+		args := []string{"--unit", "shadoc-update-" + suffix, "--collect", "--property=Type=exec", executable}
+		if scope == UserScope {
+			args = append([]string{"--user"}, args...)
+		}
 		return "systemd-run", append(args, arguments...), nil
 	case "darwin":
+		if scope == SystemScope {
+			return "", nil, errors.New("system updater is unsupported on darwin")
+		}
 		args := []string{"submit", "-l", "io.shadoc.update." + suffix, "--", executable}
 		return "launchctl", append(args, arguments...), nil
 	default:
@@ -80,13 +156,30 @@ func StartExecutable(executable string, arguments []string) error {
 }
 
 func installExecutable(executable string, arguments []string) error {
-	if !filepath.IsAbs(executable) {
-		return errors.New("service executable path must be absolute")
-	}
+	return installExecutableForScope(UserScope, executable, arguments)
+}
+
+func validateServiceArguments(arguments []string) error {
 	for _, argument := range arguments {
 		if strings.ContainsRune(argument, '\x00') || strings.ContainsAny(argument, "\n\r") {
 			return errors.New("service argument contains an unsafe control character")
 		}
+	}
+	return nil
+}
+
+func installExecutableForScope(scope Scope, executable string, arguments []string) error {
+	if !filepath.IsAbs(executable) {
+		return errors.New("service executable path must be absolute")
+	}
+	if err := validateServiceArguments(arguments); err != nil {
+		return err
+	}
+	if err := validateScopeRuntime(runtime.GOOS, scope, os.Geteuid()); err != nil {
+		return err
+	}
+	if scope == SystemScope {
+		return installSystemExecutable(executable, arguments)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -163,14 +256,234 @@ func installExecutable(executable string, arguments []string) error {
 	}
 }
 
+func installSystemExecutable(executable string, arguments []string) error {
+	if filepath.Clean(executable) != "/var/lib/shadoc/app/shadoc" {
+		return errors.New("system service executable must be /var/lib/shadoc/app/shadoc; use the root installer or migrate-to-root first")
+	}
+	if err := validateOwnedExecutablePath(executable, 0); err != nil {
+		return fmt.Errorf("validate system service executable: %w", err)
+	}
+	if err := validateSystemServiceArguments(arguments); err != nil {
+		return err
+	}
+	path := definitionPathForScope("linux", SystemScope, "", "shadoc")
+	var previous []byte
+	var previousMode os.FileMode
+	hadPrevious := false
+	if info, err := os.Lstat(path); err == nil {
+		if err := validateOwnedRegularFile(info, 0); err != nil {
+			return fmt.Errorf("validate existing system service definition: %w", err)
+		}
+		if err := validateAdditionalPathSecurity(path, false); err != nil {
+			return fmt.Errorf("validate existing system service definition: %w", err)
+		}
+		previous, err = os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		previousMode, hadPrevious = info.Mode().Perm(), true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := writeOwnedFileAtomic(path, []byte(systemdUnitForScope(SystemScope, executable, arguments)), 0o644, 0); err != nil {
+		return err
+	}
+	rollback := func(cause error) error {
+		var cleanup error
+		_ = exec.Command("systemctl", "disable", "--now", "shadoc.service").Run()
+		if hadPrevious {
+			cleanup = errors.Join(cleanup, writeOwnedFileAtomic(path, previous, previousMode, 0))
+			cleanup = errors.Join(cleanup, exec.Command("systemctl", "daemon-reload").Run())
+			cleanup = errors.Join(cleanup, exec.Command("systemctl", "enable", "--now", "shadoc.service").Run())
+		} else {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				cleanup = errors.Join(cleanup, err)
+			}
+			cleanup = errors.Join(cleanup, exec.Command("systemctl", "daemon-reload").Run())
+		}
+		return errors.Join(cause, cleanup)
+	}
+	for _, command := range [][]string{
+		{"daemon-reload"},
+		{"enable", "shadoc.service"},
+		{"restart", "shadoc.service"},
+	} {
+		if err := exec.Command("systemctl", command...).Run(); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := verifyStartedServiceForScope("linux", SystemScope, 0, "", arguments); err != nil {
+		return rollback(err)
+	}
+	return nil
+}
+
+func validateSystemServiceArguments(arguments []string) error {
+	if len(arguments) != 7 ||
+		arguments[0] != "serve" ||
+		arguments[1] != "--service-scope" || arguments[2] != "system" ||
+		arguments[3] != "--listen" ||
+		arguments[5] != "--data-dir" || filepath.Clean(arguments[6]) != "/var/lib/shadoc" {
+		return errors.New("system service must use the fixed Shadoc root serve command")
+	}
+	if _, _, err := net.SplitHostPort(arguments[4]); err != nil {
+		return fmt.Errorf("system service listen address is invalid: %w", err)
+	}
+	return nil
+}
+
+func validateOwnedExecutablePath(path string, expectedUID int) error {
+	return validateOwnedExecutablePathFrom(path, expectedUID, string(filepath.Separator))
+}
+
+func validateOwnedExecutablePathFrom(path string, expectedUID int, trustedRoot string) error {
+	path = filepath.Clean(path)
+	trustedRoot = filepath.Clean(trustedRoot)
+	if !filepath.IsAbs(path) || !filepath.IsAbs(trustedRoot) || path == trustedRoot || expectedUID < 0 {
+		return errors.New("owned executable path must be a safe absolute path")
+	}
+	relative, err := filepath.Rel(trustedRoot, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("owned executable path must stay within the trusted root")
+	}
+	current := trustedRoot
+	components := strings.Split(relative, string(filepath.Separator))
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link", current)
+		}
+		if err := validateAdditionalPathSecurity(current, index < len(components)-1); err != nil {
+			return err
+		}
+		uid, ok := fileOwnerUID(info)
+		if !ok || uid != 0 && uid != expectedUID {
+			return fmt.Errorf("%s has an unexpected owner", current)
+		}
+		if index < len(components)-1 {
+			if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+				return fmt.Errorf("%s is not a protected directory", current)
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() || uid != expectedUID || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o111 == 0 {
+			return errors.New("system service executable must be an owned, non-writable regular executable")
+		}
+	}
+	return nil
+}
+
+func validateOwnedRegularFile(info os.FileInfo, expectedUID int) error {
+	uid, ok := fileOwnerUID(info)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 ||
+		!ok || uid != expectedUID {
+		return errors.New("file must be an owned, non-writable regular file")
+	}
+	return nil
+}
+
+func fileOwnerUID(info os.FileInfo) (int, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(stat.Uid), true
+}
+
+func writeOwnedFileAtomic(path string, content []byte, mode os.FileMode, expectedUID int) (retErr error) {
+	if existing, err := os.Lstat(path); err == nil {
+		if err := validateOwnedRegularFile(existing, expectedUID); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	directory := filepath.Dir(path)
+	temp, err := os.CreateTemp(directory, ".shadoc-service-*")
+	if err != nil {
+		return err
+	}
+	name := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		if retErr != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	if err := temp.Chmod(mode.Perm()); err != nil {
+		return err
+	}
+	if expectedUID != os.Geteuid() {
+		if err := temp.Chown(expectedUID, -1); err != nil {
+			return err
+		}
+	}
+	if err := sanitizeAdditionalFileSecurity(int(temp.Fd())); err != nil {
+		return err
+	}
+	if _, err := temp.Write(content); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	if err := validateAdditionalPathSecurity(path, false); err != nil {
+		return err
+	}
+	parent, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return parent.Sync()
+}
+
 func Stop() error {
-	return runServiceAction("stop")
+	return stopForScope(UserScope)
 }
 
 func Restart() error {
+	return restartForScope(UserScope)
+}
+
+func stopForScope(scope Scope) error {
+	if err := validateScopeRuntime(runtime.GOOS, scope, os.Geteuid()); err != nil {
+		return err
+	}
+	if scope == SystemScope {
+		program, arguments, err := serviceActionCommandForScope(runtime.GOOS, scope, 0, "", "stop", "shadoc")
+		if err != nil {
+			return err
+		}
+		return exec.Command(program, arguments...).Run()
+	}
+	return runServiceAction("stop")
+}
+
+func restartForScope(scope Scope) error {
+	if err := validateScopeRuntime(runtime.GOOS, scope, os.Geteuid()); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
+	}
+	if scope == SystemScope {
+		program, arguments, err := serviceActionCommandForScope(runtime.GOOS, scope, 0, "", "restart", "shadoc")
+		if err != nil {
+			return err
+		}
+		return exec.Command(program, arguments...).Run()
 	}
 	commands, err := restartActionCommandsFor(runtime.GOOS, os.Getuid(), home, installedServiceIdentity(runtime.GOOS, home))
 	if err != nil {
@@ -185,11 +498,22 @@ func Restart() error {
 }
 
 func Status() (string, error) {
+	return statusForScope(UserScope)
+}
+
+func statusForScope(scope Scope) (string, error) {
+	if err := validateScopeRuntime(runtime.GOOS, scope, os.Geteuid()); err != nil {
+		return "", err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	program, arguments, err := serviceActionCommandFor(runtime.GOOS, os.Getuid(), home, "status", installedServiceIdentity(runtime.GOOS, home))
+	identity := installedServiceIdentity(runtime.GOOS, home)
+	if scope == SystemScope {
+		identity = "shadoc"
+	}
+	program, arguments, err := serviceActionCommandForScope(runtime.GOOS, scope, os.Getuid(), home, "status", identity)
 	if err != nil {
 		return "", err
 	}
@@ -216,7 +540,11 @@ func statusFromCommand(goos string, output []byte, commandErr error) (string, er
 }
 
 func verifyStartedService(goos string, uid int, home string, arguments []string) error {
-	program, nativeArguments, err := serviceActionCommandFor(goos, uid, home, "status", "shadoc")
+	return verifyStartedServiceForScope(goos, UserScope, uid, home, arguments)
+}
+
+func verifyStartedServiceForScope(goos string, scope Scope, uid int, home string, arguments []string) error {
+	program, nativeArguments, err := serviceActionCommandForScope(goos, scope, uid, home, "status", "shadoc")
 	if err != nil {
 		return err
 	}
@@ -484,8 +812,31 @@ func serviceActionCommand(goos string, uid int, home, action string) (string, []
 }
 
 func serviceActionCommandFor(goos string, uid int, home, action, identity string) (string, []string, error) {
+	return serviceActionCommandForScope(goos, UserScope, uid, home, action, identity)
+}
+
+func serviceActionCommandForScope(goos string, scope Scope, uid int, home, action, identity string) (string, []string, error) {
 	if identity != "shadoc" && identity != "restic-control" {
 		return "", nil, errors.New("unsupported native service identity")
+	}
+	scope, err := normalizeScope(scope)
+	if err != nil {
+		return "", nil, err
+	}
+	if scope == SystemScope {
+		if goos != "linux" || identity != "shadoc" {
+			return "", nil, fmt.Errorf("system service action is unsupported for %s on %s", identity, goos)
+		}
+		unit := identity + ".service"
+		switch action {
+		case "stop":
+			return "systemctl", []string{"stop", unit}, nil
+		case "restart":
+			return "systemctl", []string{"restart", unit}, nil
+		case "status":
+			return "systemctl", []string{"is-active", unit}, nil
+		}
+		return "", nil, fmt.Errorf("unsupported service action %q on %s", action, goos)
 	}
 	switch goos {
 	case "linux":
@@ -514,6 +865,21 @@ func serviceActionCommandFor(goos string, uid int, home, action, identity string
 }
 
 func Uninstall() error {
+	return uninstallForScope(UserScope)
+}
+
+func uninstallForScope(scope Scope) error {
+	if err := validateScopeRuntime(runtime.GOOS, scope, os.Geteuid()); err != nil {
+		return err
+	}
+	if scope == SystemScope {
+		_ = exec.Command("systemctl", "disable", "--now", "shadoc.service").Run()
+		path := definitionPathForScope("linux", scope, "", "shadoc")
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return exec.Command("systemctl", "daemon-reload").Run()
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -540,6 +906,16 @@ func definitionPath(goos, home string) string {
 }
 
 func definitionPathFor(goos, home, identity string) string {
+	return definitionPathForScope(goos, UserScope, home, identity)
+}
+
+func definitionPathForScope(goos string, scope Scope, home, identity string) string {
+	if scope == SystemScope {
+		if goos == "linux" {
+			return filepath.Join("/etc/systemd/system", identity+".service")
+		}
+		return ""
+	}
 	if goos == "darwin" {
 		return filepath.Join(home, "Library", "LaunchAgents", "io."+identity+".plist")
 	}
@@ -567,9 +943,16 @@ func installedServiceIdentity(goos, home string) string {
 	return "shadoc"
 }
 func systemdUnit(executable string, arguments []string) string {
+	return systemdUnitForScope(UserScope, executable, arguments)
+}
+
+func systemdUnitForScope(scope Scope, executable string, arguments []string) string {
 	command := []string{systemdArgument(executable)}
 	for _, argument := range arguments {
 		command = append(command, systemdArgument(argument))
+	}
+	if scope == SystemScope {
+		return "[Unit]\nDescription=Shadoc backup service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nUser=root\nGroup=root\nExecStart=" + strings.Join(command, " ") + "\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\nUMask=0077\n\n[Install]\nWantedBy=multi-user.target\n"
 	}
 	return "[Unit]\nDescription=Shadoc backup service\nAfter=network-online.target\n\n[Service]\nExecStart=" + strings.Join(command, " ") + "\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n"
 }

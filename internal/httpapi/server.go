@@ -77,11 +77,13 @@ type Server struct {
 	repositories              repositoryManager
 	probe                     *compat.Probe
 	paths                     compat.ToolPaths
+	toolPathOverrides         compat.ToolPathOverrides
 	compatibilityMu           sync.Mutex
 	compatibilityCache        compat.Report
 	compatibilityCached       bool
 	installer                 resticInstaller
 	selectRestic              func(string)
+	selectRsync               func(string)
 	databaseRestore           databaseRestoreManager
 	dumpFileRestore           databaseDumpFileRestoreManager
 	databaseVerifier          databaseverify.Verifier
@@ -161,6 +163,15 @@ type repositoryCapacityProber interface {
 }
 type taskScopePreviewer interface {
 	Preview(context.Context, string) (store.TaskScopePreview, error)
+}
+type taskScopeInventorier interface {
+	Inventory(context.Context, string) (store.TaskScopePreview, error)
+}
+type taskScopeDraftInventorier interface {
+	InventoryWithExclusions(context.Context, string, []string) (store.TaskScopePreview, error)
+}
+type taskScopeEntryReader interface {
+	Entries(context.Context, string, taskpreview.EntryQuery) (taskpreview.EntryPage, error)
 }
 type localFilesystemManager interface {
 	Settings() localfilesystem.Settings
@@ -264,9 +275,11 @@ type Runtime struct {
 	Runner                    taskRunner
 	Repositories              repositoryManager
 	Paths                     compat.ToolPaths
+	ToolPathOverrides         compat.ToolPathOverrides
 	Compatibility             compat.Report
 	Installer                 resticInstaller
 	SelectRestic              func(string)
+	SelectRsync               func(string)
 	DatabaseRestore           databaseRestoreManager
 	DumpFileRestore           databaseDumpFileRestoreManager
 	DatabaseVerifier          databaseverify.Verifier
@@ -353,10 +366,12 @@ func NewWithRuntime(s *store.Store, manager *auth.Manager, secrets *secret.Manag
 		repositories:              runtime.Repositories,
 		probe:                     compat.NewProbe(command.OSExecutor{}),
 		paths:                     runtime.Paths,
+		toolPathOverrides:         runtime.ToolPathOverrides,
 		compatibilityCache:        runtime.Compatibility,
 		compatibilityCached:       runtime.Compatibility.Findings != nil,
 		installer:                 runtime.Installer,
 		selectRestic:              runtime.SelectRestic,
+		selectRsync:               runtime.SelectRsync,
 		databaseRestore:           runtime.DatabaseRestore,
 		dumpFileRestore:           runtime.DumpFileRestore,
 		databaseVerifier:          verifier,
@@ -500,6 +515,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/agent-service", s.configureAgentService)
 	s.mux.HandleFunc("POST /api/agents/enrollment-token", s.createAgentEnrollmentToken)
 	s.mux.HandleFunc("POST /api/agents/deploy", s.deployAgent)
+	s.mux.HandleFunc("DELETE /api/agents/{id}", s.deleteAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/revoke", s.revokeAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/uninstall", s.uninstallAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/upgrade", s.upgradeAgent)
@@ -552,6 +568,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	s.mux.HandleFunc("PUT /api/tasks/{id}", s.updateTask)
 	s.mux.HandleFunc("POST /api/tasks/{id}/preview", s.previewTaskScope)
+	s.mux.HandleFunc("POST /api/tasks/{id}/scope-inventory", s.startTaskScopeInventory)
+	s.mux.HandleFunc("POST /api/tasks/{id}/scope-rules", s.saveTaskScopeRules)
+	s.mux.HandleFunc("GET /api/task-scope-previews/{id}", s.getTaskScopePreview)
+	s.mux.HandleFunc("GET /api/task-scope-previews/{id}/entries", s.listTaskScopeEntries)
 	s.mux.HandleFunc("POST /api/tasks/{id}/database-backup-preflight", s.preflightDatabaseBackup)
 	s.mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	s.mux.HandleFunc("GET /api/tasks/{id}/restore-verification-policy", s.getRestoreVerificationPolicy)
@@ -562,6 +582,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/plans/{id}", s.updatePlan)
 	s.mux.HandleFunc("DELETE /api/plans/{id}", s.deletePlan)
 	s.mux.HandleFunc("GET /api/compatibility", s.compatibility)
+	s.mux.HandleFunc("POST /api/compatibility/reprobe", s.reprobeCompatibility)
+	s.mux.HandleFunc("POST /api/compatibility/tool-paths", s.saveCompatibilityToolPaths)
 	s.mux.HandleFunc("GET /api/diagnostics/export", s.exportDiagnostics)
 	s.mux.HandleFunc("POST /api/tasks/{id}/run", s.runTask)
 	s.mux.HandleFunc("GET /api/activity", s.listActivity)
@@ -3079,7 +3101,88 @@ func (s *Server) compatibility(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireSession(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.compatibilityReport(r.Context()))
+	writeJSON(w, http.StatusOK, s.compatibilityView(r.Context()))
+}
+
+type compatibilityView struct {
+	compat.Report
+	ConfiguredPaths compat.ToolPathOverrides `json:"configuredPaths"`
+}
+
+func (s *Server) compatibilityView(ctx context.Context) compatibilityView {
+	report := s.compatibilityReport(ctx)
+	s.compatibilityMu.Lock()
+	configured := s.toolPathOverrides
+	s.compatibilityMu.Unlock()
+	return compatibilityView{Report: report, ConfiguredPaths: configured}
+}
+
+func (s *Server) reprobeCompatibility(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	s.compatibilityMu.Lock()
+	s.compatibilityCache = compat.Report{}
+	s.compatibilityCached = false
+	s.compatibilityMu.Unlock()
+	view := s.compatibilityView(r.Context())
+	s.appendSemanticAudit(r.Context(), username, "compatibility.reprobe", "application", "local-tools", map[string]any{
+		"blocked": view.Blocked,
+	})
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) saveCompatibilityToolPaths(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	var input compat.ToolPathOverrides
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "本机工具路径格式无效")
+		return
+	}
+	if err := s.probe.ValidateToolPathOverrides(r.Context(), input); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	if err := compat.SaveToolPathOverrides(r.Context(), resources, input); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法保存本机工具路径")
+		return
+	}
+	rsyncPath := input.Rsync
+	if rsyncPath == "" {
+		rsyncPath, _ = exec.LookPath("rsync")
+	}
+	if s.selectRsync != nil {
+		s.selectRsync(rsyncPath)
+	}
+	s.compatibilityMu.Lock()
+	s.toolPathOverrides = input
+	s.compatibilityCache = compat.Report{}
+	s.compatibilityCached = false
+	s.compatibilityMu.Unlock()
+	view := s.compatibilityView(r.Context())
+	s.appendSemanticAudit(r.Context(), username, "compatibility.tool_paths.update", "application", "local-tools", map[string]any{
+		"configuredCount": configuredToolPathCount(input),
+		"blocked":         view.Blocked,
+	})
+	writeJSON(w, http.StatusOK, view)
+}
+
+func configuredToolPathCount(value compat.ToolPathOverrides) int {
+	count := 0
+	for _, path := range []string{value.Rsync, value.MySQLDump, value.MySQLRestore, value.PostgresDump, value.PostgresRestore} {
+		if path != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) compatibilityReport(ctx context.Context) compat.Report {
@@ -3090,22 +3193,36 @@ func (s *Server) compatibilityReport(ctx context.Context) compat.Report {
 		return report
 	}
 	paths := s.paths
+	overrides := s.toolPathOverrides
 	s.compatibilityMu.Unlock()
 
 	if paths.Restic == "" {
 		paths.Restic, _ = exec.LookPath("restic")
 	}
-	if paths.MySQLDump == "" {
+	if overrides.Rsync == "" {
+		paths.Rsync, _ = exec.LookPath("rsync")
+	} else {
+		paths.Rsync = overrides.Rsync
+	}
+	if overrides.MySQLDump == "" {
 		paths.MySQLDump, _ = exec.LookPath("mysqldump")
+	} else {
+		paths.MySQLDump = overrides.MySQLDump
 	}
-	if paths.MySQLRestore == "" {
+	if overrides.MySQLRestore == "" {
 		paths.MySQLRestore, _ = exec.LookPath("mysql")
+	} else {
+		paths.MySQLRestore = overrides.MySQLRestore
 	}
-	if paths.PostgresDump == "" {
+	if overrides.PostgresDump == "" {
 		paths.PostgresDump, _ = exec.LookPath("pg_dump")
+	} else {
+		paths.PostgresDump = overrides.PostgresDump
 	}
-	if paths.PostgresRestore == "" {
+	if overrides.PostgresRestore == "" {
 		paths.PostgresRestore, _ = exec.LookPath("pg_restore")
+	} else {
+		paths.PostgresRestore = overrides.PostgresRestore
 	}
 	report := compat.Merge(compat.System(s.dataDir), s.probe.Tools(ctx, paths))
 	s.compatibilityMu.Lock()
@@ -3376,7 +3493,7 @@ func (s *Server) exportActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	writer := csv.NewWriter(w)
-	_ = writer.Write([]string{"record_type", "id", "kind", "engine", "status", "trigger", "object_type", "object_id", "object_name", "task_id", "repository_id", "plan_id", "occurred_at", "started_at", "finished_at", "attempts", "error_summary", "duration_ms", "files_processed", "files_changed", "bytes_processed", "bytes_changed"})
+	_ = writer.Write([]string{"record_type", "id", "kind", "engine", "status", "trigger", "object_type", "object_id", "object_name", "task_id", "repository_id", "plan_id", "occurred_at", "started_at", "finished_at", "attempts", "error_summary", "duration_ms", "files_expected", "files_processed", "files_changed", "bytes_processed", "bytes_changed"})
 	rowCount := 0
 	for {
 		for _, item := range page.Items {
@@ -3410,6 +3527,7 @@ func activityCSVRow(item store.ActivityItem) []string {
 		safeActivityCSVCell(item.ObjectName), safeActivityCSVCell(item.TaskID), safeActivityCSVCell(item.RepositoryID), safeActivityCSVCell(item.PlanID),
 		item.OccurredAt.UTC().Format(time.RFC3339Nano), activityCSVTime(item.StartedAt), activityCSVTime(item.FinishedAt),
 		strconv.Itoa(item.AttemptCount), safeActivityCSVCell(item.ErrorSummary), activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.DurationMilliseconds }),
+		activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.FilesExpected }),
 		activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.FilesProcessed }), activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.FilesChanged }),
 		activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.BytesProcessed }), activityCSVMetric(item.Metrics, func(metrics *store.RunMetrics) *int64 { return metrics.BytesChanged }),
 	}
@@ -4428,6 +4546,46 @@ func mergeDatabaseToolPaths(previous, incoming map[string]string) map[string]str
 	return merged
 }
 
+func (s *Server) resolveDatabaseToolPaths(connection domain.DatabaseConnection) map[string]string {
+	paths := make(map[string]string, len(connection.ToolPaths)+2)
+	for key, value := range connection.ToolPaths {
+		if value != "" {
+			paths[key] = value
+		}
+	}
+	s.compatibilityMu.Lock()
+	overrides := s.toolPathOverrides
+	s.compatibilityMu.Unlock()
+	switch connection.Engine {
+	case domain.MySQL:
+		if connection.Purpose == domain.RestoreConnection {
+			if paths["restore"] == "" {
+				paths["restore"] = overrides.MySQLRestore
+			}
+			if paths["admin"] == "" {
+				paths["admin"] = overrides.MySQLRestore
+			}
+		} else {
+			if paths["dump"] == "" {
+				paths["dump"] = overrides.MySQLDump
+			}
+			if paths["admin"] == "" {
+				paths["admin"] = overrides.MySQLRestore
+			}
+		}
+	case domain.PostgreSQL:
+		if connection.Purpose == domain.RestoreConnection {
+			if paths["restore"] == "" {
+				paths["restore"] = overrides.PostgresRestore
+			}
+		} else if paths["dump"] == "" {
+			paths["dump"] = overrides.PostgresDump
+		}
+	}
+	connection.ToolPaths = paths
+	return databaseverify.ResolveToolPaths(connection)
+}
+
 func (s *Server) testDatabaseConnection(w http.ResponseWriter, r *http.Request) {
 	username, ok := s.requireMutationSession(w, r)
 	if !ok {
@@ -4478,7 +4636,7 @@ func (s *Server) testDatabaseConnection(w http.ResponseWriter, r *http.Request) 
 		previousToolPaths = nil
 	}
 	connection.ToolPaths = mergeDatabaseToolPaths(previousToolPaths, connection.ToolPaths)
-	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
+	connection.ToolPaths = s.resolveDatabaseToolPaths(connection)
 
 	password := input.Password
 	var storedPassword []byte
@@ -4537,7 +4695,7 @@ func (s *Server) createDatabaseConnection(w http.ResponseWriter, r *http.Request
 	}
 	now := time.Now().UTC()
 	connection := databaseConnectionFromRequest(input, newID("dbconn"), now)
-	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
+	connection.ToolPaths = s.resolveDatabaseToolPaths(connection)
 	if err := connection.Validate(); err != nil || input.Password == "" {
 		writeError(w, http.StatusUnprocessableEntity, "数据库连接配置无效")
 		return
@@ -4584,7 +4742,7 @@ func (s *Server) createTemporaryDatabaseConnection(w http.ResponseWriter, r *htt
 	input.Purpose = domain.RestoreConnection
 	now := time.Now().UTC()
 	connection := databaseConnectionFromRequest(input, newID("temporary-dbconn"), now)
-	connection.ToolPaths = databaseverify.ResolveToolPaths(connection)
+	connection.ToolPaths = s.resolveDatabaseToolPaths(connection)
 	if err := connection.Validate(); err != nil || input.Password == "" {
 		writeError(w, http.StatusUnprocessableEntity, "临时恢复连接配置无效")
 		return
@@ -4732,6 +4890,246 @@ func (s *Server) previewTaskScope(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendSemanticAudit(r.Context(), username, "task.scope.preview", "task", preview.TaskID, map[string]any{"previewId": preview.ID, "fingerprint": preview.Fingerprint, "requiresDeleteConfirmation": preview.RequiresDeleteConfirmation, "truncated": preview.Summary["truncated"]})
 	writeJSON(w, http.StatusCreated, preview)
+}
+
+func (s *Server) startTaskScopeInventory(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	if s.taskPreviewer == nil {
+		writeError(w, http.StatusServiceUnavailable, "任务范围预览未启用")
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	taskID := r.PathValue("id")
+	task, err := loadTask(r.Context(), resources, taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取任务")
+		return
+	}
+	if !taskScopeRequiresPreview(task) {
+		writeError(w, http.StatusUnprocessableEntity, "该任务不需要目录范围预览")
+		return
+	}
+	var input struct {
+		Exclusions *[]string `json:"exclusions"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式无效")
+		return
+	}
+	if input.Exclusions != nil {
+		if _, err := taskpreview.WithExclusions(task, *input.Exclusions); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	}
+	operationKey := "task-scope-inventory:" + taskID
+	if input.Exclusions != nil {
+		encoded, _ := json.Marshal(*input.Exclusions)
+		digest := sha256.Sum256(encoded)
+		operationKey += ":" + hex.EncodeToString(digest[:8])
+	}
+	record, reused, err := s.operations.StartUnique(operationKey, operationruntime.StartRequest{
+		Kind: "task_scope_inventory", Actor: username, TaskID: taskID,
+	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
+		_ = reporter.Stage("scanning_source", nil)
+		var preview store.TaskScopePreview
+		var previewErr error
+		if input.Exclusions != nil {
+			inventorier, ok := s.taskPreviewer.(taskScopeDraftInventorier)
+			if !ok {
+				return errors.New("任务范围预览暂不支持规则草稿")
+			}
+			preview, previewErr = inventorier.InventoryWithExclusions(ctx, taskID, *input.Exclusions)
+		} else if inventorier, ok := s.taskPreviewer.(taskScopeInventorier); ok {
+			preview, previewErr = inventorier.Inventory(ctx, taskID)
+		} else {
+			preview, previewErr = s.taskPreviewer.Preview(ctx, taskID)
+		}
+		if previewErr != nil {
+			return safeTaskScopePreviewError(previewErr)
+		}
+		detail := map[string]any{
+			"previewId": preview.ID, "fingerprint": preview.Fingerprint, "expiresAt": preview.ExpiresAt,
+			"requiresDeleteConfirmation": preview.RequiresDeleteConfirmation, "summary": preview.Summary,
+		}
+		if input.Exclusions != nil {
+			detail["exclusions"] = append([]string(nil), (*input.Exclusions)...)
+			detail["draft"] = true
+		}
+		if err := reporter.Stage("catalog_ready", detail); err != nil {
+			return err
+		}
+		s.appendSemanticAudit(context.WithoutCancel(ctx), username, "task.scope.inventory", "task", preview.TaskID, map[string]any{
+			"previewId": preview.ID, "truncated": preview.Summary["truncated"], "entriesAvailable": preview.Summary["entriesAvailable"],
+		})
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "无法启动任务范围清单："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"operationId": record.ID, "status": record.Status, "kind": record.Kind, "reused": reused})
+}
+
+type taskScopeRuleInput struct {
+	PreviewID            string   `json:"previewId"`
+	Exclusions           []string `json:"exclusions"`
+	RsyncDeleteConfirmed bool     `json:"rsyncDeleteConfirmed,omitempty"`
+}
+
+func (s *Server) saveTaskScopeRules(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	var input taskScopeRuleInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式无效")
+		return
+	}
+	if strings.TrimSpace(input.PreviewID) == "" {
+		writeError(w, http.StatusBadRequest, "保存排除规则前必须先完成当前规则预览")
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	task, err := loadTask(r.Context(), resources, r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取任务")
+		return
+	}
+	task, err = taskpreview.WithExclusions(task, input.Exclusions)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	fingerprint, err := taskpreview.Fingerprint(task)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "无法计算任务范围")
+		return
+	}
+	confirmation, err := resources.ConsumeTaskScopePreview(
+		r.Context(), input.PreviewID, task.ID, fingerprint, username,
+		input.RsyncDeleteConfirmed, time.Now().UTC(),
+	)
+	if err != nil {
+		writeError(w, http.StatusConflict, "范围预览已失效、规则已变化或缺少 rsync 删除确认")
+		return
+	}
+	task.ScopeConfirmation = confirmation
+	task.UpdatedAt = time.Now().UTC()
+	if err := resources.UpdateTask(r.Context(), task); err != nil {
+		writeCRUDOperationError(w, err)
+		return
+	}
+	s.appendSemanticAudit(r.Context(), username, "task.scope.rules.update", "task", task.ID, map[string]any{
+		"previewId": input.PreviewID, "ruleCount": len(input.Exclusions),
+	})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func safeTaskScopePreviewError(err error) error {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return errors.New("任务不存在")
+	case errors.Is(err, taskpreview.ErrAgentUnavailable):
+		return errors.New("目标 Agent 离线或缺少范围预览能力")
+	case errors.Is(err, taskpreview.ErrUnsupportedTask):
+		return errors.New("该任务不支持目录范围预览")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return err
+	default:
+		return errors.New("任务范围清单生成失败")
+	}
+}
+
+func (s *Server) getTaskScopePreview(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	preview, err := resources.TaskScopePreview(r.Context(), r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "范围预览不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取范围预览")
+		return
+	}
+	if !time.Now().UTC().Before(preview.ExpiresAt) {
+		writeError(w, http.StatusGone, "范围预览已过期，请重新生成")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) listTaskScopeEntries(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireSession(w, r); !ok {
+		return
+	}
+	reader, ok := s.taskPreviewer.(taskScopeEntryReader)
+	if !ok {
+		writeError(w, http.StatusConflict, "当前范围预览不包含可浏览文件清单")
+		return
+	}
+	query := taskpreview.EntryQuery{
+		View: r.URL.Query().Get("view"), Search: r.URL.Query().Get("q"), Type: r.URL.Query().Get("type"),
+		Parent: r.URL.Query().Get("parent"), Cursor: r.URL.Query().Get("cursor"),
+	}
+	switch raw := strings.TrimSpace(r.URL.Query().Get("children")); raw {
+	case "", "false":
+	case "true":
+		query.Browse = true
+	default:
+		writeError(w, http.StatusBadRequest, "文件清单浏览参数无效")
+		return
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "文件清单分页参数无效")
+			return
+		}
+		query.Limit = limit
+	}
+	page, err := reader.Entries(r.Context(), r.PathValue("id"), query)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "范围预览不存在")
+		return
+	case errors.Is(err, taskpreview.ErrCatalogUnavailable):
+		writeError(w, http.StatusGone, "文件清单不可用或已过期，请重新生成")
+		return
+	case errors.Is(err, taskpreview.ErrInvalidEntryCursor):
+		writeError(w, http.StatusBadRequest, "文件清单游标无效")
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, "文件清单筛选参数无效")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) preflightDatabaseBackup(w http.ResponseWriter, r *http.Request) {
@@ -5082,6 +5480,13 @@ func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireMutationSession(w, r); !ok {
+		return
+	}
+	writeError(w, http.StatusPreconditionRequired, "删除操作必须先获取依赖与版本预览")
 }
 
 func (s *Server) uninstallAgent(w http.ResponseWriter, r *http.Request) {
@@ -6132,7 +6537,7 @@ func (s *Server) updateDatabaseConnection(w http.ResponseWriter, r *http.Request
 		writeError(w, 422, "数据库连接配置无效")
 		return
 	}
-	item.ToolPaths = databaseverify.ResolveToolPaths(item)
+	item.ToolPaths = s.resolveDatabaseToolPaths(item)
 	verificationPassword := input.Password
 	if verificationPassword == "" {
 		execution, loadErr := s.resourceStore(w).LoadDatabaseConnectionExecution(r.Context(), item.ID)

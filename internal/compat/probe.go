@@ -38,6 +38,9 @@ func System(dataDir string) Report {
 		report.Findings[0].Message = "当前操作系统不受首版支持"
 		report.Blocked = true
 	}
+	if identity := serviceIdentityFinding(os.Geteuid()); identity != nil {
+		report.Findings = append(report.Findings, *identity)
+	}
 	finding := Finding{Capability: "data-directory", Tool: "filesystem", Path: dataDir, Severity: Info, Message: "数据目录可写"}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		finding.Severity = Blocker
@@ -64,6 +67,18 @@ func System(dataDir string) Report {
 		report.Findings = append(report.Findings, space)
 	}
 	return report
+}
+
+func serviceIdentityFinding(euid int) *Finding {
+	if euid != 0 {
+		return nil
+	}
+	return &Finding{
+		Capability: "service-identity",
+		Tool:       "root",
+		Severity:   Warning,
+		Message:    "控制服务正以 root 运行；本机任务拥有更大的文件读取与修改权限",
+	}
 }
 func Merge(reports ...Report) Report {
 	result := Report{Findings: []Finding{}}

@@ -4,9 +4,11 @@ import type { AppAPI } from "./App";
 import { StatusIndicator } from "./StatusIndicator";
 import { isTrendReport, type TrendReport, type TrendWindow } from "./TaskHealthTrends";
 import { RunDetailDialog } from "./RunHistoryPage";
+import { formatDateTime } from "./dateTime";
 
 type RunMetrics = {
   durationMilliseconds?: number;
+  filesExpected?: number;
   filesProcessed?: number;
   filesChanged?: number;
   bytesProcessed?: number;
@@ -33,7 +35,7 @@ type ActivityPage = {
   generatedAt: string;
 };
 
-export function TaskHealthDetailPage({ taskId, api, locale, onBack }: { taskId: string; api: AppAPI; locale: Locale; onBack(): void }) {
+export function TaskHealthDetailPage({ taskId, api, locale, timeZone, onBack }: { taskId: string; api: AppAPI; locale: Locale; timeZone: string; onBack(): void }) {
   const t = (source: string) => translate(locale, source);
   const [report, setReport] = useState<TrendReport | null>(null);
   const [windowDays, setWindowDays] = useState(30);
@@ -143,7 +145,7 @@ export function TaskHealthDetailPage({ taskId, api, locale, onBack }: { taskId: 
       <div className="section-heading"><div><h2>{t("健康趋势详情")}</h2><p>{t("成功率只计算已经结束且结果明确的运行。")}</p></div></div>
       <dl className="task-health-stat-grid">
         <Stat label={t("完整成功率")} value={successRateText(window, locale)} prominent />
-        <Stat label={t("最近完整成功")} value={task.latestCompleteSuccessAt ? formatDateTime(task.latestCompleteSuccessAt, locale) : "—"} />
+        <Stat label={t("最近完整成功")} value={task.latestCompleteSuccessAt ? formatDateTime(task.latestCompleteSuccessAt, locale, timeZone) : "—"} />
         <Stat label={t("平均耗时")} value={formatDurationMetric(window.averageDurationMilliseconds, locale)} />
         <Stat label="P95" value={formatDurationMetric(window.p95DurationMilliseconds, locale)} />
         <Stat label={t("重试")} value={new Intl.NumberFormat(locale).format(window.retryCount)} />
@@ -159,15 +161,16 @@ export function TaskHealthDetailPage({ taskId, api, locale, onBack }: { taskId: 
       <div className="task-health-metric-key" aria-label={t("指标说明")}>
         <span><strong>{t("源数据量")}</strong>{t("本次运行扫描或处理的数据总量")}</span>
         <span><strong>{t("写入数据量")}</strong>{t("本次运行实际新增或传输的数据量")}</span>
-        <span><strong>{t("处理文件数")}</strong>{t("本次运行检查过的文件数量")}</span>
+        <span><strong>{t("范围内总文件数")}</strong>{t("本次运行实际发现且应处理的文件数量")}</span>
+        <span><strong>{t("实际备份或同步文件数")}</strong>{t("本次运行成功备份或同步的文件数量")}</span>
         <span><strong>{t("变化文件数")}</strong>{t("本次运行新增或修改的文件数量")}</span>
       </div>
       <div className="table-frame"><table className="task-health-run-table" aria-label={`${task.taskName}${t("的逐次运行指标")}`}>
-        <thead><tr>{["运行 ID", "开始时间", "状态", "触发", "失败原因", "源数据量", "写入数据量", "处理文件数", "变化文件数", "耗时", "重试"].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+        <thead><tr>{["运行 ID", "开始时间", "状态", "触发", "失败原因", "源数据量", "写入数据量", "范围内总文件数", "实际备份或同步文件数", "变化文件数", "耗时", "重试"].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
         <tbody>
           {runs.map((run) => <tr key={run.id}>
             <td><span className="technical-identifier">{run.id}</span></td>
-            <td>{formatDateTime(run.startedAt || run.occurredAt, locale)}</td>
+            <td>{formatDateTime(run.startedAt || run.occurredAt, locale, timeZone)}</td>
             <td><StatusIndicator value={run.status} locale={locale} /></td>
             <td>{triggerLabel(run.trigger, locale)}</td>
             <td className="task-health-run-error">{run.errorSummary
@@ -175,12 +178,13 @@ export function TaskHealthDetailPage({ taskId, api, locale, onBack }: { taskId: 
               : "—"}</td>
             <td>{formatBytesMetric(run.metrics?.bytesProcessed)}</td>
             <td>{formatBytesMetric(run.metrics?.bytesChanged)}</td>
+            <td>{formatIntegerMetric(run.metrics?.filesExpected, locale)}</td>
             <td>{formatIntegerMetric(run.metrics?.filesProcessed, locale)}</td>
             <td>{formatIntegerMetric(run.metrics?.filesChanged, locale)}</td>
             <td>{formatDurationMetric(run.metrics?.durationMilliseconds, locale)}</td>
             <td>{new Intl.NumberFormat(locale).format(Math.max((run.attemptCount || 1) - 1, 0))}</td>
           </tr>)}
-          {!runs.length && !loadingRuns && <tr><td className="empty-row" colSpan={11}>{t("所选周期内没有任务运行")}</td></tr>}
+          {!runs.length && !loadingRuns && <tr><td className="empty-row" colSpan={12}>{t("所选周期内没有任务运行")}</td></tr>}
         </tbody>
       </table></div>
       <div className="task-health-pagination" role="status" aria-live="polite">
@@ -188,7 +192,7 @@ export function TaskHealthDetailPage({ taskId, api, locale, onBack }: { taskId: 
         {nextCursor && window && <button className="secondary-button" type="button" disabled={loadingRuns} onClick={() => void loadRuns(window, nextCursor, true)}>{t("加载更早记录")}</button>}
       </div>
     </section>
-    {detail && <RunDetailDialog recordType="run" detail={detail} log={detailLog} error={detailError} locale={locale} onClose={() => { setDetail(null); setDetailLog(""); setDetailError(""); }} />}
+    {detail && <RunDetailDialog recordType="run" detail={detail} log={detailLog} error={detailError} locale={locale} timeZone={timeZone} onClose={() => { setDetail(null); setDetailLog(""); setDetailError(""); }} />}
   </div>;
 }
 
@@ -209,12 +213,6 @@ function excludedText(count: number, locale: Locale) {
 function triggerLabel(value: string | undefined, locale: Locale) {
   if (!value) return "—";
   return translate(locale, ({ manual: "手动触发", schedule: "计划调度", scheduled: "计划调度" } as Record<string, string>)[value] ?? "未知触发方式");
-}
-
-function formatDateTime(value: string, locale: Locale) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "medium" }).format(parsed);
 }
 
 function formatIntegerMetric(value: number | undefined, locale: Locale) {

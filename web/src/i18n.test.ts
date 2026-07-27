@@ -56,6 +56,8 @@ describe("interface locale", () => {
       "./app/RestoreVerificationPanel.tsx",
       "./app/TaskHealthTrends.tsx",
       "./app/TaskHealthDetailPage.tsx",
+      "./app/TaskScopePage.tsx",
+      "./app/LocalToolDetectionPanel.tsx",
       "./app/RunHistoryPage.tsx",
       "./app/RepositoryCapacityPanel.tsx",
       "./app/AgentFleet.tsx",

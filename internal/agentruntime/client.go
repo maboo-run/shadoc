@@ -76,6 +76,13 @@ func (c *HTTPControl) CompleteFilesystem(ctx context.Context, result agentprotoc
 	return c.post(ctx, "/filesystem/result", result, nil, http.StatusNoContent)
 }
 
+func (c *HTTPControl) UploadFilesystemScopeEntries(ctx context.Context, chunk agentprotocol.FilesystemScopeEntryChunk) error {
+	if err := chunk.ValidateFor(chunk.AgentID); err != nil {
+		return err
+	}
+	return c.post(ctx, "/filesystem/scope-entries", chunk, nil, http.StatusNoContent)
+}
+
 func (c *HTTPControl) ClaimRestore(ctx context.Context) (agentprotocol.Assignment, bool, error) {
 	var assignment agentprotocol.Assignment
 	status, err := c.postStatus(ctx, "/restore/claim", struct{}{}, &assignment)

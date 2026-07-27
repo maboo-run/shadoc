@@ -14,6 +14,7 @@ import (
 
 	"github.com/maboo-run/shadoc/internal/agentdeploy"
 	"github.com/maboo-run/shadoc/internal/appinstall"
+	"github.com/maboo-run/shadoc/internal/config"
 	"github.com/maboo-run/shadoc/internal/serviceinstall"
 	"github.com/maboo-run/shadoc/internal/store"
 )
@@ -59,6 +60,7 @@ func runManagedUpdateCommand() (bool, error) {
 	version := flags.String("version", "", "verified release version")
 	dataDir := flags.String("data-dir", "", "application data directory")
 	listen := flags.String("listen", "", "control service listen address")
+	serviceScopeValue := flags.String("service-scope", string(userServiceScope), "native service scope")
 	if err := flags.Parse(os.Args[2:]); err != nil || flags.NArg() != 0 {
 		return true, errors.New("invalid managed update arguments")
 	}
@@ -73,6 +75,10 @@ func runManagedUpdateCommand() (bool, error) {
 		return true, err
 	}
 	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return true, err
+	}
+	serviceScope, err := validateManagedUpdateScope(*serviceScopeValue, runtime.GOOS, os.Geteuid(), *dataDir, executable)
 	if err != nil {
 		return true, err
 	}
@@ -95,12 +101,32 @@ func runManagedUpdateCommand() (bool, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	releases := appinstall.NewGitHubRelease(client, appinstall.OfficialReleasesAPI, runtime.GOOS, runtime.GOARCH)
 	health := appinstall.NewHTTPHealthChecker(client, 250*time.Millisecond)
-	installer := appinstall.New(releases, serviceinstall.Manager{}, health, appinstall.Paths{
+	manager, err := serviceinstall.NewManager(serviceinstall.Scope(serviceScope), nil)
+	if err != nil {
+		return true, err
+	}
+	installer := appinstall.New(releases, manager, health, appinstall.Paths{
 		Binary: binary, Previous: binary + ".previous", DataDir: filepath.Clean(*dataDir), HealthURL: lifecycleHealthURL(*listen), Companions: agentdeploy.ArtifactFilenames(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 	return true, performManagedUpdate(ctx, database, installer, *operationID, *version, time.Now)
+}
+
+func validateManagedUpdateScope(value, goos string, euid int, dataDir, executable string) (serviceScope, error) {
+	scope := serviceScope(value)
+	if scope != userServiceScope && scope != systemServiceScope {
+		return "", errors.New("managed update service scope is invalid")
+	}
+	if scope == systemServiceScope {
+		if goos != "linux" || euid != 0 {
+			return "", errors.New("system managed update requires root on Linux")
+		}
+		if filepath.Clean(dataDir) != config.LinuxSystemDataDir || filepath.Clean(executable) != filepath.Join(config.LinuxSystemDataDir, "app", "shadoc") {
+			return "", errors.New("system managed update must use the fixed root installation")
+		}
+	}
+	return scope, nil
 }
 
 func performManagedUpdate(ctx context.Context, persistence managedUpdatePersistence, installer managedApplicationInstaller, operationID, version string, now func() time.Time) error {

@@ -45,6 +45,21 @@ func TestDryRunUsesTheExactRealArgumentsPlusDryRun(t *testing.T) {
 	}
 }
 
+func TestSetProgramAppliesToLaterRuns(t *testing.T) {
+	executor := &sequenceExecutor{}
+	engine := New("rsync", executor, t.TempDir())
+	engine.SetProgram("/opt/rsync/bin/rsync")
+	raw, _ := json.Marshal(Definition{
+		SourcePath: "/mnt/source/", Destination: Destination{Kind: DestinationLocal, Path: "/mnt/target"},
+	})
+	if _, err := engine.Run(context.Background(), execution.Assignment{Definition: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if got := executor.specs[0].Program; got != "/opt/rsync/bin/rsync" {
+		t.Fatalf("program=%q", got)
+	}
+}
+
 func TestBuildArgumentsSynchronizesSourceDirectoryContents(t *testing.T) {
 	args := buildArguments(Definition{SourcePath: "/mnt/source"}, "/mnt/target", "")
 	if got, want := args[len(args)-2], "/mnt/source"+string(filepath.Separator); got != want {
@@ -84,10 +99,35 @@ func TestRunParsesControlledStatsIntoComparableMetrics(t *testing.T) {
 	if !slices.Contains(executor.specs[0].Args, "--stats") || executor.specs[0].Env["LC_ALL"] != "C" {
 		t.Fatalf("spec=%+v", executor.specs[0])
 	}
-	for key, expected := range map[string]any{"filesProcessed": int64(12), "filesChanged": int64(1), "bytesProcessed": int64(8192), "bytesChanged": int64(1024), "durationMilliseconds": int64(1750), "regularFilesTransferred": int64(3)} {
+	for key, expected := range map[string]any{"itemsScanned": int64(12), "filesExpected": int64(10), "filesProcessed": int64(10), "filesFailed": int64(0), "filesChanged": int64(1), "bytesProcessed": int64(8192), "bytesChanged": int64(1024), "durationMilliseconds": int64(1750), "regularFilesTransferred": int64(3)} {
 		if outcome.Summary[key] != expected {
 			t.Fatalf("summary[%s]=%#v want %#v; summary=%+v", key, outcome.Summary[key], expected, outcome.Summary)
 		}
+	}
+}
+
+func TestRunCountsAllNonDirectoryEntriesAndKeepsEmptySuccessAtZeroEqualsZero(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		line   string
+		expect int64
+	}{
+		{name: "symlink is a source file", line: "Number of files: 4 (reg: 1, dir: 2, link: 1)", expect: 2},
+		{name: "empty directory", line: "Number of files: 1 (dir: 1)", expect: 0},
+		{name: "empty source statistic", line: "Number of files: 0", expect: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &sequenceExecutor{result: command.Result{ExitCode: 0, Stdout: test.line}}
+			engine := New("rsync", executor, t.TempDir())
+			raw, _ := json.Marshal(Definition{SourcePath: "/mnt/source/", Destination: Destination{Kind: DestinationLocal, Path: "/mnt/target"}})
+			outcome, err := engine.Run(t.Context(), execution.Assignment{Definition: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.Summary["filesExpected"] != test.expect || outcome.Summary["filesProcessed"] != test.expect || outcome.Summary["filesFailed"] != int64(0) {
+				t.Fatalf("summary=%+v", outcome.Summary)
+			}
+		})
 	}
 }
 

@@ -60,7 +60,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAgentJSON(w, http.StatusOK, assignment)
 	case "/result":
 		var input agentprotocol.Result
-		if json.NewDecoder(r.Body).Decode(&input) != nil || input.AgentID != agentID || input.Version != agentprotocol.Version || input.AssignmentID == "" || (input.Status != "succeeded" && input.Status != "failed") {
+		if json.NewDecoder(r.Body).Decode(&input) != nil || input.AgentID != agentID || input.Version != agentprotocol.Version || input.AssignmentID == "" || (input.Status != "succeeded" && input.Status != "partial" && input.Status != "failed") {
 			http.Error(w, "invalid result", http.StatusUnprocessableEntity)
 			return
 		}
@@ -88,6 +88,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := h.service.CompleteFilesystem(r.Context(), input); err != nil {
 			http.Error(w, "unable to complete filesystem request", http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case "/filesystem/scope-entries":
+		var input agentprotocol.FilesystemScopeEntryChunk
+		if json.NewDecoder(r.Body).Decode(&input) != nil || input.ValidateFor(agentID) != nil {
+			http.Error(w, "invalid filesystem scope entries", http.StatusUnprocessableEntity)
+			return
+		}
+		if err := h.service.AppendFilesystemScopeEntries(r.Context(), agentID, input); err != nil {
+			http.Error(w, "unable to append filesystem scope entries", http.StatusConflict)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

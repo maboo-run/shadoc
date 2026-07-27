@@ -349,6 +349,7 @@ CREATE TABLE IF NOT EXISTS runs (
     raw_log TEXT NOT NULL DEFAULT '',
     raw_log_expired INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER,
+    files_expected INTEGER,
     files_processed INTEGER,
     files_changed INTEGER,
     bytes_processed INTEGER,
@@ -797,7 +798,7 @@ func (s *Store) ensureRunMetricColumns(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	for _, column := range []string{"duration_ms", "files_processed", "files_changed", "bytes_processed", "bytes_changed"} {
+	for _, column := range []string{"duration_ms", "files_expected", "files_processed", "files_changed", "bytes_processed", "bytes_changed"} {
 		if present[column] {
 			continue
 		}
@@ -1036,6 +1037,14 @@ func (s *Store) ensureAgentRemoteHosts(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN remote_host_id TEXT REFERENCES remote_hosts(id) ON DELETE SET NULL`); err != nil {
 			return fmt.Errorf("add Agent remote host binding: %w", err)
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE agents
+		SET remote_host_id=NULL
+		WHERE remote_host_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM remote_hosts WHERE remote_hosts.id=agents.remote_host_id)
+	`); err != nil {
+		return fmt.Errorf("clear missing Agent remote host bindings: %w", err)
 	}
 
 	type deployment struct{ agentID, detail string }

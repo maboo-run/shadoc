@@ -128,6 +128,69 @@ func TestServiceDeploysAndWaitsForHeartbeat(t *testing.T) {
 	if storage.boundAgentID != "source-1" || storage.boundHostID != "host-1" {
 		t.Fatalf("Agent host binding=%q/%q", storage.boundAgentID, storage.boundHostID)
 	}
+	if remote.reenrollmentPrepared {
+		t.Fatal("active Agent credentials were replaced during deployment")
+	}
+}
+
+func TestServicePreparesRevokedAgentForFreshEnrollment(t *testing.T) {
+	now := time.Now().UTC()
+	revokedAt := now.Add(-time.Minute)
+	remote := &deploymentRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
+	storage := &deploymentStore{
+		host: domain.RemoteHost{ID: "host-1", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "source.example ssh-ed25519 AAAA"},
+		agents: []store.AgentRecord{{
+			ID: "source-1", Status: "revoked", RevokedAt: &revokedAt,
+		}},
+	}
+	listCalls := 0
+	storage.listAgentsHook = func(records []store.AgentRecord) []store.AgentRecord {
+		listCalls++
+		result := append([]store.AgentRecord(nil), records...)
+		if listCalls > 1 {
+			result[0].Status = "online"
+			result[0].RevokedAt = nil
+			result[0].LastHeartbeatAt = &now
+		}
+		return result
+	}
+	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
+	service.pollInterval = time.Millisecond
+
+	if _, err := service.Deploy(context.Background(), DeployRequest{HostID: "host-1", AgentID: "source-1", ServiceURL: "https://service.example:9443"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !remote.reenrollmentPrepared {
+		t.Fatal("revoked Agent credentials were preserved instead of preparing a fresh enrollment")
+	}
+	if !remote.activatedAfterReenrollment {
+		t.Fatal("Agent service was activated before revoked credentials were cleared")
+	}
+}
+
+func TestServicePreparesNewAgentForFreshEnrollment(t *testing.T) {
+	now := time.Now().UTC()
+	remote := &deploymentRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
+	storage := &deploymentStore{
+		host: domain.RemoteHost{ID: "host-1", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "source.example ssh-ed25519 AAAA"},
+	}
+	listCalls := 0
+	storage.listAgentsHook = func([]store.AgentRecord) []store.AgentRecord {
+		listCalls++
+		if listCalls == 1 {
+			return nil
+		}
+		return []store.AgentRecord{{ID: "source-1", Status: "online", LastHeartbeatAt: &now}}
+	}
+	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
+	service.pollInterval = time.Millisecond
+
+	if _, err := service.Deploy(context.Background(), DeployRequest{HostID: "host-1", AgentID: "source-1", ServiceURL: "https://service.example:9443"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !remote.reenrollmentPrepared {
+		t.Fatal("new managed deployment preserved unknown remote credentials instead of preparing a fresh enrollment")
+	}
 }
 
 func TestServiceRollsBackWhenActivationFails(t *testing.T) {
@@ -257,12 +320,13 @@ func (d deploymentDialer) Dial(context.Context, Target) (DeploymentRemote, error
 }
 
 type deploymentRemote struct {
-	platform                      Platform
-	files                         map[RemoteFile][]byte
-	commands                      []string
-	activated, finalized, cleaned bool
-	activateErr                   error
-	finalizeErr                   error
+	platform                                         Platform
+	files                                            map[RemoteFile][]byte
+	commands                                         []string
+	activated, finalized, cleaned                    bool
+	reenrollmentPrepared, activatedAfterReenrollment bool
+	activateErr                                      error
+	finalizeErr                                      error
 }
 
 func (r *deploymentRemote) Probe(context.Context) (Platform, error) { return r.platform, nil }
@@ -273,8 +337,13 @@ func (r *deploymentRemote) Upload(_ context.Context, file RemoteFile, content []
 	r.files[file] = append([]byte(nil), content...)
 	return nil
 }
+func (r *deploymentRemote) PrepareReenrollment(context.Context, Platform) error {
+	r.reenrollmentPrepared = true
+	return nil
+}
 func (r *deploymentRemote) Activate(context.Context, Platform) error {
 	r.activated = true
+	r.activatedAfterReenrollment = r.reenrollmentPrepared
 	return r.activateErr
 }
 func (r *deploymentRemote) Finalize(context.Context, Platform) error {

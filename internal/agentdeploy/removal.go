@@ -69,8 +69,11 @@ func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report S
 			break
 		}
 	}
-	if agent.ID == "" || agent.RemoteHostID == "" {
+	if agent.ID == "" {
 		return result, sql.ErrNoRows
+	}
+	if agent.RemoteHostID == "" {
+		return result, errors.New("Agent is not managed through a remote host")
 	}
 	result.HostID = agent.RemoteHostID
 	hosts, err := s.store.ListRemoteHosts(ctx)
@@ -85,7 +88,7 @@ func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report S
 		}
 	}
 	if host.ID == "" {
-		return result, sql.ErrNoRows
+		return result, errManagedRemoteHostMissing
 	}
 	secretID, err := s.store.RemoteHostPrivateKeySecretID(ctx, host.ID)
 	if err != nil {

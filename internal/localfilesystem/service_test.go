@@ -131,3 +131,28 @@ func TestServiceActsAsDynamicScopePreviewEngine(t *testing.T) {
 		t.Fatal("scope preview used stale allowed roots")
 	}
 }
+
+func TestServiceStreamsScopeInventoryWithoutExposingPathsOutsideCurrentRoots(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "photo.jpg"), []byte("photo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(t.Context(), &metadataStore{}, "posix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveSettings(t.Context(), []string{root}); err != nil {
+		t.Fatal(err)
+	}
+	var entries []agentfilesystem.ScopeEntry
+	summary, err := service.PreviewScope(t.Context(), root, nil, 10, func(entry agentfilesystem.ScopeEntry) error {
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil || summary.IncludedFiles != 1 || len(entries) != 1 || entries[0].Path != "photo.jpg" {
+		t.Fatalf("summary=%+v entries=%+v err=%v", summary, entries, err)
+	}
+	if _, err := service.PreviewScope(t.Context(), t.TempDir(), nil, 10, nil); err == nil {
+		t.Fatal("inventory escaped current allowed roots")
+	}
+}

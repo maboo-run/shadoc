@@ -60,12 +60,25 @@ type Manager struct {
 	listen      func(string, string) (net.Listener, error)
 	remover     *agentdeploy.RemovalService
 	upgrader    *agentdeploy.UpgradeService
+	scopeSink   agentcontrol.FilesystemScopeSink
 
 	configureMu sync.Mutex
 	mu          sync.RWMutex
 	settings    Settings
 	instance    *instance
 	lastError   string
+}
+
+// SetFilesystemScopeSink connects the short-lived source inventory catalog to
+// every current and future Agent HTTPS control-plane instance.
+func (m *Manager) SetFilesystemScopeSink(sink agentcontrol.FilesystemScopeSink) {
+	m.mu.Lock()
+	m.scopeSink = sink
+	active := m.instance
+	m.mu.Unlock()
+	if active != nil {
+		active.control.SetFilesystemScopeSink(sink)
+	}
 }
 
 func New(storage *store.Store, secrets *secret.Manager, dataDir, artifactDir string, now func() time.Time) *Manager {
@@ -262,6 +275,10 @@ func (m *Manager) build(settings Settings) (*instance, error) {
 	}
 	control := agentcontrol.NewWithStore(authority, m.store, m.now)
 	control.SetAssignmentHydrator(agentassignment.New(m.store, m.secrets).Build)
+	m.mu.RLock()
+	scopeSink := m.scopeSink
+	m.mu.RUnlock()
+	control.SetFilesystemScopeSink(scopeSink)
 	deployer := agentdeploy.NewService(m.store, m.secrets, control, agentdeploy.ArtifactResolver{Dir: m.artifactDir}, agentdeploy.SSHDialer{}, m.now)
 	server := &http.Server{
 		Addr: address, Handler: agentcontrol.NewHandler(control),

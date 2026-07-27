@@ -54,7 +54,7 @@ Linux 控制服务使用 systemd user service，macOS 使用 LaunchAgent。管�
 curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.sh | sh
 ```
 
-安装脚本会检测系统与架构，从同一个 GitHub Release 下载控制服务、全部平台 Agent 和 `SHA256SUMS`，逐个验证 SHA-256 后调用内置安装命令。它不会安装系统软件包，也不会把管理页面暴露到公网。
+安装脚本会检测系统与架构，从同一个 GitHub Release 下载控制服务、全部平台 Agent 和 `SHA256SUMS`，逐个验证 SHA-256 后调用内置安装命令。安装完成后，控制服务会在受管程序旁保存权限为 `0600` 的本地完整性记录 `shadoc.sha256`；后续更新会同步刷新该记录。它不会安装系统软件包，也不会把管理页面暴露到公网。
 
 如果希望先检查脚本：
 
@@ -85,6 +85,36 @@ curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.
   | SHADOC_DATA_DIR=/srv/shadoc SHADOC_LISTEN=127.0.0.1:9090 sh
 ```
 
+### Linux root system 服务
+
+只有确实需要读取普通用户无法访问的源文件时，才应把控制服务作为 root 运行。root 实例可读取和修改的系统范围更大；管理页面中的备份任务也会继承这项权限。
+
+全新安装为 Linux root systemd 服务：
+
+```bash
+curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.sh \
+  | sudo env SHADOC_ALLOW_ROOT=1 sh
+```
+
+root 安装固定使用 `/var/lib/shadoc`，不接受自定义 `SHADOC_DATA_DIR`。受管程序固定为 `/var/lib/shadoc/app/shadoc`，systemd 单元固定为 `/etc/systemd/system/shadoc.service`；两者都必须由 root 所有且不能由组或其他用户写入。页面不会要求、接收或保存 sudo 密码。
+
+把已有的 Linux 用户实例迁移为 root 服务：
+
+```bash
+SHADOC_BIN="${XDG_CONFIG_HOME:-$HOME/.config}/shadoc/app/shadoc"
+sudo "$SHADOC_BIN" migrate-to-root
+```
+
+迁移不会访问网络或重新下载程序。它先用安装或更新时留下的本地 `shadoc.sha256` 重新计算并核对当前受管程序；记录缺失、格式错误或校验不一致都会在停止旧服务前直接拒绝迁移。这个离线校验主要发现程序损坏或程序被单独替换；因为程序和记录都属于原普通用户，它不承诺抵御两者被同时篡改的本地账号攻击。
+
+校验通过后，迁移命令从 `SUDO_USER`/`SUDO_UID` 确认原用户，停止并校验 Shadoc 自己生成且没有 drop-in 的 user systemd 服务，把数据以 root 所有的安全权限复制到暂存目录，校验 SQLite、秘密库密钥和新程序后再原子切换。同一时间只允许一个迁移进程。新 root 服务通过 systemd 状态和 `/api/health` 检查后，命令会永久删除原用户服务定义和原数据目录。健康确认前失败会删除 root 暂存并恢复原用户实例；健康确认后的清理失败不会回滚健康的 root 实例，可从原 sudo 用户重试：
+
+```bash
+sudo /var/lib/shadoc/app/shadoc migrate-to-root
+```
+
+迁移会拒绝符号链接、特殊文件、来源不明的 systemd 指令或 drop-in、已有 root 实例以及不安全的目录所有权。原用户目录中的受管 Restic 不会作为 root 可执行文件迁移；迁移后会优先使用系统 Restic，也可以在兼容性中心重新安装受管 Restic。建议迁移前额外保留一份控制面恢复包。
+
 ## 快速开始
 
 1. 打开 [http://127.0.0.1:8585](http://127.0.0.1:8585)。
@@ -98,6 +128,12 @@ curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.
 
 每个 Restic 任务独占一个仓库。不要把多个不相关数据源放进同一个任务仓库。
 
+任务编辑页只保留保护范围摘要、当前规则数量和“查看并调整保护范围”入口，不再重复展开完整规则及排除建议。点击入口或任务列表中的“保护范围”，会进入当前任务的独立范围页面，返回时仍回到该任务编辑页。页面先扫描源目录，再分别展示目录内发现的总文件数、将保护、已排除和需关注数量；“全部”“将保护”“需关注”“已排除”和“排除规则”标签集中承载范围核对与调整。“排除规则”内可以按行编辑规则、查看当前预览影响并采用可选建议。文件按目录逐层浏览：当前层只显示直接子项，一个文件夹代表其全部内容；若其中存在排除或不可读项，会标记为“部分保护”，进入文件夹后才展示下一层。搜索只筛选当前层级。
+
+清单中的文件或文件夹可暂存为“排除”，已排除项也可“恢复保护”。点“预览规则效果”会使用当前草稿重新扫描，并在原页面直接更新统计、目录清单和规则影响；这一步只生成 15 分钟有效的临时预览，不会修改任务。确认结果后再点“保存规则”才会写入任务，若继续修改规则、离开页面或预览过期，未保存草稿均不会生效。恢复由通配规则排除的项目会移除命中的整条规则，因此同一规则覆盖的其他内容也会恢复保护，页面会明确提醒。逐项清单只保存相对路径并支持服务端分页；单次最多扫描 100,000 个条目，达到上限时会明确标记统计不完整。临时目录权限为 `0700`、清单文件为 `0600`，绝对源路径不会写入清单。远程任务由新版 Agent 通过现有 mTLS 通道分批上传相对路径；旧 Agent 仍返回范围汇总，页面会提示先升级 Agent 才能逐项查看。
+
+目录运行的记录会把“范围内总文件”与“实际备份或同步文件”分开显示。前者是该次运行发现且应处理的文件总数，后者是实际成功处理的文件数；同一次 Restic 运行同时取得两个值且不相等时，即使创建了快照也会判定为“部分成功”，相等且没有其他错误时才是完整成功。这样权限不足等问题不会再被变化文件数或已创建快照掩盖。本机和 Agent 任务遵循同一判定；Agent 会先保护部分快照再回传结果，保护失败时仓库会暂停新备份，待下一次运行先完成保护。
+
 ## 依赖项
 
 | 工具 | 什么时候需要 | 要求与安装方式 |
@@ -108,9 +144,9 @@ curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.
 | `pg_dump`、`pg_restore` | PostgreSQL 逻辑备份与直接恢复 | 安装与目标数据库兼容的官方客户端；仅恢复为 dump 文件时不需要 `pg_restore` |
 | SSH/SFTP 服务 | SFTP 仓库、SSH rsync、远程 Agent 部署 | 必须取得并确认真实主机密钥；Shadoc 不会静默接受未知或变化的密钥 |
 
-如果终端中能执行 `restic`，但初始化仍提示 Restic 不存在，通常是 macOS 的 LaunchAgent 或其他后台服务没有继承终端 `PATH`。控制服务会优先使用受管 Restic，其次探测服务 `PATH` 和常见系统安装位置；仍未找到时，请在“兼容性中心”安装 Restic 后重启控制服务。仓库初始化报错中的 Restic 可执行文件问题会与仓库目录问题分开提示。
+如果终端中能执行 `restic`，但初始化仍提示 Restic 不存在，通常是 macOS 的 LaunchAgent 或其他后台服务没有继承终端 `PATH`。控制服务会优先使用受管 Restic，其次探测服务 `PATH` 和常见系统安装位置；仍未找到时，请在“兼容性中心”安装受管 Restic。仓库初始化报错中的 Restic 可执行文件问题会与仓库目录问题分开提示。
 
-控制服务启动时会集中探测并固定本机 Restic/rsync 的可执行路径和版本；兼容性中心、诊断导出和实际任务复用同一结果，不会因为打开不同页面而重复探测。安装或更换工具后重启控制服务即可重新建立结果。远程 Agent 的工具版本，以及每个数据库连接对应的官方客户端，仍由各自节点/连接单独验证。
+控制服务启动时会集中探测本机 Restic、rsync 和数据库客户端的可执行路径与版本；兼容性中心、诊断导出和实际任务复用同一结果，不会因为打开不同页面而重复探测。安装或更换工具后，可在“兼容性中心”点击“重新检测本机工具”，无需重启控制服务。若后台服务的 `PATH` 中仍找不到客户端，可展开“手动指定工具路径”，填写经过身份和版本校验的绝对路径；留空并保存即可恢复自动探测。手动设置的 MySQL 客户端会作为新建或重新测试数据库连接的自动默认值，rsync 路径会立即用于后续本机 rsync 运行。远程 Agent 的工具版本仍由对应节点单独验证。
 
 数据库连接编辑器的常用配置只需要名称、数据库类型/用途、连接地址、账号、密码和 TLS 模式。页面的“测试连接”使用内置 Go 驱动检查网络、TLS、认证和当前用途权限；实际备份与恢复仍调用 `mysqldump`/`mysql` 或 `pg_dump`/`pg_restore`。控制服务会自动从系统 `PATH` 探测所需官方客户端，只有探测不到或需要修复旧路径时才需要在“高级设置”中填写绝对路径；清空已填写路径后保存即可重新自动探测。任务预检和运行前也会修复历史上把同一个导出工具保存到两个角色的明显错误，优先在导出工具同目录寻找正确的管理客户端；仍找不到时需要安装或填写该客户端。MySQL 的“优先使用 TLS”使用客户端默认兼容模式，避免 MariaDB 或旧版 MySQL 客户端因不支持 `--ssl-mode` 而失败。Shadoc 不会自动安装数据库客户端。
 
@@ -127,6 +163,7 @@ curl -fsSL https://github.com/maboo-run/shadoc/releases/latest/download/install.
 - Linux：`$XDG_CONFIG_HOME/shadoc/app/shadoc`；未设置 `XDG_CONFIG_HOME` 时为 `$HOME/.config/shadoc/app/shadoc`。
 - macOS：`$HOME/Library/Application Support/shadoc/app/shadoc`。
 - 自定义安装：`$SHADOC_DATA_DIR/app/shadoc`。
+- Linux root system 服务：`/var/lib/shadoc/app/shadoc`。
 
 以下示例先把实际路径保存为 `SHADOC_BIN`：
 
@@ -151,6 +188,16 @@ SHADOC_BIN="${XDG_CONFIG_HOME:-$HOME/.config}/shadoc/app/shadoc"
 
 `stop` 只停止控制服务，不删除任务、秘密、运行记录或备份仓库。
 
+Linux root system 服务的命令需要 sudo 和 `--system`：
+
+```bash
+sudo /var/lib/shadoc/app/shadoc status --system
+sudo /var/lib/shadoc/app/shadoc restart --system
+sudo /var/lib/shadoc/app/shadoc stop --system
+sudo /var/lib/shadoc/app/shadoc start --system
+sudo /var/lib/shadoc/app/shadoc reset-admin-password --system
+```
+
 当管理页面监听非本机地址且管理员尚未创建时，`start` 会直接打印一个一次性 LAN 初始化令牌。令牌在重启后保持不变，并在管理员创建成功后从数据目录删除；从局域网首次打开管理页面时需要输入该令牌。本机回环地址初始化不需要令牌。
 
 如果在创建管理员前忘记或关闭了令牌输出，请带上安装时相同的 `SHADOC_DATA_DIR` 和 `SHADOC_LISTEN` 配置重新运行 `start`，即可再次显示同一个令牌；如果令牌文件意外丢失，服务会在这次启动时生成一个新令牌。例如：
@@ -161,9 +208,13 @@ SHADOC_DATA_DIR=/srv/shadoc SHADOC_LISTEN=0.0.0.0:8585 "$SHADOC_BIN" start
 
 令牌只用于首次初始化，请勿通过不受信任的渠道发送。
 
-远程 Agent 的托管升级会先在远端固定暂存路径执行 `shadoc-agent --version`，确认制品版本与控制服务目标版本完全一致后才切换服务；页面会保留成功或失败的操作结果。如果提示暂存制品仍是 `SNAPSHOT` 或其他旧版本，请重新生成同一版本的完整制品并重启控制服务，例如 `make build VERSION=0.1.2`，不要重复提交同一个旧制品。
+远程 Agent 的托管升级会先在远端固定暂存路径执行 `shadoc-agent --version`，确认制品版本与控制服务目标版本完全一致后才切换服务；页面会保留成功或失败的操作结果。如果提示暂存制品仍是 `SNAPSHOT` 或其他旧版本，请重新生成同一版本的完整制品并重启控制服务，例如 `make build VERSION=0.1.3`，不要重复提交同一个旧制品。
 
 Agent 节点卡片内的“主动探测心跳”点击后会直接启动，不再弹出确认框；系统会等待该节点当前任务结束，通过固定 SSH 服务命令安全重启 Agent，并等待新的认证心跳。探测期间原按钮显示“探测中”动画并保持禁用，完成或失败结果通过页面提示展示；主动探测不会升级 Agent 或修改备份工具。升级和工具探测的进度与终态仍显示在对应 Agent 节点内。
+
+删除托管 Agent 关联的远程主机连接时，控制服务会解除该 Agent 的失效绑定；升级后启动时也会修复历史遗留的悬空绑定。由于删除连接后已无法通过 SSH 安全卸载远端进程，页面不会再对这类 Agent 发起心跳探测、升级或远程卸载：请先在源端停止并清理旧 Agent，随后在页面撤销旧凭据，再选择新的远程主机并使用完全相同的 Agent ID 重新部署。不要让旧进程与新部署同时使用同一 Agent ID 运行。
+
+已撤销或已卸载的 Agent 可以在节点详情中删除管理记录。删除前页面会预览任务引用和进行中的 Agent 操作；存在依赖、凭据仍有效或预览后身份状态发生变化时，服务端会拒绝删除。删除只移除 Agent 身份及证书生命周期记录，不会停止远端进程或删除远端文件，已有审计与操作记录仍会保留。之后执行托管部署时，控制服务会清理固定 Agent 数据目录中的旧身份文件并强制使用新的一次性令牌注册，避免遗留证书跳过注册。
 
 ## 升级与卸载
 
@@ -171,6 +222,12 @@ Agent 节点卡片内的“主动探测心跳”点击后会直接启动，不�
 
 ```bash
 "$SHADOC_BIN" update-app
+```
+
+Linux root system 服务使用：
+
+```bash
+sudo /var/lib/shadoc/app/shadoc update-app --system
 ```
 
 升级到指定稳定版本：
@@ -187,6 +244,12 @@ Agent 节点卡片内的“主动探测心跳”点击后会直接启动，不�
 "$SHADOC_BIN" uninstall-app
 ```
 
+卸载 Linux root system 服务但保留 `/var/lib/shadoc` 中的数据：
+
+```bash
+sudo /var/lib/shadoc/app/shadoc uninstall-app --system
+```
+
 永久删除应用数据需要显式参数和交互确认：
 
 ```bash
@@ -199,7 +262,7 @@ Agent 节点卡片内的“主动探测心跳”点击后会直接启动，不�
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `SHADOC_DATA_DIR` | SQLite、秘密库、受管工具和运行数据目录 | 平台用户配置目录下的 `shadoc` |
+| `SHADOC_DATA_DIR` | SQLite、秘密库、受管工具和运行数据目录；Linux root system 服务固定为 `/var/lib/shadoc` | 平台用户配置目录下的 `shadoc` |
 | `SHADOC_LISTEN` | 管理页面监听地址 | `127.0.0.1:8585` |
 | `SHADOC_AGENT_SERVICE` | Agent 连接的控制服务 HTTPS 地址 | 无 |
 | `SHADOC_AGENT_DATA_DIR` | Agent 证书与运行目录 | `./agent-data` |

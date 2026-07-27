@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/maboo-run/shadoc/internal/agentprotocol"
 	"github.com/maboo-run/shadoc/internal/command"
 )
 
@@ -39,7 +40,7 @@ func TestShadocAgentEnvironmentTakesPrecedenceOverLegacyName(t *testing.T) {
 
 func TestFilesystemCapabilitiesAdvertiseScopePreview(t *testing.T) {
 	capabilities := filesystemCapabilities("windows")
-	for _, expected := range []string{"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview", "filesystem-restore-target", "path-style:windows"} {
+	for _, expected := range []string{"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview", agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", "path-style:windows"} {
 		if !slices.Contains(capabilities, expected) {
 			t.Fatalf("capabilities=%v missing %q", capabilities, expected)
 		}

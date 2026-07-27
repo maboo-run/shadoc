@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { translate, type Locale } from "../i18n";
 import { StatusIndicator } from "./StatusIndicator";
+import { formatDateTime } from "./dateTime";
 
 type SnapshotSummary = {
   id: string;
@@ -54,6 +55,7 @@ type SnapshotBrowserProps = {
   selectedIncludes: string[];
   onSelectedIncludesChange(value: string[]): void;
   locale: Locale;
+  timeZone: string;
 };
 
 export function SnapshotBrowser({ api, repositoryID, snapshotID, sourcePath, snapshots, cachedPage, onPageChange, selectedIncludes, onSelectedIncludesChange, locale }: SnapshotBrowserProps) {
@@ -158,7 +160,7 @@ export function SnapshotBrowser({ api, repositoryID, snapshotID, sourcePath, sna
   </div>;
 }
 
-export function SnapshotDiffPanel({ api, repositoryID, snapshotID, sourcePath, snapshots, locale }: Omit<SnapshotBrowserProps, "selectedIncludes" | "onSelectedIncludesChange">) {
+export function SnapshotDiffPanel({ api, repositoryID, snapshotID, sourcePath, snapshots, locale, timeZone }: Omit<SnapshotBrowserProps, "selectedIncludes" | "onSelectedIncludesChange">) {
   const t = (source: string) => translate(locale, source);
   const [baseline, setBaseline] = useState("");
   const [diff, setDiff] = useState<SnapshotDiff | null>(null);
@@ -183,7 +185,7 @@ export function SnapshotDiffPanel({ api, repositoryID, snapshotID, sourcePath, s
     <div className="snapshot-diff-controls">
       <label>{t("对比基线快照")}<select value={baseline} onChange={(event) => { setBaseline(event.target.value); setDiff(null); }}>
         <option value="">{t("请选择较早快照")}</option>
-        {snapshots.filter((snapshot) => snapshot.id !== snapshotID).map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.id}{snapshot.time ? ` · ${new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(new Date(snapshot.time))}` : ""}</option>)}
+        {snapshots.filter((snapshot) => snapshot.id !== snapshotID).map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.id}{snapshot.time ? ` · ${formatDateTime(snapshot.time, locale, timeZone, { dateStyle: "short", timeStyle: "short" })}` : ""}</option>)}
       </select></label>
       <button type="button" className="secondary-button" disabled={!baseline || loading} onClick={() => void compare()}>{t(loading ? "正在比较…" : "比较快照")}</button>
     </div>

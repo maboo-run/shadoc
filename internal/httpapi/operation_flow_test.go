@@ -72,13 +72,18 @@ func TestInitializeReturnsOperationBeforeWorkCompletes(t *testing.T) {
 	go func() {
 		responseChannel <- requestJSON(t, srv, http.MethodPost, "/api/repositories/repo/initialize", map[string]any{}, cookie)
 	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("background operation did not start")
+	}
 	var queued *httptest.ResponseRecorder
 	select {
 	case queued = <-responseChannel:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(10 * time.Second):
 		close(release)
-		synchronous := <-responseChannel
-		t.Fatalf("handler waited for long operation: status=%d body=%s", synchronous.Code, synchronous.Body.String())
+		t.Fatal("handler waited for long operation")
 	}
 	if queued.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", queued.Code, queued.Body.String())
@@ -89,11 +94,6 @@ func TestInitializeReturnsOperationBeforeWorkCompletes(t *testing.T) {
 	}
 	if err := json.Unmarshal(queued.Body.Bytes(), &response); err != nil || response.OperationID == "" || response.Status != "queued" {
 		t.Fatalf("queued response=%+v err=%v", response, err)
-	}
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("background operation did not start")
 	}
 	close(release)
 	operation := waitForOperation(t, srv, cookie, response.OperationID, "success")

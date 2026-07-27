@@ -285,6 +285,7 @@ type RunRecord struct {
 
 type RunMetrics struct {
 	DurationMilliseconds *int64 `json:"durationMilliseconds,omitempty"`
+	FilesExpected        *int64 `json:"filesExpected,omitempty"`
 	FilesProcessed       *int64 `json:"filesProcessed,omitempty"`
 	FilesChanged         *int64 `json:"filesChanged,omitempty"`
 	BytesProcessed       *int64 `json:"bytesProcessed,omitempty"`
@@ -338,13 +339,14 @@ func (s *Store) FinishRun(ctx context.Context, id, status string, finished time.
 	}
 	metrics := RunMetrics{
 		DurationMilliseconds: &duration,
+		FilesExpected:        summaryMetric(summary, "filesExpected"),
 		FilesProcessed:       summaryMetric(summary, "filesProcessed"),
 		FilesChanged:         summaryMetric(summary, "filesChanged"),
 		BytesProcessed:       summaryMetric(summary, "bytesProcessed"),
 		BytesChanged:         summaryMetric(summary, "bytesChanged"),
 	}
 	encoded, _ := json.Marshal(summary)
-	_, err = s.db.ExecContext(ctx, `UPDATE runs SET status=?,finished_at=?,attempt_count=?,snapshot_id=?,summary_json=?,raw_log=?,raw_log_expired=0,duration_ms=?,files_processed=?,files_changed=?,bytes_processed=?,bytes_changed=? WHERE id=?`, status, formatTime(finished), attempts, nullString(snapshot), string(encoded), rawLog, nullableMetric(metrics.DurationMilliseconds), nullableMetric(metrics.FilesProcessed), nullableMetric(metrics.FilesChanged), nullableMetric(metrics.BytesProcessed), nullableMetric(metrics.BytesChanged), id)
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET status=?,finished_at=?,attempt_count=?,snapshot_id=?,summary_json=?,raw_log=?,raw_log_expired=0,duration_ms=?,files_expected=?,files_processed=?,files_changed=?,bytes_processed=?,bytes_changed=? WHERE id=?`, status, formatTime(finished), attempts, nullString(snapshot), string(encoded), rawLog, nullableMetric(metrics.DurationMilliseconds), nullableMetric(metrics.FilesExpected), nullableMetric(metrics.FilesProcessed), nullableMetric(metrics.FilesChanged), nullableMetric(metrics.BytesProcessed), nullableMetric(metrics.BytesChanged), id)
 	return err
 }
 
@@ -401,7 +403,7 @@ func (s *Store) LatestSuccessfulRun(ctx context.Context, taskID string) (RunReco
 
 func (s *Store) TaskRunHealth(ctx context.Context) (map[string]TaskRunHealth, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id,task_id,COALESCE(plan_id,''),trigger,status,started_at,finished_at,attempt_count,COALESCE(snapshot_id,''),summary_json,raw_log,raw_log_expired,duration_ms,files_processed,files_changed,bytes_processed,bytes_changed
+		SELECT id,task_id,COALESCE(plan_id,''),trigger,status,started_at,finished_at,attempt_count,COALESCE(snapshot_id,''),summary_json,raw_log,raw_log_expired,duration_ms,files_expected,files_processed,files_changed,bytes_processed,bytes_changed
 		FROM (
 			SELECT runs.*,ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY started_at DESC,id DESC) AS task_rank
 			FROM runs
@@ -443,7 +445,7 @@ func (s *Store) TaskRunHealth(ctx context.Context) (map[string]TaskRunHealth, er
 	return result, successRows.Err()
 }
 
-const runSelectColumns = `SELECT id,task_id,COALESCE(plan_id,''),trigger,status,started_at,finished_at,attempt_count,COALESCE(snapshot_id,''),summary_json,raw_log,raw_log_expired,duration_ms,files_processed,files_changed,bytes_processed,bytes_changed`
+const runSelectColumns = `SELECT id,task_id,COALESCE(plan_id,''),trigger,status,started_at,finished_at,attempt_count,COALESCE(snapshot_id,''),summary_json,raw_log,raw_log_expired,duration_ms,files_expected,files_processed,files_changed,bytes_processed,bytes_changed`
 
 type runScanner interface {
 	Scan(...any) error
@@ -453,8 +455,8 @@ func scanRun(scanner runScanner) (RunRecord, error) {
 	var record RunRecord
 	var started, summary string
 	var finished sql.NullString
-	var duration, filesProcessed, filesChanged, bytesProcessed, bytesChanged sql.NullInt64
-	if err := scanner.Scan(&record.ID, &record.TaskID, &record.PlanID, &record.Trigger, &record.Status, &started, &finished, &record.AttemptCount, &record.SnapshotID, &summary, &record.RawLog, &record.RawLogExpired, &duration, &filesProcessed, &filesChanged, &bytesProcessed, &bytesChanged); err != nil {
+	var duration, filesExpected, filesProcessed, filesChanged, bytesProcessed, bytesChanged sql.NullInt64
+	if err := scanner.Scan(&record.ID, &record.TaskID, &record.PlanID, &record.Trigger, &record.Status, &started, &finished, &record.AttemptCount, &record.SnapshotID, &summary, &record.RawLog, &record.RawLogExpired, &duration, &filesExpected, &filesProcessed, &filesChanged, &bytesProcessed, &bytesChanged); err != nil {
 		return RunRecord{}, err
 	}
 	var err error
@@ -471,10 +473,10 @@ func scanRun(scanner runScanner) (RunRecord, error) {
 	}
 	_ = json.Unmarshal([]byte(summary), &record.Summary)
 	metrics := RunMetrics{
-		DurationMilliseconds: nullMetric(duration), FilesProcessed: nullMetric(filesProcessed), FilesChanged: nullMetric(filesChanged),
+		DurationMilliseconds: nullMetric(duration), FilesExpected: nullMetric(filesExpected), FilesProcessed: nullMetric(filesProcessed), FilesChanged: nullMetric(filesChanged),
 		BytesProcessed: nullMetric(bytesProcessed), BytesChanged: nullMetric(bytesChanged),
 	}
-	if metrics.DurationMilliseconds != nil || metrics.FilesProcessed != nil || metrics.FilesChanged != nil || metrics.BytesProcessed != nil || metrics.BytesChanged != nil {
+	if metrics.DurationMilliseconds != nil || metrics.FilesExpected != nil || metrics.FilesProcessed != nil || metrics.FilesChanged != nil || metrics.BytesProcessed != nil || metrics.BytesChanged != nil {
 		record.Metrics = &metrics
 	}
 	return record, nil

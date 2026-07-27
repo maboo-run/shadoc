@@ -1,6 +1,7 @@
 import { translate, type Locale } from "../i18n";
 import type { Dashboard } from "./App";
 import { adminTime } from "./App";
+import { formatEmbeddedDateTimes } from "./dateTime";
 
 type DashboardAlertsProps = {
   dashboard: Dashboard;
@@ -34,7 +35,7 @@ export function DashboardAlerts({ dashboard, locale, timeZone, onViewAll, onHand
               <li className={`alert-card${tone ? ` ${tone}` : ""}`} key={alert.stateKey ?? alert.id ?? alert.message}>
                 <div className="alert-card-heading">
                   <strong>{title}</strong>
-                  <span className="alert-card-message">{alert.message}</span>
+                  <span className="alert-card-message">{formatEmbeddedDateTimes(alert.message, locale, timeZone)}</span>
                 </div>
                 {alert.lastAt && (
                   <div className="alert-card-time">▌ {adminTime(alert.lastAt, locale, timeZone)}</div>
