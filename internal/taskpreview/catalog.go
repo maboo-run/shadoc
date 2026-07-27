@@ -219,7 +219,7 @@ func (c *catalog) page(previewID string, input EntryQuery) (EntryPage, error) {
 		return EntryPage{}, err
 	}
 	reader := bufio.NewReaderSize(file, 64<<10)
-	page := EntryPage{Items: make([]EntryItem, 0, query.Limit)}
+	page := EntryPage{Items: make([]EntryItem, 0)}
 	position := offset
 	for {
 		lineStart := position

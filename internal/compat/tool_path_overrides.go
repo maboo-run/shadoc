@@ -121,9 +121,12 @@ func validateExecutablePath(value string, programs []string) error {
 	if !matched {
 		return fmt.Errorf("文件名必须是 %s", strings.Join(programs, " 或 "))
 	}
-	info, err := os.Stat(value)
+	info, err := os.Lstat(value)
 	if err != nil {
 		return errors.New("文件不存在或无法访问")
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("不允许使用符号链接")
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("目标不是普通文件")
