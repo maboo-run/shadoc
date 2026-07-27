@@ -6,9 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	osexec "os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/maboo-run/shadoc/internal/command"
@@ -121,18 +120,8 @@ func validateExecutablePath(value string, programs []string) error {
 	if !matched {
 		return fmt.Errorf("文件名必须是 %s", strings.Join(programs, " 或 "))
 	}
-	info, err := os.Lstat(value)
-	if err != nil {
-		return errors.New("文件不存在或无法访问")
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("不允许使用符号链接")
-	}
-	if !info.Mode().IsRegular() {
-		return errors.New("目标不是普通文件")
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
-		return errors.New("文件没有执行权限")
+	if _, err := osexec.LookPath(value); err != nil {
+		return errors.New("文件不存在、不是普通文件或没有执行权限")
 	}
 	return nil
 }

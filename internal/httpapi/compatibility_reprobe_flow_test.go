@@ -94,23 +94,21 @@ func TestCompatibilityToolPathsRejectUnexpectedExecutableName(t *testing.T) {
 	}
 }
 
-func TestCompatibilityToolPathsRejectSymlinkedExecutable(t *testing.T) {
+func TestCompatibilityToolPathsRejectNonExecutableFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("symbolic link validation is platform-specific")
+		t.Skip("POSIX execute bits are not used on Windows")
 	}
 	srv := newResourceTestServer(t)
 	cookie := setupSession(t, srv)
-	directory := t.TempDir()
-	target := executableTool(t, directory, "real-mysqldump", "mysqldump  Ver 10.19")
-	path := filepath.Join(directory, "mysqldump")
-	if err := os.Symlink(target, path); err != nil {
+	path := filepath.Join(t.TempDir(), "mysqldump")
+	if err := os.WriteFile(path, []byte("not executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	response := requestJSON(t, srv, "POST", "/api/compatibility/tool-paths", map[string]any{
 		"mysqlDump": path,
 	}, cookie)
-	if response.Code != 400 || !strings.Contains(response.Body.String(), "不允许使用符号链接") {
+	if response.Code != 400 || !strings.Contains(response.Body.String(), "没有执行权限") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
