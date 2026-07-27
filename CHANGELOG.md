@@ -4,6 +4,26 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-27
+
+### Added
+
+- 支持 Linux 控制服务以 root 系统服务运行，并提供离线的普通用户实例迁移命令；迁移会校验本机程序 SHA-256，成功后移除旧实例。
+- 新增分层的保护范围预览，可按文件夹查看完整或部分保护状态，并在预览中排除或恢复文件与目录。
+- 新增本机备份工具重新探测与手动路径配置，便于安装 MySQL、PostgreSQL 或 rsync 客户端后立即刷新能力。
+
+### Changed
+
+- 任务运行统计区分源目录发现的文件总数与实际同步文件数，并据此判定成功或部分成功。
+- 大型任务的文件清单改为有界、分页读取，任务详情不再一次性加载全部文件到内存。
+- 管理页面的日期和时间统一使用设置中配置的时区。
+
+### Fixed
+
+- 修复大型 Immich 等多文件任务打开运行详情时可能返回 500 的问题。
+- 修复保护范围目录无法返回上一层、返回目标错误，以及应用排除规则后预览未在当前页面更新的问题。
+- 修复 Race detector 下异步操作测试因固定墙钟阈值产生的误报，并加强手动工具路径与预览分页输入校验。
+
 ## [0.1.2] - 2026-07-25
 
 ### Added
@@ -48,7 +68,8 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 - 官方 GitHub 仓库身份统一为 `maboo-run/shadoc`。
 - README 调整为面向管理员的安装和使用手册。
 
-[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.3
 [0.1.2]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.2
 [0.1.1]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.0
