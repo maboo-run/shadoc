@@ -170,6 +170,7 @@ export function OperationFeedback({ operation, locale = "zh-CN", hideTerminal = 
         </dl>
       </details> : record?.errorSummary ? <p>{record.errorSummary}</p> : null}
       {record?.kind === "application_update" && operation.active && <p>{t("升级期间控制服务会短暂断开；页面将自动重连并继续读取结果。")}</p>}
+      {record?.kind === "sync" && operation.active && <AssignmentProgressView detail={record.detail} locale={locale} />}
       {residual && <p>{t("残留位置：")}{residual}</p>}
       {operation.error && <p>{operation.error}</p>}
       {record?.stage === "cleanup_resolved" && <p>{t("残留已安全清理，恢复目标可重新预检")}</p>}
@@ -207,6 +208,77 @@ export function OperationFeedback({ operation, locale = "zh-CN", hideTerminal = 
   );
 }
 
+type AssignmentProgress = {
+  phase: "starting" | "scanning" | "transferring" | "finalizing";
+  bytesTransferred: number;
+  totalBytes: number;
+  filesTransferred: number;
+  filesTotal: number;
+  rateBytesPerSecond: number;
+  etaSeconds: number;
+};
+
+function AssignmentProgressView({ detail, locale }: { detail?: Record<string, unknown>; locale: Locale }) {
+  const progress = assignmentProgress(detail?.progress);
+  if (!progress) return null;
+  const t = (source: string) => translate(locale, source);
+  const stalled = detail?.progressState === "stalled";
+  const phaseLabels: Record<AssignmentProgress["phase"], string> = {
+    starting: "正在启动同步",
+    scanning: "正在扫描文件列表",
+    transferring: "正在传输文件",
+    finalizing: "正在整理目标目录",
+  };
+  const percentage = progress.totalBytes > 0
+    ? Math.max(0, Math.min(100, Math.round(progress.bytesTransferred * 100 / progress.totalBytes)))
+    : undefined;
+  return <div className={`assignment-progress${stalled ? " assignment-progress-stalled" : ""}`}>
+    <strong>{t(stalled ? "Agent 通信已中断，正在等待恢复" : phaseLabels[progress.phase])}</strong>
+    <progress
+      aria-label={t("同步进度")}
+      aria-valuenow={percentage}
+      max={100}
+      value={percentage}
+    />
+    <div className="assignment-progress-metrics">
+      {progress.totalBytes > 0 && <span>{formatProgressBytes(progress.bytesTransferred)} / {formatProgressBytes(progress.totalBytes)}</span>}
+      {progress.filesTotal > 0 && <span>{formatProgressFiles(progress.filesTransferred, progress.filesTotal, locale)}</span>}
+      {!stalled && progress.rateBytesPerSecond > 0 && <span>{formatProgressBytes(progress.rateBytesPerSecond)}/s</span>}
+      {!stalled && progress.etaSeconds > 0 && <span>{formatProgressETA(progress.etaSeconds, locale)}</span>}
+    </div>
+  </div>;
+}
+
+function assignmentProgress(value: unknown): AssignmentProgress | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (!new Set(["starting", "scanning", "transferring", "finalizing"]).has(String(candidate.phase))) return null;
+  const metrics = ["bytesTransferred", "totalBytes", "filesTransferred", "filesTotal", "rateBytesPerSecond", "etaSeconds"] as const;
+  if (metrics.some((name) => typeof candidate[name] !== "number" || !Number.isFinite(candidate[name]) || Number(candidate[name]) < 0)) return null;
+  return candidate as AssignmentProgress;
+}
+
+function formatProgressBytes(value: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${Math.round(amount)} ${units[unit]}` : `${amount.toFixed(1)} ${units[unit]}`;
+}
+
+function formatProgressFiles(transferred: number, total: number, locale: Locale): string {
+  return locale === "zh-CN" ? `${transferred} / ${total} 个文件` : `${transferred} / ${total} files`;
+}
+
+function formatProgressETA(seconds: number, locale: Locale): string {
+  if (seconds < 60) return locale === "zh-CN" ? `预计剩余 ${seconds} 秒` : `About ${seconds} seconds remaining`;
+  const minutes = Math.ceil(seconds / 60);
+  return locale === "zh-CN" ? `预计剩余 ${minutes} 分钟` : `About ${minutes} minutes remaining`;
+}
+
 function CleanupConfirmationDialog({ kind, password, error, locale, onPassword, onClose, onConfirm }: { kind: string; password: string; error: string; locale: Locale; onPassword(value: string): void; onClose(): void; onConfirm(): void }) {
   const t = (source: string) => translate(locale, source);
   const database = kind === "database_restore";
@@ -238,6 +310,12 @@ function CleanupConfirmationDialog({ kind, password, error, locale, onPassword, 
 function operationLabel(record: OperationRecord, locale: Locale): string {
   const t = (source: string) => translate(locale, source);
   if (record.stage === "cleanup_resolved") return t("清理已完成");
+  if (record.kind === "backup" || record.kind === "sync") {
+    if (record.status === "success") return t("备份任务运行完成");
+    if (record.status === "partial") return t("备份任务部分成功");
+    if (record.status === "failed") return t("备份任务运行失败");
+    if (record.status === "cancelled") return t("操作已取消");
+  }
   if (record.kind === "agent_restic_install" && record.status === "success") return t("Agent Restic 安装完成，备份与恢复能力已验证");
   if (record.kind === "agent_restic_install" && record.status === "failed") return t("Agent Restic 安装失败，旧版本已恢复");
   if (record.kind === "agent_restic_install" && record.status === "cancelled") return t("Agent Restic 安装已取消，旧版本已恢复");
@@ -254,6 +332,8 @@ function operationLabel(record: OperationRecord, locale: Locale): string {
   const stages: Record<string, string> = {
     queued: "等待执行",
     starting: "正在启动",
+    backing_up: "正在备份",
+    syncing: "正在同步",
     initializing: "正在初始化仓库",
     restoring: "正在恢复",
     cleanup: "正在检查残留",

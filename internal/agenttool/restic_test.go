@@ -18,7 +18,7 @@ func TestServiceInstallsVerifiedResticAndWaitsForCapabilityHeartbeat(t *testing.
 	now := time.Date(2026, 7, 17, 13, 0, 0, 0, time.UTC)
 	storage := &toolStore{
 		host:  domain.RemoteHost{ID: "host-1", Host: "192.168.0.104", Port: 22, Username: "backup", HostFingerprint: "known-host"},
-		agent: store.AgentRecord{ID: "mini-debian", RemoteHostID: "host-1", Status: "online", LastHeartbeatAt: &now, OS: "linux", Arch: "amd64", Capabilities: []string{"managed-restic-install-v1"}},
+		agent: store.AgentRecord{ID: "mini-debian", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online", LastHeartbeatAt: &now, OS: "linux", Arch: "amd64", Capabilities: []string{"managed-restic-install-v1"}},
 	}
 	remote := &toolRemote{platform: agentdeploy.Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}, activate: func() {
 		storage.agent.ResticVersion = "0.18.0"
@@ -50,7 +50,7 @@ func TestServiceRollsBackWhenResticActivationFails(t *testing.T) {
 	now := time.Now().UTC()
 	storage := &toolStore{
 		host:  domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", Status: "online", LastHeartbeatAt: &now, Capabilities: []string{"managed-restic-install-v1"}},
+		agent: store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online", LastHeartbeatAt: &now, Capabilities: []string{"managed-restic-install-v1"}},
 	}
 	remote := &toolRemote{platform: agentdeploy.Platform{OS: "linux", Arch: "amd64", Service: "systemd"}, activateErr: errors.New("restart failed")}
 	service := New(storage, toolSecrets{}, toolArtifacts{}, toolDialer{remote: remote}, func() time.Time { return now })
@@ -66,7 +66,7 @@ func TestServiceRejectsAgentWithoutManagedResticInstallCapability(t *testing.T) 
 	now := time.Now().UTC()
 	storage := &toolStore{
 		host:  domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "legacy-agent", RemoteHostID: "host-1", Status: "online", LastHeartbeatAt: &now, OS: "linux", Arch: "amd64"},
+		agent: store.AgentRecord{ID: "legacy-agent", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online", LastHeartbeatAt: &now, OS: "linux", Arch: "amd64"},
 	}
 	service := New(storage, toolSecrets{}, toolArtifacts{}, toolDialer{remote: &toolRemote{platform: agentdeploy.Platform{OS: "linux", Arch: "amd64"}}}, func() time.Time { return now })
 	service.pollInterval = time.Millisecond
@@ -110,6 +110,7 @@ func TestServiceRejectsManualAndNonLinuxAgents(t *testing.T) {
 
 	storage.host = domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"}
 	storage.agent.RemoteHostID = "host-1"
+	storage.agent.ManagedInstallation = true
 	storage.agent.Capabilities = []string{"managed-restic-install-v1"}
 	remote := &toolRemote{platform: agentdeploy.Platform{OS: "darwin", Arch: "arm64", Service: "launchd"}}
 	service = New(storage, toolSecrets{}, toolArtifacts{}, toolDialer{remote: remote}, func() time.Time { return now })

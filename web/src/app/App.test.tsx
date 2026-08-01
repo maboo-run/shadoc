@@ -127,6 +127,7 @@ const fakeAPI: AppAPI = {
   async saveRepositoryCapacityPolicy() { return {}; },
   async saveRestoreVerificationPolicy() { return {}; },
   async deleteRestoreVerificationPolicy() {},
+  async bindAgentRemoteHost() { return {}; },
   async action() {
     return {};
   },
@@ -388,7 +389,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.3.0", targetVersion: "v1.4.0", upgradeAvailable: true,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
@@ -423,7 +424,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running",
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running",
         compatibilityStatus: "compatible", buildVersion: "0.0.0-SNAPSHOT-389df1b", targetVersion: "0.1.0", upgradeAvailable: true,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
@@ -452,7 +453,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
@@ -483,7 +484,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: true,
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", taskEligible: true,
         compatibilityStatus: "compatible", buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false,
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
@@ -517,7 +518,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", taskEligible: false,
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", taskEligible: false,
         compatibilityStatus: "compatible", buildVersion: "v1.4.0", platform: "linux/amd64",
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", endpointStatus: "current",
         capabilities: ["managed-restic-install-v1", "filesystem-browse", "filesystem-restore-target"],
@@ -552,7 +553,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64",
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", platform: "linux/amd64",
         capabilities: ["managed-restic-install-v1"],
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
@@ -580,7 +581,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => resource === "agents" ? [{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", platform: "linux/amd64",
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", platform: "linux/amd64",
         capabilities: ["managed-restic-install-v1", "filesystem-restore-target"],
       }] : resource === "remote-hosts" ? [{ id: "host-a", host: "agent.example", port: 22, username: "backup" }] : [],
     }} />);
@@ -597,7 +598,7 @@ describe("restic-control administration", () => {
     let uninstalled = false;
     const listResource = vi.fn(async (resource: string) => resource === "agents"
       ? [{
-          id: "mini-debian", remoteHostId: "host-1", status: uninstalled ? "revoked" : "online",
+          id: "mini-debian", remoteHostId: "host-1", managedInstallation: true, status: uninstalled ? "revoked" : "online",
           runtimeStatus: uninstalled ? "stopped" : "running",
           capabilities: ["restic", "filesystem-browse", "os:linux", "arch:amd64"],
           lastHeartbeatAt: "2026-07-14T14:47:37.568669Z",
@@ -647,7 +648,7 @@ describe("restic-control administration", () => {
       action,
       listResource: async (resource) => {
         if (resource === "agents") return [{
-          id: "orphaned-agent", remoteHostId: "deleted-host", status: "offline", runtimeStatus: "unknown",
+          id: "orphaned-agent", remoteHostId: "deleted-host", managedInstallation: true, status: "offline", runtimeStatus: "unknown",
           platform: "linux/amd64", certificateStatus: "valid",
         }];
         if (resource === "remote-hosts") return [{
@@ -667,6 +668,32 @@ describe("restic-control administration", () => {
 
     expect(action).toHaveBeenCalledWith("/api/agents/orphaned-agent/revoke", {});
     expect(action).not.toHaveBeenCalledWith("/api/agents/orphaned-agent/uninstall", {});
+  });
+
+  it("associates a manually enrolled Agent with its confirmed remote host without turning it into a managed installation", async () => {
+    const user = userEvent.setup();
+    const bindAgentRemoteHost = vi.fn(async () => ({}));
+    render(<App api={{
+      ...fakeAPI,
+      bindAgentRemoteHost,
+      listResource: async (resource) => resource === "agents"
+        ? [{ id: "manual-agent", status: "online", runtimeStatus: "running", platform: "linux/amd64" }]
+        : resource === "remote-hosts"
+          ? [{ id: "host-a", name: "源端", host: "source.example", port: 22, username: "backup" }]
+          : [],
+    }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await openConnectionPage(user, "Agent 节点");
+    await user.click(await screen.findByRole("button", { name: "manual-agent 查看详情" }));
+    await user.click(await screen.findByRole("button", { name: "关联远程主机" }));
+    const dialog = screen.getByRole("dialog", { name: "关联 Agent 与远程主机" });
+    expect(within(dialog).getByText(/不会将手动安装转换为托管安装/)).toBeVisible();
+    await user.selectOptions(within(dialog).getByLabelText("远程主机"), "host-a");
+    await user.click(within(dialog).getByRole("button", { name: "确认关联" }));
+
+    await waitFor(() => expect(bindAgentRemoteHost).toHaveBeenCalledWith("manual-agent", "host-a"));
+    expect(await screen.findByText("Agent 已关联远程主机；该 Agent 仍为手动安装")).toBeVisible();
   });
 
   it("deletes a revoked Agent record through a versioned impact preview", async () => {
@@ -753,7 +780,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => {
-        if (resource === "agents") return [{ id: "mini-debian", remoteHostId: "host-1", status: "revoked", runtimeStatus: "stopped", uninstalledAt: "2026-07-14T14:47:38Z" }];
+        if (resource === "agents") return [{ id: "mini-debian", remoteHostId: "host-1", managedInstallation: true, status: "revoked", runtimeStatus: "stopped", uninstalledAt: "2026-07-14T14:47:38Z" }];
         if (resource === "remote-hosts") return [{ id: "host-1", name: "迷你主机", host: "192.168.0.104", port: 22, username: "tmen" }];
         return [];
       },
@@ -1035,6 +1062,25 @@ describe("restic-control administration", () => {
     expect(new URLSearchParams(window.location.search).get("view")).toBe("create");
   });
 
+  it("does not carry the repository editor into the task list when using the sidebar", async () => {
+    const user = userEvent.setup();
+    render(<App api={fakeAPI} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+
+    await user.click(screen.getByRole("button", { name: "备份仓库" }));
+    await screen.findByRole("heading", { name: "备份仓库" });
+    await user.click(screen.getByRole("button", { name: "新建备份仓库" }));
+    expect(await screen.findByRole("heading", { name: "新建备份仓库" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "备份任务" }));
+
+    expect(await screen.findByRole("heading", { name: "备份任务" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "新建备份任务" })).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "新建备份任务" })).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe("/admin/tasks");
+    expect(window.location.search).toBe("");
+  });
+
   it("opens the layered source inventory from a task row and keeps it addressable", async () => {
     const user = userEvent.setup();
     const action = vi.fn(async (path: string) => {
@@ -1089,7 +1135,7 @@ describe("restic-control administration", () => {
 	  listResource: async (resource) => resource === "agents"
 	    ? [{ id: "agent-1", status: "online", capabilities: ["rsync"] }]
 	    : resource === "repositories"
-	      ? [{ id: "sync-repo", name: "第二硬盘", engine: "rsync", kind: "local", path: "/mnt/disk-b/photos", status: "ready" }]
+	      ? [{ id: "sync-repo", name: "第二硬盘", engine: "rsync", kind: "local", localTarget: { kind: "agent", agentId: "agent-1" }, path: "/mnt/disk-b/photos", status: "ready" }]
 	      : [],
 	}} />);
 	await screen.findByRole("heading", { name: "仪表盘" });
@@ -1225,7 +1271,7 @@ describe("restic-control administration", () => {
       listResource: async (resource) => resource === "agents"
         ? [{ id: "agent-1", status: "online", capabilities: ["rsync", "filesystem-browse"] }]
         : resource === "repositories"
-          ? [{ id: "sync-repo", name: "归档盘", engine: "rsync", kind: "local", path: "/mnt/archive", status: "ready" }]
+		  ? [{ id: "sync-repo", name: "归档盘", engine: "rsync", kind: "local", localTarget: { kind: "agent", agentId: "agent-1" }, path: "/mnt/archive", status: "ready" }]
           : [],
     }} />);
 
@@ -1307,7 +1353,7 @@ describe("restic-control administration", () => {
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
 
-    expect(screen.getByLabelText("仓库类型")).toHaveValue("local");
+	expect(screen.getByLabelText("仓库类型")).toHaveValue("service-local");
     expect(screen.getByLabelText("本机绝对路径")).toBeVisible();
     expect(screen.queryByLabelText("远程主机")).not.toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("仓库类型"), "sftp");
@@ -1316,7 +1362,60 @@ describe("restic-control administration", () => {
     expect(screen.getByLabelText("远端绝对路径")).toBeVisible();
   });
 
-  it("automatically uses the remote host Agent to browse Restic SFTP repository paths", async () => {
+	it("treats Service-local and Agent-local repositories as distinct persisted types", async () => {
+	  const user = userEvent.setup();
+	  render(<App api={{
+		...fakeAPI,
+		listResource: async (resource) => resource === "agents"
+		  ? [{ id: "agent-1", status: "online", taskEligible: true, capabilities: ["filesystem-browse"] }]
+		  : [],
+	  }} />);
+	  await screen.findByRole("heading", { name: "仪表盘" });
+	  await user.click(screen.getByRole("button", { name: "备份仓库" }));
+	  await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
+
+	  expect(screen.getByLabelText("仓库类型")).toHaveValue("service-local");
+	  expect(screen.queryByLabelText("本地路径所属 Agent")).not.toBeInTheDocument();
+
+	  await user.selectOptions(screen.getByLabelText("仓库引擎"), "rsync");
+	  expect(screen.getByLabelText("仓库类型")).toHaveValue("ssh");
+	  await user.selectOptions(screen.getByLabelText("仓库类型"), "agent-local");
+	  expect(await screen.findByLabelText("本地路径所属 Agent")).toBeRequired();
+	  expect(screen.getByText(/仓库只能由同一个 Agent 的任务使用/)).toBeVisible();
+
+	  await user.selectOptions(screen.getByLabelText("仓库类型"), "ssh");
+	  expect(screen.queryByLabelText("本地路径所属 Agent")).not.toBeInTheDocument();
+	});
+
+  it("stores a remote rsync target as an SSH directory instead of an SFTP repository", async () => {
+    const user = userEvent.setup();
+    const createResource = vi.fn(async () => undefined);
+    render(<App api={{
+      ...fakeAPI,
+      createResource,
+      listResource: async (resource) => resource === "remote-hosts"
+        ? [{ id: "host-1", name: "同步主机", host: "sync.example", username: "backup" }]
+        : [],
+    }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await user.click(screen.getByRole("button", { name: "备份仓库" }));
+    await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
+    await user.selectOptions(screen.getByLabelText("仓库引擎"), "rsync");
+
+    expect(screen.getByRole("option", { name: "SSH 远程同步目录" })).toBeVisible();
+    expect(screen.queryByRole("option", { name: "远程 SFTP 仓库" })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("仓库类型"), "ssh");
+    await user.selectOptions(screen.getByLabelText("远程主机"), "host-1");
+    await user.type(screen.getByLabelText("名称"), "远端同步目标");
+    await user.type(screen.getByLabelText("远端绝对路径"), "/srv/sync");
+    await user.click(screen.getByRole("button", { name: "保存仓库" }));
+
+    expect(createResource).toHaveBeenCalledWith("repositories", expect.objectContaining({
+      engine: "rsync", kind: "ssh", remoteHostId: "host-1", path: "/srv/sync",
+    }));
+  });
+
+  it("keeps Restic SFTP repository paths in the SFTP namespace", async () => {
     const user = userEvent.setup();
     const action = vi.fn(async (path: string, payload?: Record<string, unknown>) => {
       if (path === "/api/agents/agent-1/filesystem/browse" && payload?.path === "/") {
@@ -1340,16 +1439,10 @@ describe("restic-control administration", () => {
     await user.selectOptions(screen.getByLabelText("仓库类型"), "sftp");
     await user.selectOptions(screen.getByLabelText("远程主机"), "host-1");
     expect(screen.queryByLabelText("目录浏览 Agent（可选）")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "浏览" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "SFTP 路径填写说明" })).toHaveAttribute("title", expect.stringContaining("SFTP"));
     await user.type(screen.getByLabelText("远端绝对路径"), "/");
-
-    const home = await screen.findByRole("button", { name: /home/ });
-    expect(home).toBeVisible();
-    expect(action).toHaveBeenCalledWith("/api/agents/agent-1/filesystem/browse", { path: "/" });
-    await user.click(home);
-
-    expect(screen.getByLabelText("远端绝对路径")).toHaveValue("/home");
-    await waitFor(() => expect(action).toHaveBeenCalledWith("/api/agents/agent-1/filesystem/browse", { path: "/home" }));
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(action).not.toHaveBeenCalledWith("/api/agents/agent-1/filesystem/browse", { path: "/" });
   });
 
   it("creates a child directory inside the directory selected through the remote host Agent", async () => {
@@ -1374,7 +1467,8 @@ describe("restic-control administration", () => {
     await screen.findByRole("heading", { name: "仪表盘" });
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
-    await user.selectOptions(screen.getByLabelText("仓库类型"), "sftp");
+    await user.selectOptions(screen.getByLabelText("仓库引擎"), "rsync");
+    await user.selectOptions(screen.getByLabelText("仓库类型"), "ssh");
     await user.selectOptions(screen.getByLabelText("远程主机"), "host-1");
     await user.type(screen.getByLabelText("远端绝对路径"), "/");
     await user.click(await screen.findByRole("button", { name: /home/ }));
@@ -1425,7 +1519,8 @@ describe("restic-control administration", () => {
     await screen.findByRole("heading", { name: "仪表盘" });
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
-    await user.selectOptions(screen.getByLabelText("仓库类型"), "sftp");
+    await user.selectOptions(screen.getByLabelText("仓库引擎"), "rsync");
+    await user.selectOptions(screen.getByLabelText("仓库类型"), "ssh");
     await user.selectOptions(screen.getByLabelText("远程主机"), "host-1");
     await user.type(screen.getByLabelText("远端绝对路径"), "/home/example/restic");
 
@@ -1442,7 +1537,9 @@ describe("restic-control administration", () => {
   it("creates an rsync repository without Restic-only capabilities", async () => {
     const user = userEvent.setup();
     const createResource = vi.fn(async () => undefined);
-    render(<App api={{ ...fakeAPI, createResource }} />);
+	render(<App api={{ ...fakeAPI, createResource, listResource: async (resource) => resource === "agents"
+	  ? [{ id: "agent-1", status: "online", taskEligible: true, capabilities: ["rsync", "filesystem-browse"] }]
+	  : [] }} />);
     await screen.findByRole("heading", { name: "仪表盘" });
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     await user.click(await screen.findByRole("button", { name: "新建备份仓库" }));
@@ -1450,12 +1547,14 @@ describe("restic-control administration", () => {
     await user.selectOptions(screen.getByLabelText("仓库引擎"), "rsync");
     expect(screen.queryByLabelText("仓库密码")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "定时维护" })).not.toBeInTheDocument();
+	await user.selectOptions(screen.getByLabelText("仓库类型"), "agent-local");
+	await user.selectOptions(screen.getByLabelText("本地路径所属 Agent"), "agent-1");
     await user.type(screen.getByLabelText("名称"), "照片同步目标");
-    await user.type(screen.getByLabelText("本机绝对路径"), "/mnt/disk-b/photos");
+	await user.type(screen.getByLabelText("Agent 本地绝对路径"), "/mnt/disk-b/photos");
     await user.click(screen.getByRole("button", { name: "保存仓库" }));
 
     expect(createResource).toHaveBeenCalledWith("repositories", expect.objectContaining({
-      engine: "rsync", kind: "local", path: "/mnt/disk-b/photos",
+	  engine: "rsync", kind: "local", localTarget: { kind: "agent", agentId: "agent-1" }, path: "/mnt/disk-b/photos",
     }));
   });
 
@@ -2396,7 +2495,7 @@ describe("restic-control administration", () => {
 
   it("confirms every resource deletion with the object identity and supports cancellation", async () => {
     const user = userEvent.setup();
-    const action = vi.fn(async (path: string) => path.endsWith("/confirm") ? {} : { resourceType: "remote-hosts", id: "host-1", name: "生产 SSH", updatedAt: "2026-07-12T01:00:00Z", dependencies: [{ type: "repositories", count: 2, names: ["照片仓库", "归档仓库"] }] });
+    const action = vi.fn(async (path: string) => path.endsWith("/confirm") ? {} : { resourceType: "remote-hosts", id: "host-1", name: "生产 SSH", updatedAt: "2026-07-12T01:00:00Z", dependencies: [{ type: "repositories", count: 2, names: ["照片仓库", "归档仓库"] }], deletable: true });
     render(<App api={{
       ...fakeAPI,
       action,
@@ -2411,18 +2510,46 @@ describe("restic-control administration", () => {
     const firstDialog = screen.getByRole("dialog", { name: "确认删除远程主机" });
     expect(firstDialog).toHaveTextContent("生产 SSH");
     expect(firstDialog).toHaveTextContent("host-1");
-	 expect(firstDialog).toHaveTextContent("照片仓库、归档仓库");
+    expect(firstDialog).toHaveTextContent("照片仓库、归档仓库");
     expect(firstDialog).toHaveClass("dialog");
     expect(firstDialog.closest(".dialog-backdrop")?.parentElement).toBe(document.body);
     await user.click(screen.getByRole("button", { name: "取消删除" }));
     expect(action).not.toHaveBeenCalledWith(expect.stringMatching(/confirm$/), expect.anything());
     await user.click(screen.getByRole("button", { name: "删除" }));
     await user.click(screen.getByRole("button", { name: "确认删除" }));
-	 expect(action).toHaveBeenCalledWith("/api/delete-previews/remote-hosts/host-1/confirm", { expectedUpdatedAt: "2026-07-12T01:00:00Z" });
+    expect(action).toHaveBeenCalledWith("/api/delete-previews/remote-hosts/host-1/confirm", { expectedUpdatedAt: "2026-07-12T01:00:00Z" });
     const deleted = await screen.findByText("已删除远程主机：生产 SSH");
     const toast = deleted.closest(".toast");
     expect(toast).toBeVisible();
     expect(toast?.parentElement).toBe(document.body);
+  });
+
+  it("blocks deletion confirmation until a backup task is disabled", async () => {
+    const user = userEvent.setup();
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/delete-previews/tasks/task-enabled") {
+        return {
+          resourceType: "tasks", id: "task-enabled", name: "照片备份", updatedAt: "2026-07-31T15:00:00Z",
+          dependencies: [], deletable: false, blockedReason: "请先停用备份任务，再确认删除",
+        };
+      }
+      return {};
+    });
+    render(<App api={{
+      ...fakeAPI,
+      action,
+      async listResource(resource) {
+        if (resource === "tasks") return [{ id: "task-enabled", name: "照片备份", kind: "directory", repositoryId: "repo", enabled: true }];
+        return [];
+      },
+    }} />);
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await user.click(screen.getByRole("button", { name: "备份任务" }));
+    await user.click(await screen.findByRole("button", { name: "删除" }));
+    const dialog = screen.getByRole("dialog", { name: "确认删除备份任务" });
+    expect(dialog).toHaveTextContent("请先停用备份任务，再确认删除");
+    expect(within(dialog).getByRole("button", { name: "确认删除" })).toBeDisabled();
+    expect(action).not.toHaveBeenCalledWith("/api/delete-previews/tasks/task-enabled/confirm", expect.anything());
   });
 
   it("shows repository, database connection, and task IDs where users need them", async () => {
@@ -2705,9 +2832,46 @@ describe("restic-control administration", () => {
     await user.click(within(row).getByRole("button", { name: "立即运行" }));
     expect(action).toHaveBeenCalledWith("/api/tasks/task-run/run", {});
     expect(within(row).queryByText("操作完成")).not.toBeInTheDocument();
-    const completion = await screen.findByText("备份任务运行完成");
+    const completion = await screen.findByText("执行完成");
     expect(completion.closest(".toast")?.parentElement).toBe(document.body);
     await waitFor(() => expect(taskReads).toBeGreaterThan(1));
+  });
+
+  it("keeps rsync execution feedback active until the durable operation succeeds", async () => {
+    const user = userEvent.setup();
+    let finishOperation: ((value: Record<string, unknown>) => void) | undefined;
+    const terminalOperation = new Promise<Record<string, unknown>>((resolve) => { finishOperation = resolve; });
+    let operationReads = 0;
+    const action = vi.fn(async (path: string) => {
+      if (path === "/api/tasks/task-sync/run") return { operationId: "task-sync-op", status: "queued" };
+      if (path === "/api/operations/task-sync-op") {
+        operationReads += 1;
+        if (operationReads === 1) return { id: "task-sync-op", kind: "sync", status: "running", stage: "syncing" };
+        return terminalOperation;
+      }
+      return {};
+    });
+    render(<App api={{ ...fakeAPI, action, listResource: async (resource) => resource === "tasks" ? [{
+      id: "task-sync",
+      name: "文件同步",
+      engine: "rsync",
+      kind: "rsync",
+      repositoryId: "repo-1",
+      enabled: true,
+    }] : [] }} />);
+
+    await screen.findByRole("heading", { name: "仪表盘" });
+    await user.click(screen.getByRole("button", { name: "备份任务" }));
+    const row = await screen.findByRole("row", { name: /文件同步/ });
+    await user.click(within(row).getByRole("button", { name: "立即运行" }));
+
+    expect(await screen.findByText("正在执行中")).toBeVisible();
+    expect(within(row).getByRole("button", { name: "正在同步" })).toBeDisabled();
+    expect(screen.queryByText("执行完成")).not.toBeInTheDocument();
+    await waitFor(() => expect(operationReads).toBeGreaterThan(1));
+
+    finishOperation?.({ id: "task-sync-op", kind: "sync", status: "success", stage: "completed" });
+    expect(await screen.findByText("执行完成")).toBeVisible();
   });
 
   it("disables immediate runs for tasks that are not enabled", async () => {
@@ -2742,7 +2906,29 @@ describe("restic-control administration", () => {
 	const run = within(row).getByRole("button", { name: "立即运行" });
 	await user.dblClick(run);
 	expect(action.mock.calls.filter(([path]) => path === "/api/tasks/task-run/run")).toHaveLength(1);
-	expect(within(row).getByRole("button", { name: "运行中…" })).toBeDisabled();
+	expect(within(row).getByRole("button", { name: "正在备份" })).toBeDisabled();
+  });
+
+  it("restores an active task run from durable server state", async () => {
+	const user = userEvent.setup();
+	const action = vi.fn(async (path: string) => {
+	  if (path === "/api/operations/op-active-sync") return { id: "op-active-sync", kind: "sync", status: "running", stage: "syncing" };
+	  return {};
+	});
+	render(<App api={{ ...fakeAPI, action, listResource: async (resource) => resource === "tasks" ? [{
+	  id: "task-active-sync",
+	  name: "进行中的同步",
+	  engine: "rsync",
+	  kind: "rsync",
+	  repositoryId: "repo-1",
+	  enabled: true,
+	  activeOperation: { id: "op-active-sync", kind: "sync", status: "running", stage: "syncing" },
+	}] : [] }} />);
+	await screen.findByRole("heading", { name: "仪表盘" });
+	await user.click(screen.getByRole("button", { name: "备份任务" }));
+	const row = await screen.findByRole("row", { name: /进行中的同步/ });
+	expect(within(row).getByRole("button", { name: "正在同步" })).toBeDisabled();
+	expect(screen.getAllByText("正在同步").some((item) => item.closest(".operation-feedback"))).toBe(true);
   });
 
   it("shows the installed application version below sign out without a standalone module", async () => {

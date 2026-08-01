@@ -35,8 +35,42 @@ func (s *Store) LoadSecret(ctx context.Context, id string) (EncryptedSecret, err
 }
 
 func (s *Store) DeleteSecret(ctx context.Context, id string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM secrets WHERE id = ?`, id); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	referenced, err := secretReferenced(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if referenced {
+		return ErrConflict
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM secrets WHERE id = ?`, id)
+	if err != nil {
 		return fmt.Errorf("delete secret: %w", err)
 	}
-	return nil
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrConflict
+	}
+	return tx.Commit()
+}
+
+func secretReferenced(ctx context.Context, queryer logicalReferenceQueryer, id string) (bool, error) {
+	var referenced int
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT CASE WHEN
+			EXISTS(SELECT 1 FROM remote_hosts WHERE private_key_secret_id=?) OR
+			EXISTS(SELECT 1 FROM repositories WHERE password_secret_id=? OR backend_secret_id=?) OR
+			EXISTS(SELECT 1 FROM repository_key_revocations WHERE secret_id=?) OR
+			EXISTS(SELECT 1 FROM database_connections WHERE password_secret_id=?) OR
+			EXISTS(SELECT 1 FROM protection_draft_items WHERE repository_password_secret_id=?) OR
+			EXISTS(SELECT 1 FROM metadata WHERE key='ntfy.config' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.tokenSecretId') ELSE NULL END=?) OR
+			EXISTS(SELECT 1 FROM metadata WHERE key='webhook.config' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.secretId') ELSE NULL END=?) OR
+			EXISTS(SELECT 1 FROM metadata WHERE key='email.config' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.passwordSecretId') ELSE NULL END=?)
+		THEN 1 ELSE 0 END`, id, id, id, id, id, id, id, id, id).Scan(&referenced); err != nil {
+		return false, err
+	}
+	return referenced != 0, nil
 }

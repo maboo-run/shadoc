@@ -142,6 +142,27 @@ func TestLinuxSystemUnitRunsOnlyTheFixedRootService(t *testing.T) {
 	}
 }
 
+func TestSystemServiceListenParsesOnlyGeneratedRootUnit(t *testing.T) {
+	unit := systemdUnitForScope(SystemScope, "/var/lib/shadoc/app/shadoc", []string{
+		"serve", "--service-scope", "system", "--listen", "0.0.0.0:8585", "--data-dir", "/var/lib/shadoc",
+	})
+	listen, found, err := systemServiceListenFromUnit(unit)
+	if err != nil || !found || listen != "0.0.0.0:8585" {
+		t.Fatalf("listen=%q found=%t err=%v", listen, found, err)
+	}
+
+	for _, unsafe := range []string{
+		strings.Replace(unit, `"/var/lib/shadoc/app/shadoc"`, `"/bin/sh"`, 1),
+		strings.Replace(unit, `"--data-dir" "/var/lib/shadoc"`, `"--data-dir" "/tmp/shadoc"`, 1),
+		strings.Replace(unit, `"--listen" "0.0.0.0:8585"`, `"--listen" "bad"`, 1),
+		strings.Replace(unit, "ExecStart=", "ExecStart=echo ", 1),
+	} {
+		if _, _, err := systemServiceListenFromUnit(unsafe); err == nil {
+			t.Fatalf("unsafe system unit accepted:\n%s", unsafe)
+		}
+	}
+}
+
 func TestScopeValidationRejectsRootUserServicesAndNonLinuxSystemServices(t *testing.T) {
 	if err := validateScopeRuntime("linux", UserScope, 0); err == nil || !strings.Contains(err.Error(), "--system") {
 		t.Fatalf("root user service error=%v", err)

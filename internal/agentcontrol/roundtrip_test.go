@@ -104,6 +104,12 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 	if scopeSink.agentID != "agent-1" || scopeSink.chunk.AssignmentID != "scope-1" {
 		t.Fatalf("scope sink=%+v", scopeSink)
 	}
+	if err := storage.SaveSecret(context.Background(), "host-key", "ssh-private-key", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CreateRemoteHost(context.Background(), domain.RemoteHost{ID: "host-1", Name: "host-1", Host: "host.example", Port: 22, Username: "backup", CreatedAt: now, UpdatedAt: now}, "host-key"); err != nil {
+		t.Fatal(err)
+	}
 
 	task := domain.Task{ID: "task-1", Name: "sync", Engine: domain.RsyncEngine, Kind: domain.RsyncTask, ExecutionTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"}, Rsync: &domain.RsyncSource{Path: "/source", DestinationHostID: "host-1", DestinationPath: "/target"}, CreatedAt: now, UpdatedAt: now}
 	if err := storage.CreateTask(context.Background(), task); err != nil {
@@ -121,6 +127,19 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaseResponse.Body.Close()
+	progress := agentprotocol.AssignmentProgress{
+		Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: "agent-1", Sequence: 1, Phase: "transferring",
+		BytesTransferred: 4096, TotalBytes: 8192, FilesTransferred: 4, FilesTotal: 8,
+	}
+	progressResponse := postAgentJSON(t, client, server.URL+"/progress", progress)
+	if progressResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("progress status=%d", progressResponse.StatusCode)
+	}
+	progressResponse.Body.Close()
+	renewed, err := storage.AgentLeaseStatus(context.Background(), "lease-1")
+	if err != nil || renewed.RenewedAt == nil || !renewed.ExpiresAt.After(assignment.ExpiresAt) || !bytes.Contains(renewed.Progress, []byte(`"bytesTransferred":4096`)) {
+		t.Fatalf("renewed lease=%+v err=%v", renewed, err)
+	}
 	resultResponse := postAgentJSON(t, client, server.URL+"/result", agentprotocol.Result{Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: "agent-1", Status: "partial"})
 	if resultResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("result status=%d", resultResponse.StatusCode)
@@ -129,6 +148,25 @@ func TestMTLSControlRoundTripEnrollsLeasesAndCompletes(t *testing.T) {
 	lease, err := storage.AgentLeaseStatus(context.Background(), "lease-1")
 	if err != nil || lease.Status != "partial" || lease.CompletedAt == nil {
 		t.Fatalf("lease=%+v err=%v", lease, err)
+	}
+	filesystemDefinition := json.RawMessage(`{"operation":"browse","path":"/source"}`)
+	if err := storage.CreateAgentFilesystemRequest(context.Background(), store.AgentFilesystemRequest{ID: "filesystem-1", AgentID: "agent-1", Definition: filesystemDefinition, ExpiresAt: now.Add(time.Minute), CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	filesystemResponse := postAgentJSON(t, client, server.URL+"/filesystem/claim", struct{}{})
+	if filesystemResponse.StatusCode != http.StatusOK {
+		t.Fatalf("filesystem claim status=%d", filesystemResponse.StatusCode)
+	}
+	filesystemResponse.Body.Close()
+	progress.AssignmentID, progress.Phase = "filesystem-1", "scanning"
+	filesystemProgress := postAgentJSON(t, client, server.URL+"/progress", progress)
+	if filesystemProgress.StatusCode != http.StatusNoContent {
+		t.Fatalf("filesystem progress status=%d", filesystemProgress.StatusCode)
+	}
+	filesystemProgress.Body.Close()
+	renewedFilesystem, err := storage.AgentFilesystemRequestStatus(context.Background(), "filesystem-1")
+	if err != nil || renewedFilesystem.RenewedAt == nil || !renewedFilesystem.ExpiresAt.After(now.Add(time.Minute)) {
+		t.Fatalf("renewed filesystem request=%+v err=%v", renewedFilesystem, err)
 	}
 }
 

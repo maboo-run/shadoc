@@ -2,6 +2,7 @@ package repositorycapacity
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/maboo-run/shadoc/internal/domain"
@@ -44,6 +45,9 @@ func (o *RunObserver) ObserveRun(ctx context.Context, task domain.Task, _ store.
 		}
 	}
 	_, err := o.prober.Probe(ctx, task.RepositoryID, nil)
+	if errors.Is(err, ErrUnsupported) {
+		return nil
+	}
 	if err != nil && o.store != nil {
 		_ = o.store.RecordRepositoryCapacityFailure(context.WithoutCancel(ctx), task.RepositoryID, o.now().UTC(), err.Error())
 	}

@@ -332,6 +332,132 @@ func validateSystemServiceArguments(arguments []string) error {
 	return nil
 }
 
+// ExistingSystemServiceListen returns the listener encoded in the current
+// root-owned Shadoc systemd unit. It only accepts the fixed unit shape written
+// by this package; a different unit must be reviewed explicitly rather than
+// being silently replaced during an application installation or update.
+func ExistingSystemServiceListen() (string, bool, error) {
+	path := definitionPathForScope("linux", SystemScope, "", "shadoc")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect system service definition: %w", err)
+	}
+	if err := validateOwnedRegularFile(info, 0); err != nil {
+		return "", false, fmt.Errorf("validate system service definition: %w", err)
+	}
+	if err := validateAdditionalPathSecurity(path, false); err != nil {
+		return "", false, fmt.Errorf("validate system service definition: %w", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, fmt.Errorf("read system service definition: %w", err)
+	}
+	listen, found, err := systemServiceListenFromUnit(string(content))
+	if err != nil {
+		return "", false, fmt.Errorf("parse system service definition: %w", err)
+	}
+	return listen, found, nil
+}
+
+func systemServiceListenFromUnit(unit string) (string, bool, error) {
+	var execStart string
+	for _, line := range strings.Split(unit, "\n") {
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		if execStart != "" {
+			return "", false, errors.New("system service defines multiple ExecStart commands")
+		}
+		execStart = strings.TrimPrefix(line, "ExecStart=")
+	}
+	if execStart == "" {
+		return "", false, errors.New("system service ExecStart is missing")
+	}
+	command, err := parseSystemdQuotedCommand(execStart)
+	if err != nil {
+		return "", false, err
+	}
+	if len(command) != 8 || filepath.Clean(command[0]) != "/var/lib/shadoc/app/shadoc" {
+		return "", false, errors.New("system service does not run the fixed Shadoc executable")
+	}
+	if err := validateSystemServiceArguments(command[1:]); err != nil {
+		return "", false, err
+	}
+	return command[5], true, nil
+}
+
+// parseSystemdQuotedCommand accepts the intentionally narrow quoting form
+// produced by systemdArgument. It is not a general systemd command parser:
+// accepting only this form lets listener preservation retain a verified
+// Shadoc-owned unit without accepting a user-provided command line.
+func parseSystemdQuotedCommand(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, errors.New("empty ExecStart command")
+	}
+	arguments := make([]string, 0, 8)
+	for value != "" {
+		if value[0] != '"' {
+			return nil, errors.New("ExecStart argument is not quoted")
+		}
+		value = value[1:]
+		var argument strings.Builder
+		closed := false
+		for len(value) > 0 {
+			switch value[0] {
+			case '"':
+				value = value[1:]
+				closed = true
+			case '\\':
+				if len(value) < 2 {
+					return nil, errors.New("ExecStart has an incomplete escape")
+				}
+				switch value[1] {
+				case '\\', '"':
+					argument.WriteByte(value[1])
+				case 'n':
+					argument.WriteByte('\n')
+				case 'r':
+					argument.WriteByte('\r')
+				default:
+					return nil, errors.New("ExecStart has an unsupported escape")
+				}
+				value = value[2:]
+			case '%':
+				if len(value) < 2 || value[1] != '%' {
+					return nil, errors.New("ExecStart has an unescaped systemd specifier")
+				}
+				argument.WriteByte('%')
+				value = value[2:]
+			default:
+				if value[0] == '\n' || value[0] == '\r' {
+					return nil, errors.New("ExecStart contains a control character")
+				}
+				argument.WriteByte(value[0])
+				value = value[1:]
+			}
+			if closed {
+				break
+			}
+		}
+		if !closed {
+			return nil, errors.New("ExecStart argument is unterminated")
+		}
+		arguments = append(arguments, argument.String())
+		if value == "" {
+			break
+		}
+		if value[0] != ' ' && value[0] != '\t' {
+			return nil, errors.New("ExecStart arguments are not separated")
+		}
+		value = strings.TrimLeft(value, " \t")
+	}
+	return arguments, nil
+}
+
 func validateOwnedExecutablePath(path string, expectedUID int) error {
 	return validateOwnedExecutablePathFrom(path, expectedUID, string(filepath.Separator))
 }

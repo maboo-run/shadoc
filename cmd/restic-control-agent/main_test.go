@@ -40,7 +40,7 @@ func TestShadocAgentEnvironmentTakesPrecedenceOverLegacyName(t *testing.T) {
 
 func TestFilesystemCapabilitiesAdvertiseScopePreview(t *testing.T) {
 	capabilities := filesystemCapabilities("windows")
-	for _, expected := range []string{"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview", agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", "path-style:windows"} {
+	for _, expected := range []string{"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview", agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", "filesystem-capacity", "repository-capacity", "path-style:windows"} {
 		if !slices.Contains(capabilities, expected) {
 			t.Fatalf("capabilities=%v missing %q", capabilities, expected)
 		}
@@ -48,6 +48,9 @@ func TestFilesystemCapabilitiesAdvertiseScopePreview(t *testing.T) {
 }
 
 func TestAgentCapabilitiesAdvertiseManagedResticInstallation(t *testing.T) {
+	if capabilities := agentCapabilities("posix", "linux"); !slices.Contains(capabilities, agentprotocol.AssignmentProgressCapability) {
+		t.Fatalf("capabilities=%v missing renewable assignment progress", capabilities)
+	}
 	if capabilities := agentCapabilities("posix", "linux"); !slices.Contains(capabilities, "managed-restic-install-v1") {
 		t.Fatalf("capabilities=%v missing managed Restic installation", capabilities)
 	}

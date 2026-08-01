@@ -14,6 +14,37 @@ import (
 	"github.com/maboo-run/shadoc/internal/command"
 )
 
+func TestLifecycleSystemConfigPreservesExistingListenUnlessExplicitlyOverridden(t *testing.T) {
+	existing := func() (string, bool, error) { return "0.0.0.0:8585", true, nil }
+	config, err := lifecycleConfigForScope(systemServiceScope, "install-app", "linux", func(string) string { return "" }, existing)
+	if err != nil || config.Listen != "0.0.0.0:8585" {
+		t.Fatalf("config=%+v err=%v", config, err)
+	}
+
+	config, err = lifecycleConfigForScope(systemServiceScope, "update-app", "linux", func(key string) string {
+		if key == "SHADOC_LISTEN" {
+			return "127.0.0.1:9090"
+		}
+		return ""
+	}, existing)
+	if err != nil || config.Listen != "127.0.0.1:9090" {
+		t.Fatalf("explicit config=%+v err=%v", config, err)
+	}
+
+	config, err = lifecycleConfigForScope(systemServiceScope, "uninstall-app", "linux", func(string) string { return "" }, func() (string, bool, error) {
+		return "", false, errors.New("must not read existing service")
+	})
+	if err != nil || config.Listen != "127.0.0.1:8585" {
+		t.Fatalf("uninstall config=%+v err=%v", config, err)
+	}
+
+	if _, err := lifecycleConfigForScope(systemServiceScope, "install-app", "linux", func(string) string { return "" }, func() (string, bool, error) {
+		return "", false, errors.New("unsafe existing service")
+	}); err == nil {
+		t.Fatal("unsafe existing system service was ignored")
+	}
+}
+
 func TestRecoverInterruptedStateRunsBeforeBackgroundServices(t *testing.T) {
 	at := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
 	recovery := &recoveryStoreFake{}

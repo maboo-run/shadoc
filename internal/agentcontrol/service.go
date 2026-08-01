@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -18,7 +19,26 @@ import (
 	"github.com/maboo-run/shadoc/internal/store"
 )
 
-const ClientCertificateLifetime = 365 * 24 * time.Hour
+const (
+	ClientCertificateLifetime = 365 * 24 * time.Hour
+	HeartbeatTimeout          = 2 * time.Minute
+)
+
+// IsOnline reports whether an Agent has a current heartbeat that can safely
+// receive new work. It is shared by task eligibility, capacity probing, and
+// health reporting so those flows cannot disagree about an Agent being online.
+func IsOnline(agent store.AgentRecord, now time.Time) bool {
+	return agent.Status == "online" && agent.LastHeartbeatAt != nil && !agent.LastHeartbeatAt.Before(now.Add(-HeartbeatTimeout))
+}
+
+func HasCapability(agent store.AgentRecord, capability string) bool {
+	for _, value := range agent.Capabilities {
+		if value == capability {
+			return true
+		}
+	}
+	return false
+}
 
 type AgentStore interface {
 	SaveAgentEnrollmentToken(context.Context, []byte, time.Time) error
@@ -41,6 +61,8 @@ type Service struct {
 	scopeMu   sync.RWMutex
 	scopeSink FilesystemScopeSink
 }
+
+const assignmentLeaseRenewal = 2 * time.Minute
 
 func (s *Service) SetAssignmentHydrator(hydrate func(context.Context, store.AgentLease) (json.RawMessage, error)) {
 	s.hydrate = hydrate
@@ -285,6 +307,42 @@ func (s *Service) Complete(ctx context.Context, result agentprotocol.Result) err
 		return err
 	}
 	return storage.CompleteAgentLease(ctx, result.AssignmentID, result.AgentID, result.Status, encoded, s.now().UTC())
+}
+
+func (s *Service) Progress(ctx context.Context, authenticatedAgentID string, progress agentprotocol.AssignmentProgress) error {
+	if err := progress.ValidateFor(authenticatedAgentID); err != nil {
+		return err
+	}
+	leaseStorage, ok := s.storage.(interface {
+		UpdateAgentLeaseProgress(context.Context, string, string, json.RawMessage, time.Time, time.Time) error
+	})
+	if !ok {
+		return errors.New("persistent Agent progress storage is unavailable")
+	}
+	encoded, err := json.Marshal(progress)
+	if err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	expiresAt := now.Add(assignmentLeaseRenewal)
+	err = leaseStorage.UpdateAgentLeaseProgress(ctx, progress.AssignmentID, progress.AgentID, encoded, now, expiresAt)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if filesystemStorage, ok := s.storage.(interface {
+		RenewAgentFilesystemRequest(context.Context, string, string, time.Time, time.Time) error
+	}); ok {
+		err = filesystemStorage.RenewAgentFilesystemRequest(ctx, progress.AssignmentID, progress.AgentID, now, expiresAt)
+		if err == nil || !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if restoreStorage, ok := s.storage.(interface {
+		RenewAgentRestoreRequest(context.Context, string, string, time.Time, time.Time) error
+	}); ok {
+		return restoreStorage.RenewAgentRestoreRequest(ctx, progress.AssignmentID, progress.AgentID, now, expiresAt)
+	}
+	return err
 }
 
 func (s *Service) ClaimFilesystem(ctx context.Context, agentID string) (agentprotocol.Assignment, error) {

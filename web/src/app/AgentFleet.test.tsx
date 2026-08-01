@@ -69,7 +69,7 @@ describe("Agent fleet health", () => {
     const onProbeHeartbeat = vi.fn();
     render(<AgentFleet
       agents={[{
-        id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", taskEligible: true,
+        id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", taskEligible: true,
         buildVersion: "v1.3.0", targetVersion: "v1.4.0", upgradeAvailable: true, platform: "linux/arm64",
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "expiring_30",
         certificateNotAfter: "2026-08-04T12:00:00Z", renewalStatus: "healthy", resticVersion: "0.18.0",
@@ -127,7 +127,7 @@ describe("Agent fleet health", () => {
       error: "",
     } as unknown as OperationController;
     render(<AgentFleet
-      agents={[{ id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64" }]}
+      agents={[{ id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", platform: "linux/amd64" }]}
       remoteHosts={[]}
       locale="zh-CN"
       timeZone="Asia/Shanghai"
@@ -155,7 +155,7 @@ describe("Agent fleet health", () => {
     const onRemove = vi.fn();
     render(<AgentFleet
       agents={[{
-        id: "orphaned-agent", remoteHostId: "deleted-host", status: "offline", runtimeStatus: "unknown",
+        id: "orphaned-agent", remoteHostId: "deleted-host", managedInstallation: true, status: "offline", runtimeStatus: "unknown",
         platform: "linux/amd64", certificateStatus: "valid",
       }]}
       remoteHosts={[{ id: "replacement-host", name: "新连接", host: "192.168.0.105", port: 22, username: "backup" }]}
@@ -177,6 +177,31 @@ describe("Agent fleet health", () => {
     expect(screen.queryByRole("button", { name: "停止并卸载" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "撤销凭据" }));
     expect(onRemove).toHaveBeenCalledWith(expect.objectContaining({ id: "orphaned-agent" }), "revoke");
+  });
+
+  it("offers an explicit host association for a manual Agent without granting managed lifecycle actions", async () => {
+    const user = userEvent.setup();
+    const onBindRemoteHost = vi.fn();
+    render(<AgentFleet
+      agents={[{ id: "manual-agent", status: "online", runtimeStatus: "running", platform: "linux/amd64" }]}
+      remoteHosts={[{ id: "host-a", name: "源端", host: "source.example", port: 22, username: "backup" }]}
+      remoteHostsLoaded
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      currentServiceURL="https://control.internal:9443"
+      busy={false}
+      onUpgrade={vi.fn()}
+      onBindRemoteHost={onBindRemoteHost}
+      onRedeploy={vi.fn()}
+      onRemove={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "manual-agent 查看详情" }));
+    expect(screen.getByText("manual-agent").closest("article")).toHaveTextContent("手动安装");
+    expect(screen.getByRole("button", { name: "关联远程主机" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "停止并卸载" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关联远程主机" }));
+    expect(onBindRemoteHost).toHaveBeenCalledWith(expect.objectContaining({ id: "manual-agent" }));
   });
 
   it("offers same-ID redeployment after an orphaned Agent binding is repaired and revoked", async () => {
@@ -232,9 +257,10 @@ describe("Agent fleet health", () => {
 
   it("omits no-action Restic and Service health confirmations", async () => {
     const user = userEvent.setup();
+    const onUpgrade = vi.fn();
     render(<AgentFleet
       agents={[{
-        id: "healthy", remoteHostId: "host-a", status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", taskEligible: true,
+        id: "healthy", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", compatibilityStatus: "compatible", taskEligible: true,
         buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: false, platform: "linux/amd64",
         protocolMin: 1, protocolMax: 1, protocolCompatible: true, certificateStatus: "valid", resticVersion: "0.19.1",
         capabilities: ["managed-restic-install-v1", "restic"], endpointStatus: "current", serviceUrl: "https://control.internal:9443",
@@ -245,7 +271,7 @@ describe("Agent fleet health", () => {
       currentServiceURL="https://control.internal:9443"
       latestResticVersion="0.19.1"
       busy={false}
-      onUpgrade={vi.fn()}
+      onUpgrade={onUpgrade}
       onInstallRestic={vi.fn()}
       onRedeploy={vi.fn()}
       onRemove={vi.fn()}
@@ -257,13 +283,15 @@ describe("Agent fleet health", () => {
     expect(screen.getByText("https://control.internal:9443")).toBeVisible();
     expect(screen.queryByText("地址一致")).not.toBeInTheDocument();
     expect(screen.queryByText("Agent Restic 已是最新版本。")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /升级 Agent 至/ })).not.toBeInTheDocument();
+    const reinstall = screen.getByRole("button", { name: "重新安装 Agent" });
+    await user.click(reinstall);
+    expect(onUpgrade).toHaveBeenCalledWith(expect.objectContaining({ id: "healthy" }));
   });
 
   it("keeps managed Restic installation visible while explaining an old Agent binary", async () => {
     const user = userEvent.setup();
     render(<AgentFleet
-      agents={[{ id: "legacy", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64", capabilities: [] }]}
+      agents={[{ id: "legacy", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", platform: "linux/amd64", capabilities: [] }]}
       remoteHosts={[]}
       locale="zh-CN"
       timeZone="Asia/Shanghai"
@@ -285,7 +313,7 @@ describe("Agent fleet health", () => {
     const onUpgrade = vi.fn();
     render(<AgentFleet
       agents={[{
-        id: "legacy", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64",
+        id: "legacy", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", platform: "linux/amd64",
         buildVersion: "v1.4.0", targetVersion: "v1.4.0", upgradeAvailable: true, capabilities: [],
       }]}
       remoteHosts={[]}
@@ -307,7 +335,7 @@ describe("Agent fleet health", () => {
   it("keeps the install action visible when the official version catalog is temporarily unavailable", async () => {
     const user = userEvent.setup();
     render(<AgentFleet
-      agents={[{ id: "agent-a", remoteHostId: "host-a", status: "online", runtimeStatus: "running", platform: "linux/amd64", capabilities: ["managed-restic-install-v1"] }]}
+      agents={[{ id: "agent-a", remoteHostId: "host-a", managedInstallation: true, status: "online", runtimeStatus: "running", platform: "linux/amd64", capabilities: ["managed-restic-install-v1"] }]}
       remoteHosts={[]}
       locale="zh-CN"
       timeZone="Asia/Shanghai"

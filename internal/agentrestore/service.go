@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/maboo-run/shadoc/internal/agentcontrol"
 	"github.com/maboo-run/shadoc/internal/agentfilesystem"
 	"github.com/maboo-run/shadoc/internal/agentprotocol"
 	"github.com/maboo-run/shadoc/internal/domain"
@@ -142,7 +143,7 @@ func (s *Service) requireAgent(ctx context.Context, agentID string) error {
 	}
 	now := s.now().UTC()
 	for _, agent := range agents {
-		if agent.ID != agentID || agent.RevokedAt != nil || agent.DrainingAt != nil || agent.Status != "online" || agent.LastHeartbeatAt == nil || now.Sub(agent.LastHeartbeatAt.UTC()) > time.Minute {
+		if agent.ID != agentID || agent.RevokedAt != nil || agent.DrainingAt != nil || !agentcontrol.IsOnline(agent, now) {
 			continue
 		}
 		hasRestore, hasTargetCheck := false, false

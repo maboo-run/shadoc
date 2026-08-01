@@ -241,6 +241,8 @@ export const httpAPI: AppAPI = {
     putJSON(`/api/tasks/${encodeURIComponent(taskId)}/restore-verification-policy`, payload),
   deleteRestoreVerificationPolicy: (taskId) =>
     mutateJSON(`/api/tasks/${encodeURIComponent(taskId)}/restore-verification-policy`, "DELETE"),
+  bindAgentRemoteHost: (agentId, remoteHostId) =>
+    putJSON(`/api/agents/${encodeURIComponent(agentId)}/remote-host`, { remoteHostId }),
   action: (path: string, payload?: Record<string, unknown>) =>
     payload === undefined ? getJSON(path) : postJSON(path, payload),
 };

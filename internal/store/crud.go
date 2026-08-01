@@ -49,29 +49,61 @@ func containsFold(value, part string) bool {
 }
 
 func (s *Store) UpdateRemoteHost(ctx context.Context, h domain.RemoteHost, newSecret string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
 	var old string
-	if err := s.db.QueryRowContext(ctx, `SELECT private_key_secret_id FROM remote_hosts WHERE id=?`, h.ID).Scan(&old); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT private_key_secret_id FROM remote_hosts WHERE id=?`, h.ID).Scan(&old); err != nil {
 		return "", err
 	}
 	secret := old
 	if newSecret != "" {
 		secret = newSecret
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE remote_hosts SET name=?,host=?,port=?,username=?,private_key_secret_id=?,host_fingerprint=?,updated_at=? WHERE id=?`, h.Name, h.Host, h.Port, h.Username, secret, h.HostFingerprint, formatTime(h.UpdatedAt), h.ID)
-	return old, constraintError(err)
-}
-func (s *Store) DeleteRemoteHost(ctx context.Context, id string) (string, error) {
-	var secret string
-	if err := s.db.QueryRowContext(ctx, `SELECT private_key_secret_id FROM remote_hosts WHERE id=?`, id).Scan(&secret); err != nil {
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, secret); err != nil {
 		return "", err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM remote_hosts WHERE id=?`, id)
-	return secret, constraintError(err)
+	if _, err := tx.ExecContext(ctx, `UPDATE remote_hosts SET name=?,host=?,port=?,username=?,private_key_secret_id=?,host_fingerprint=?,updated_at=? WHERE id=?`, h.Name, h.Host, h.Port, h.Username, secret, h.HostFingerprint, formatTime(h.UpdatedAt), h.ID); err != nil {
+		return "", constraintError(err)
+	}
+	return old, tx.Commit()
+}
+func (s *Store) DeleteRemoteHost(ctx context.Context, id string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var secret string
+	if err := tx.QueryRowContext(ctx, `SELECT private_key_secret_id FROM remote_hosts WHERE id=?`, id).Scan(&secret); err != nil {
+		return "", err
+	}
+	dependencies, err := resourceDeleteDependencies(ctx, tx, "remote-hosts", id)
+	if err != nil {
+		return "", err
+	}
+	if len(dependencies) > 0 {
+		return "", ErrConflict
+	}
+	if err := deleteResourceOwnedRecords(ctx, tx, "remote-hosts", id); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM remote_hosts WHERE id=?`, id); err != nil {
+		return "", constraintError(err)
+	}
+	return secret, tx.Commit()
 }
 
 func (s *Store) UpdateRepository(ctx context.Context, r domain.Repository, newSecret string) ([]string, error) {
-	var old, oldKind, oldHost, oldPath, oldBackendJSON, oldBackendSecret string
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(password_secret_id,''),kind,COALESCE(remote_host_id,''),path,backend_json,COALESCE(backend_secret_id,'') FROM repositories WHERE id=?`, r.ID).Scan(&old, &oldKind, &oldHost, &oldPath, &oldBackendJSON, &oldBackendSecret); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var old, oldKind, oldLocalTargetJSON, oldHost, oldPath, oldBackendJSON, oldBackendSecret string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(password_secret_id,''),kind,local_target_json,COALESCE(remote_host_id,''),path,backend_json,COALESCE(backend_secret_id,'') FROM repositories WHERE id=?`, r.ID).Scan(&old, &oldKind, &oldLocalTargetJSON, &oldHost, &oldPath, &oldBackendJSON, &oldBackendSecret); err != nil {
 		return nil, err
 	}
 	if r.EffectiveKind() == domain.S3Repository && r.BackendSecretID == "" {
@@ -81,9 +113,13 @@ func (s *Store) UpdateRepository(ctx context.Context, r domain.Repository, newSe
 	if err != nil {
 		return nil, err
 	}
-	if oldKind != string(r.EffectiveKind()) || oldHost != r.RemoteHostID || oldPath != r.Path || oldBackendJSON != backendJSON {
+	localTargetJSON, err := encodeRepositoryLocalTarget(r)
+	if err != nil {
+		return nil, err
+	}
+	if oldKind != string(r.EffectiveKind()) || oldLocalTargetJSON != localTargetJSON || oldHost != r.RemoteHostID || oldPath != r.Path || oldBackendJSON != backendJSON {
 		var references int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE repository_id=?`, r.ID).Scan(&references); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE repository_id=?`, r.ID).Scan(&references); err != nil {
 			return nil, err
 		}
 		if references > 0 {
@@ -94,7 +130,23 @@ func (s *Store) UpdateRepository(ctx context.Context, r domain.Repository, newSe
 	if newSecret != "" {
 		secret = newSecret
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE repositories SET name=?,engine=?,kind=?,remote_host_id=?,path=?,password_secret_id=?,backend_json=?,backend_secret_id=?,status=?,updated_at=? WHERE id=?`, r.Name, r.EffectiveEngine(), r.EffectiveKind(), nullString(r.RemoteHostID), r.Path, nullString(secret), backendJSON, nullString(r.BackendSecretID), r.Status, formatTime(r.UpdatedAt), r.ID)
+	if r.RemoteHostID != "" {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, r.RemoteHostID); err != nil {
+			return nil, err
+		}
+	}
+	if err := requireRepositoryLocalTargetReference(ctx, tx, r); err != nil {
+		return nil, err
+	}
+	for _, secretID := range []string{secret, r.BackendSecretID} {
+		if secretID == "" {
+			continue
+		}
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, secretID); err != nil {
+			return nil, err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE repositories SET name=?,engine=?,kind=?,local_target_json=?,remote_host_id=?,path=?,password_secret_id=?,backend_json=?,backend_secret_id=?,status=?,updated_at=? WHERE id=?`, r.Name, r.EffectiveEngine(), r.EffectiveKind(), localTargetJSON, nullString(r.RemoteHostID), r.Path, nullString(secret), backendJSON, nullString(r.BackendSecretID), r.Status, formatTime(r.UpdatedAt), r.ID)
 	if err := constraintError(err); err != nil {
 		return nil, err
 	}
@@ -105,26 +157,51 @@ func (s *Store) UpdateRepository(ctx context.Context, r domain.Repository, newSe
 	if oldBackendSecret != "" && oldBackendSecret != r.BackendSecretID {
 		obsolete = append(obsolete, oldBackendSecret)
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return obsolete, nil
 }
 func (s *Store) DeleteRepository(ctx context.Context, id string) (string, error) {
-	var secret string
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(password_secret_id,'') FROM repositories WHERE id=?`, id).Scan(&secret); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return "", err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM repositories WHERE id=?`, id)
-	return secret, constraintError(err)
+	defer tx.Rollback()
+	var secret string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(password_secret_id,'') FROM repositories WHERE id=?`, id).Scan(&secret); err != nil {
+		return "", err
+	}
+	dependencies, err := resourceDeleteDependencies(ctx, tx, "repositories", id)
+	if err != nil {
+		return "", err
+	}
+	if len(dependencies) > 0 {
+		return "", ErrConflict
+	}
+	if err := deleteResourceOwnedRecords(ctx, tx, "repositories", id); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM repositories WHERE id=?`, id); err != nil {
+		return "", constraintError(err)
+	}
+	return secret, tx.Commit()
 }
 
 func (s *Store) UpdateDatabaseConnection(ctx context.Context, c domain.DatabaseConnection, newSecret string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
 	var old string
 	var oldEngine, oldPurpose string
-	if err := s.db.QueryRowContext(ctx, `SELECT password_secret_id,engine,purpose FROM database_connections WHERE id=?`, c.ID).Scan(&old, &oldEngine, &oldPurpose); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT password_secret_id,engine,purpose FROM database_connections WHERE id=?`, c.ID).Scan(&old, &oldEngine, &oldPurpose); err != nil {
 		return "", err
 	}
 	if oldEngine != string(c.Engine) || oldPurpose != string(c.Purpose) {
 		var references int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='database' AND json_extract(source_json,'$.connectionId')=?`, c.ID).Scan(&references); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE kind='database' AND json_extract(source_json,'$.connectionId')=?`, c.ID).Scan(&references); err != nil {
 			return "", err
 		}
 		if references > 0 {
@@ -135,19 +212,38 @@ func (s *Store) UpdateDatabaseConnection(ctx context.Context, c domain.DatabaseC
 	if newSecret != "" {
 		secret = newSecret
 	}
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, secret); err != nil {
+		return "", err
+	}
 	tlsJSON, _ := json.Marshal(c.TLS)
 	toolsJSON, _ := json.Marshal(c.ToolPaths)
-	_, err := s.db.ExecContext(ctx, `UPDATE database_connections SET name=?,engine=?,purpose=?,network=?,host=?,port=?,socket_path=?,username=?,password_secret_id=?,tls_json=?,tool_paths_json=?,status=?,preflight_checked_at=?,preflight_client_version=?,preflight_server_version=?,preflight_error=?,updated_at=? WHERE id=?`, c.Name, c.Engine, c.Purpose, c.Network, nullString(c.Host), nullInt(c.Port), nullString(c.SocketPath), c.Username, secret, string(tlsJSON), string(toolsJSON), c.Status, nullTime(c.Preflight.CheckedAt), c.Preflight.ClientVersion, c.Preflight.ServerVersion, c.Preflight.Error, formatTime(c.UpdatedAt), c.ID)
-	return old, constraintError(err)
+	if _, err := tx.ExecContext(ctx, `UPDATE database_connections SET name=?,engine=?,purpose=?,network=?,host=?,port=?,socket_path=?,username=?,password_secret_id=?,tls_json=?,tool_paths_json=?,status=?,preflight_checked_at=?,preflight_client_version=?,preflight_server_version=?,preflight_error=?,updated_at=? WHERE id=?`, c.Name, c.Engine, c.Purpose, c.Network, nullString(c.Host), nullInt(c.Port), nullString(c.SocketPath), c.Username, secret, string(tlsJSON), string(toolsJSON), c.Status, nullTime(c.Preflight.CheckedAt), c.Preflight.ClientVersion, c.Preflight.ServerVersion, c.Preflight.Error, formatTime(c.UpdatedAt), c.ID); err != nil {
+		return "", constraintError(err)
+	}
+	return old, tx.Commit()
 }
 func (s *Store) DeleteDatabaseConnection(ctx context.Context, id string) (string, error) {
-	var secret string
-	err := s.db.QueryRowContext(ctx, `SELECT password_secret_id FROM database_connections WHERE id=?`, id).Scan(&secret)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM database_connections WHERE id=?`, id)
-	return secret, constraintError(err)
+	defer tx.Rollback()
+	var secret string
+	err = tx.QueryRowContext(ctx, `SELECT password_secret_id FROM database_connections WHERE id=?`, id).Scan(&secret)
+	if err != nil {
+		return "", err
+	}
+	dependencies, err := resourceDeleteDependencies(ctx, tx, "database-connections", id)
+	if err != nil {
+		return "", err
+	}
+	if len(dependencies) > 0 {
+		return "", ErrConflict
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM database_connections WHERE id=?`, id); err != nil {
+		return "", constraintError(err)
+	}
+	return secret, tx.Commit()
 }
 
 func (s *Store) UpdateTask(ctx context.Context, t domain.Task) error {
@@ -166,10 +262,23 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.Task) error {
 			return ErrConflict
 		}
 	}
+	if target := t.EffectiveExecutionTarget(); target.Kind == execution.Agent {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM agents WHERE id=?`, target.AgentID); err != nil {
+			return err
+		}
+	}
+	if err := validateTaskRepositoryTarget(ctx, tx, t.RepositoryID, t.EffectiveExecutionTarget()); err != nil {
+		return err
+	}
 	if t.EffectiveEngine() == domain.RsyncEngine && t.RepositoryID != "" {
 		var repositoryStatus, repositoryEngine string
 		if err := tx.QueryRowContext(ctx, `SELECT status,engine FROM repositories WHERE id=?`, t.RepositoryID).Scan(&repositoryStatus, &repositoryEngine); err != nil || repositoryStatus != "ready" || repositoryEngine != string(domain.RsyncEngine) {
 			return ErrConflict
+		}
+	}
+	if t.EffectiveEngine() == domain.RsyncEngine && t.RepositoryID == "" && t.Rsync != nil && t.Rsync.EffectiveDestinationKind() == domain.RsyncDestinationSSH {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, t.Rsync.DestinationHostID); err != nil {
+			return err
 		}
 	}
 	if t.EffectiveEngine() == domain.ResticEngine && t.Database != nil {
@@ -180,19 +289,8 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.Task) error {
 		}
 	}
 	if !t.Enabled {
-		var enabledPlans int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_tasks pt JOIN plans p ON p.id=pt.plan_id WHERE pt.task_id=? AND p.enabled=1`, t.ID).Scan(&enabledPlans); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE restore_verification_policies SET enabled=0 WHERE task_id=?`, t.ID); err != nil {
 			return err
-		}
-		if enabledPlans > 0 {
-			return ErrConflict
-		}
-		var enabledVerification int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_verification_policies WHERE task_id=? AND enabled=1`, t.ID).Scan(&enabledVerification); err != nil {
-			return err
-		}
-		if enabledVerification > 0 {
-			return ErrConflict
 		}
 	}
 	var verificationPolicies int
@@ -246,25 +344,26 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.Task) error {
 	return tx.Commit()
 }
 func (s *Store) DeleteTask(ctx context.Context, id string) error {
-	var enabledPlans, cleanupRequired int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_tasks pt JOIN plans p ON p.id=pt.plan_id WHERE pt.task_id=? AND p.enabled=1`, id).Scan(&enabledPlans); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM restore_verifications WHERE task_id=? AND cleanup_status='required'`, id).Scan(&cleanupRequired); err != nil {
+	defer tx.Rollback()
+	if _, err := ensureTaskDeletableInTx(ctx, tx, id); err != nil {
 		return err
 	}
-	if enabledPlans > 0 || cleanupRequired > 0 {
-		return ErrConflict
+	if err := deleteTaskOwnedRecords(ctx, tx, id); err != nil {
+		return err
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
+	result, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=? AND enabled=0`, id)
 	if err != nil {
 		return constraintError(err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return sql.ErrNoRows
+		return ErrConflict
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) UpdatePlan(ctx context.Context, p domain.Plan) error {
@@ -289,13 +388,8 @@ func (s *Store) UpdatePlan(ctx context.Context, p domain.Plan) error {
 	if previousSchedule != string(scheduleJSON) || previousTimezone != p.Timezone || (previousEnabled == 0 && p.Enabled) {
 		anchor = p.UpdatedAt
 	}
-	if p.Enabled {
-		for _, taskID := range p.TaskIDs {
-			var enabled int
-			if err := tx.QueryRowContext(ctx, `SELECT enabled FROM tasks WHERE id=?`, taskID).Scan(&enabled); err != nil || enabled == 0 {
-				return ErrConflict
-			}
-		}
+	if err := validatePlanTaskReferences(ctx, tx, p.TaskIDs, p.Enabled); err != nil {
+		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE plans SET name=?,schedule_json=?,timezone=?,max_parallel=?,enabled=?,catch_up_window_minutes=?,schedule_anchor_at=?,updated_at=? WHERE id=?`, p.Name, string(scheduleJSON), p.Timezone, p.MaxParallel, boolInt(p.Enabled), p.CatchUpWindowMinutes, formatTime(anchor), formatTime(p.UpdatedAt), p.ID); err != nil {
 		return constraintError(err)
@@ -311,7 +405,15 @@ func (s *Store) UpdatePlan(ctx context.Context, p domain.Plan) error {
 	return tx.Commit()
 }
 func (s *Store) DeletePlan(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM plans WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := deleteResourceOwnedRecords(ctx, tx, "plans", id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM plans WHERE id=?`, id)
 	if err != nil {
 		return constraintError(err)
 	}
@@ -319,7 +421,7 @@ func (s *Store) DeletePlan(ctx context.Context, id string) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return tx.Commit()
 }
 
 func normalizeNotFound(err error) error {

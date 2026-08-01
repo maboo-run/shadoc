@@ -12,6 +12,7 @@ import (
 type AgentRecord struct {
 	ID                  string
 	RemoteHostID        string
+	ManagedInstallation bool
 	CertificateSerial   string
 	CertificateNotAfter *time.Time
 	Capabilities        []string
@@ -59,7 +60,9 @@ type AgentLease struct {
 	Status         string
 	ExpiresAt      time.Time
 	AcknowledgedAt *time.Time
+	RenewedAt      *time.Time
 	CompletedAt    *time.Time
+	Progress       json.RawMessage
 	Result         json.RawMessage
 }
 
@@ -71,6 +74,7 @@ type AgentFilesystemRequest struct {
 	Result      json.RawMessage
 	ExpiresAt   time.Time
 	CreatedAt   time.Time
+	RenewedAt   *time.Time
 	CompletedAt *time.Time
 }
 
@@ -82,6 +86,7 @@ type AgentRestoreRequest struct {
 	Result      json.RawMessage
 	ExpiresAt   time.Time
 	CreatedAt   time.Time
+	RenewedAt   *time.Time
 	CompletedAt *time.Time
 }
 
@@ -89,9 +94,21 @@ func (s *Store) CreateAgentRestoreRequest(ctx context.Context, request AgentRest
 	if !json.Valid(request.Definition) {
 		return errors.New("Agent restore request definition must be valid JSON")
 	}
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM agent_restore_requests WHERE expires_at<?`, formatTime(request.CreatedAt.Add(-24*time.Hour)))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_restore_requests(id,agent_id,definition_json,status,expires_at,created_at) VALUES(?,?,?,'queued',?,?)`, request.ID, request.AgentID, string(request.Definition), formatTime(request.ExpiresAt), formatTime(request.CreatedAt))
-	return constraintError(err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM agents WHERE id=?`, request.AgentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_restore_requests WHERE expires_at<?`, formatTime(request.CreatedAt.Add(-24*time.Hour))); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_restore_requests(id,agent_id,definition_json,status,expires_at,created_at) VALUES(?,?,?,'queued',?,?)`, request.ID, request.AgentID, string(request.Definition), formatTime(request.ExpiresAt), formatTime(request.CreatedAt)); err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ClaimAgentRestoreRequest(ctx context.Context, agentID string, at time.Time) (AgentRestoreRequest, error) {
@@ -140,12 +157,20 @@ func (s *Store) CompleteAgentRestoreRequest(ctx context.Context, id, agentID, st
 	return nil
 }
 
+func (s *Store) RenewAgentRestoreRequest(ctx context.Context, id, agentID string, renewedAt, expiresAt time.Time) error {
+	return s.renewAgentRequest(ctx, "agent_restore_requests", id, agentID, renewedAt, expiresAt)
+}
+
 func (s *Store) AgentRestoreRequestStatus(ctx context.Context, id string) (AgentRestoreRequest, error) {
 	var request AgentRestoreRequest
 	var definition, result, expires, created string
-	var completed sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,definition_json,status,result_json,expires_at,created_at,completed_at FROM agent_restore_requests WHERE id=?`, id).Scan(&request.ID, &request.AgentID, &definition, &request.Status, &result, &expires, &created, &completed)
+	var renewed, completed sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,definition_json,status,result_json,expires_at,created_at,renewed_at,completed_at FROM agent_restore_requests WHERE id=?`, id).Scan(&request.ID, &request.AgentID, &definition, &request.Status, &result, &expires, &created, &renewed, &completed)
 	request.Definition, request.Result, request.ExpiresAt, request.CreatedAt = json.RawMessage(definition), json.RawMessage(result), mustParseTime(expires), mustParseTime(created)
+	if renewed.Valid {
+		value := mustParseTime(renewed.String)
+		request.RenewedAt = &value
+	}
 	if completed.Valid {
 		value := mustParseTime(completed.String)
 		request.CompletedAt = &value
@@ -170,9 +195,21 @@ func (s *Store) CreateAgentFilesystemRequest(ctx context.Context, request AgentF
 	if !json.Valid(request.Definition) {
 		return errors.New("filesystem request definition must be valid JSON")
 	}
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM agent_filesystem_requests WHERE expires_at<?`, formatTime(request.CreatedAt.Add(-24*time.Hour)))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_filesystem_requests(id,agent_id,definition_json,status,expires_at,created_at) VALUES(?,?,?,'queued',?,?)`, request.ID, request.AgentID, string(request.Definition), formatTime(request.ExpiresAt), formatTime(request.CreatedAt))
-	return constraintError(err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM agents WHERE id=?`, request.AgentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_filesystem_requests WHERE expires_at<?`, formatTime(request.CreatedAt.Add(-24*time.Hour))); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_filesystem_requests(id,agent_id,definition_json,status,expires_at,created_at) VALUES(?,?,?,'queued',?,?)`, request.ID, request.AgentID, string(request.Definition), formatTime(request.ExpiresAt), formatTime(request.CreatedAt)); err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ClaimAgentFilesystemRequest(ctx context.Context, agentID string, at time.Time) (AgentFilesystemRequest, error) {
@@ -221,6 +258,27 @@ func (s *Store) CompleteAgentFilesystemRequest(ctx context.Context, id, agentID,
 	return nil
 }
 
+func (s *Store) RenewAgentFilesystemRequest(ctx context.Context, id, agentID string, renewedAt, expiresAt time.Time) error {
+	return s.renewAgentRequest(ctx, "agent_filesystem_requests", id, agentID, renewedAt, expiresAt)
+}
+
+func (s *Store) renewAgentRequest(ctx context.Context, table, id, agentID string, renewedAt, expiresAt time.Time) error {
+	if table != "agent_filesystem_requests" && table != "agent_restore_requests" {
+		return errors.New("unsupported Agent request type")
+	}
+	if renewedAt.IsZero() || !expiresAt.After(renewedAt) {
+		return errors.New("Agent request renewal expiry must follow its observation")
+	}
+	updated, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET renewed_at=?,expires_at=? WHERE id=? AND agent_id=? AND status='running' AND completed_at IS NULL`, formatTime(renewedAt), formatTime(expiresAt), id, agentID)
+	if err != nil {
+		return err
+	}
+	if count, _ := updated.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) ExpireAgentFilesystemRequest(ctx context.Context, id, reason string, at time.Time) error {
 	result, _ := json.Marshal(map[string]any{"version": 1, "assignmentId": id, "status": "failed", "error": reason})
 	updated, err := s.db.ExecContext(ctx, `UPDATE agent_filesystem_requests SET status='failed',result_json=?,completed_at=? WHERE id=? AND completed_at IS NULL`, string(result), formatTime(at), id)
@@ -237,9 +295,13 @@ func (s *Store) ExpireAgentFilesystemRequest(ctx context.Context, id, reason str
 func (s *Store) AgentFilesystemRequestStatus(ctx context.Context, id string) (AgentFilesystemRequest, error) {
 	var request AgentFilesystemRequest
 	var definition, result, expires, created string
-	var completed sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,definition_json,status,result_json,expires_at,created_at,completed_at FROM agent_filesystem_requests WHERE id=?`, id).Scan(&request.ID, &request.AgentID, &definition, &request.Status, &result, &expires, &created, &completed)
+	var renewed, completed sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,definition_json,status,result_json,expires_at,created_at,renewed_at,completed_at FROM agent_filesystem_requests WHERE id=?`, id).Scan(&request.ID, &request.AgentID, &definition, &request.Status, &result, &expires, &created, &renewed, &completed)
 	request.Definition, request.Result, request.ExpiresAt, request.CreatedAt = json.RawMessage(definition), json.RawMessage(result), mustParseTime(expires), mustParseTime(created)
+	if renewed.Valid {
+		value := mustParseTime(renewed.String)
+		request.RenewedAt = &value
+	}
 	if completed.Valid {
 		value := mustParseTime(completed.String)
 		request.CompletedAt = &value
@@ -262,21 +324,27 @@ func (s *Store) SaveAgent(ctx context.Context, agent AgentRecord) error {
 		return err
 	}
 	defer tx.Rollback()
+	if agent.RemoteHostID != "" {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, agent.RemoteHostID); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO agents(
-			id,remote_host_id,certificate_serial,certificate_not_after,capabilities_json,
+			id,remote_host_id,managed_installation,certificate_serial,certificate_not_after,capabilities_json,
 			build_version,protocol_min,protocol_max,platform_os,platform_arch,restic_version,rsync_version,service_url,renewal_status,
 			status,last_heartbeat_at,created_at,revoked_at,draining_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			remote_host_id=COALESCE(excluded.remote_host_id,agents.remote_host_id),
+			managed_installation=CASE WHEN excluded.managed_installation<>0 THEN 1 ELSE agents.managed_installation END,
 			certificate_serial=excluded.certificate_serial,certificate_not_after=excluded.certificate_not_after,
 			capabilities_json=excluded.capabilities_json,build_version=excluded.build_version,
 			protocol_min=excluded.protocol_min,protocol_max=excluded.protocol_max,platform_os=excluded.platform_os,platform_arch=excluded.platform_arch,
 			restic_version=excluded.restic_version,rsync_version=excluded.rsync_version,service_url=excluded.service_url,renewal_status=excluded.renewal_status,
 			status=excluded.status,last_heartbeat_at=excluded.last_heartbeat_at,revoked_at=excluded.revoked_at,
 			stopped_at=NULL,uninstalled_at=NULL,draining_at=excluded.draining_at`,
-		agent.ID, nullString(agent.RemoteHostID), agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), string(capabilities),
+		agent.ID, nullString(agent.RemoteHostID), agent.ManagedInstallation, agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), string(capabilities),
 		agent.BuildVersion, agent.ProtocolMin, agent.ProtocolMax, agent.OS, agent.Arch, agent.ResticVersion, agent.RsyncVersion, agent.ServiceURL, agent.RenewalStatus,
 		agent.Status, nullableTime(agent.LastHeartbeatAt), formatTime(agent.CreatedAt), nullableTime(agent.RevokedAt), nullableTime(agent.DrainingAt))
 	if err != nil {
@@ -320,7 +388,7 @@ func (s *Store) EnrollAgent(ctx context.Context, agent AgentRecord) error {
 		return errors.New("Agent is already enrolled and active")
 	default:
 		_, err = tx.ExecContext(ctx, `
-			UPDATE agents SET certificate_serial=?,certificate_not_after=?,capabilities_json='[]',
+			UPDATE agents SET remote_host_id=NULL,managed_installation=0,certificate_serial=?,certificate_not_after=?,capabilities_json='[]',
 				build_version='',protocol_min=0,protocol_max=0,platform_os='',platform_arch='',restic_version='',rsync_version='',service_url='',renewal_status='',
 				status='offline',last_heartbeat_at=NULL,revoked_at=NULL,stopped_at=NULL,uninstalled_at=NULL,draining_at=NULL
 			WHERE id=?`, agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), agent.ID)
@@ -365,6 +433,18 @@ func (s *Store) CompleteAgentUninstall(ctx context.Context, id string, at time.T
 }
 
 func (s *Store) BindAgentRemoteHost(ctx context.Context, agentID, hostID string) error {
+	return s.bindAgentRemoteHost(ctx, agentID, hostID, false)
+}
+
+// BindManagedAgentRemoteHost records the host association created by an
+// in-product deployment. Manual associations must use BindAgentRemoteHost so
+// lifecycle operations cannot mistake a manually installed Agent for one the
+// Service is allowed to upgrade or uninstall.
+func (s *Store) BindManagedAgentRemoteHost(ctx context.Context, agentID, hostID string) error {
+	return s.bindAgentRemoteHost(ctx, agentID, hostID, true)
+}
+
+func (s *Store) bindAgentRemoteHost(ctx context.Context, agentID, hostID string, managedInstallation bool) error {
 	if agentID == "" || hostID == "" {
 		return errors.New("Agent and remote host IDs are required")
 	}
@@ -373,10 +453,23 @@ func (s *Store) BindAgentRemoteHost(ctx context.Context, agentID, hostID string)
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, hostID); err != nil {
+		return err
+	}
+	if !managedInstallation {
+		var managed int
+		err := tx.QueryRowContext(ctx, `SELECT managed_installation FROM agents WHERE remote_host_id=? AND id<>?`, hostID, agentID).Scan(&managed)
+		if err == nil && managed != 0 {
+			return ErrConflict
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET remote_host_id=NULL WHERE remote_host_id=? AND id<>?`, hostID, agentID); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE agents SET remote_host_id=? WHERE id=? AND revoked_at IS NULL`, hostID, agentID)
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET remote_host_id=?,managed_installation=CASE WHEN ? THEN 1 ELSE managed_installation END WHERE id=? AND revoked_at IS NULL`, hostID, managedInstallation, agentID)
 	if err != nil {
 		return constraintError(err)
 	}
@@ -563,7 +656,7 @@ func (s *Store) SavePendingAgentCertificate(ctx context.Context, agentID, serial
 
 func (s *Store) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id,COALESCE(remote_host_id,''),certificate_serial,certificate_not_after,capabilities_json,
+		SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),certificate_serial,certificate_not_after,capabilities_json,
 			build_version,protocol_min,protocol_max,platform_os,platform_arch,restic_version,rsync_version,service_url,renewal_status,
 			status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at,draining_at
 		FROM agents ORDER BY id`)
@@ -575,14 +668,16 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	for rows.Next() {
 		var agent AgentRecord
 		var capabilities, created string
+		var managedInstallation int
 		var certificateNotAfter, heartbeat, revoked, stopped, uninstalled, draining sql.NullString
 		if err := rows.Scan(
-			&agent.ID, &agent.RemoteHostID, &agent.CertificateSerial, &certificateNotAfter, &capabilities,
+			&agent.ID, &agent.RemoteHostID, &managedInstallation, &agent.CertificateSerial, &certificateNotAfter, &capabilities,
 			&agent.BuildVersion, &agent.ProtocolMin, &agent.ProtocolMax, &agent.OS, &agent.Arch, &agent.ResticVersion, &agent.RsyncVersion, &agent.ServiceURL, &agent.RenewalStatus,
 			&agent.Status, &heartbeat, &created, &revoked, &stopped, &uninstalled, &draining,
 		); err != nil {
 			return nil, err
 		}
+		agent.ManagedInstallation = managedInstallation != 0
 		_ = json.Unmarshal([]byte(capabilities), &agent.Capabilities)
 		agent.CreatedAt, _ = parseTime(created)
 		if certificateNotAfter.Valid {
@@ -651,8 +746,21 @@ func (s *Store) CreateAgentLease(ctx context.Context, lease AgentLease) error {
 	if status == "" {
 		status = "queued"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_leases(id,agent_id,task_id,engine,definition_json,status,expires_at) VALUES(?,?,?,?,?,?,?)`, lease.ID, lease.AgentID, lease.TaskID, lease.Engine, string(lease.Definition), status, formatTime(lease.ExpiresAt))
-	return constraintError(err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM agents WHERE id=?`, lease.AgentID); err != nil {
+		return err
+	}
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=?`, lease.TaskID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_leases(id,agent_id,task_id,engine,definition_json,status,expires_at) VALUES(?,?,?,?,?,?,?)`, lease.ID, lease.AgentID, lease.TaskID, lease.Engine, string(lease.Definition), status, formatTime(lease.ExpiresAt)); err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ClaimAgentLease(ctx context.Context, agentID string, at time.Time) (AgentLease, error) {
@@ -701,24 +809,64 @@ func (s *Store) CompleteAgentLease(ctx context.Context, leaseID, agentID, status
 	}
 	n, _ := result.RowsAffected()
 	if n != 1 {
+		var existingAgentID, existingStatus, existingResult string
+		var completedAt sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT agent_id,status,result_json,completed_at FROM agent_leases WHERE id=?`, leaseID).Scan(&existingAgentID, &existingStatus, &existingResult, &completedAt)
+		if err == nil && existingAgentID == agentID && existingStatus == status && existingResult == string(resultJSON) && completedAt.Valid {
+			return nil
+		}
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) UpdateAgentLeaseProgress(ctx context.Context, leaseID, agentID string, progressJSON json.RawMessage, renewedAt, expiresAt time.Time) error {
+	if !json.Valid(progressJSON) || len(progressJSON) > 64<<10 {
+		return errors.New("agent lease progress must be bounded valid JSON")
+	}
+	if renewedAt.IsZero() || !expiresAt.After(renewedAt) {
+		return errors.New("agent lease renewal expiry must follow its observation")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_leases SET renewed_at=?,expires_at=?,progress_json=? WHERE id=? AND agent_id=? AND status='running' AND completed_at IS NULL`, formatTime(renewedAt), formatTime(expiresAt), string(progressJSON), leaseID, agentID)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
 		return sql.ErrNoRows
 	}
 	return nil
 }
 
 func (s *Store) AgentLeaseStatus(ctx context.Context, leaseID string) (AgentLease, error) {
+	return scanAgentLease(s.db.QueryRowContext(ctx, `SELECT id,agent_id,task_id,engine,definition_json,status,expires_at,acknowledged_at,renewed_at,completed_at,progress_json,result_json FROM agent_leases WHERE id=?`, leaseID))
+}
+
+func (s *Store) ActiveAgentLeaseForTask(ctx context.Context, taskID string) (AgentLease, error) {
+	return scanAgentLease(s.db.QueryRowContext(ctx, `SELECT id,agent_id,task_id,engine,definition_json,status,expires_at,acknowledged_at,renewed_at,completed_at,progress_json,result_json FROM agent_leases WHERE task_id=? AND status IN ('queued','running') AND completed_at IS NULL ORDER BY expires_at DESC LIMIT 1`, taskID))
+}
+
+type agentLeaseScanner interface {
+	Scan(...any) error
+}
+
+func scanAgentLease(scanner agentLeaseScanner) (AgentLease, error) {
 	var lease AgentLease
-	var definition, expires, acknowledged, completed sql.NullString
-	var result string
-	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,task_id,engine,definition_json,status,expires_at,acknowledged_at,completed_at,result_json FROM agent_leases WHERE id=?`, leaseID).Scan(&lease.ID, &lease.AgentID, &lease.TaskID, &lease.Engine, &definition, &lease.Status, &expires, &acknowledged, &completed, &result)
+	var definition, expires, acknowledged, renewed, completed sql.NullString
+	var progress, result string
+	err := scanner.Scan(&lease.ID, &lease.AgentID, &lease.TaskID, &lease.Engine, &definition, &lease.Status, &expires, &acknowledged, &renewed, &completed, &progress, &result)
 	if err != nil {
 		return lease, err
 	}
-	lease.Definition, lease.Result = json.RawMessage(definition.String), json.RawMessage(result)
+	lease.Definition, lease.Progress, lease.Result = json.RawMessage(definition.String), json.RawMessage(progress), json.RawMessage(result)
 	lease.ExpiresAt, _ = parseTime(expires.String)
 	if acknowledged.Valid {
 		value, _ := parseTime(acknowledged.String)
 		lease.AcknowledgedAt = &value
+	}
+	if renewed.Valid {
+		value, _ := parseTime(renewed.String)
+		lease.RenewedAt = &value
 	}
 	if completed.Valid {
 		value, _ := parseTime(completed.String)

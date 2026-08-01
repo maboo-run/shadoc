@@ -340,6 +340,41 @@ func (s *Store) RecordRepositoryCapacityFailure(ctx context.Context, repositoryI
 	return tx.Commit()
 }
 
+// DeferRepositoryCapacityProbe records an unsupported probe attempt without
+// turning it into a failure. This keeps a policy quiet while a remote rsync
+// repository waits for its matching Agent to come online.
+func (s *Store) DeferRepositoryCapacityProbe(ctx context.Context, repositoryID string, attemptedAt time.Time) error {
+	repositoryID = strings.TrimSpace(repositoryID)
+	if repositoryID == "" || attemptedAt.IsZero() {
+		return errors.New("invalid repository capacity deferral")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var enabled int
+	var interval int
+	if err := tx.QueryRowContext(ctx, `SELECT enabled,probe_interval_minutes FROM repository_capacity_policies WHERE repository_id=?`, repositoryID).Scan(&enabled, &interval); err != nil {
+		return err
+	}
+	var nextProbe any
+	if enabled != 0 {
+		nextProbe = formatTime(attemptedAt.UTC().Add(time.Duration(interval) * time.Minute))
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE repository_capacity_policies SET last_attempt_at=?,last_error='',next_probe_at=?,claim_token='',claim_until=NULL
+		WHERE repository_id=?
+	`, formatTime(attemptedAt), nextProbe, repositoryID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func saveRepositoryCapacity(ctx context.Context, tx *sql.Tx, repositoryID string, capacity domain.RepositoryCapacity) error {
 	if err := validateRepositoryCapacity(repositoryID, capacity); err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/maboo-run/shadoc/internal/domain"
+	"github.com/maboo-run/shadoc/internal/execution"
 )
 
 func nullTime(value time.Time) any {
@@ -22,7 +23,15 @@ func nullTime(value time.Time) any {
 var ErrConflict = errors.New("resource conflict")
 
 func (s *Store) CreateRemoteHost(ctx context.Context, host domain.RemoteHost, privateKeySecretID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, privateKeySecretID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO remote_hosts(
 			id, name, host, port, username, private_key_secret_id,
 			host_fingerprint, created_at, updated_at
@@ -35,7 +44,7 @@ func (s *Store) CreateRemoteHost(ctx context.Context, host domain.RemoteHost, pr
 	if err != nil {
 		return fmt.Errorf("create remote host: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) CreateRepository(ctx context.Context, repository domain.Repository, passwordSecretID string) error {
@@ -44,15 +53,35 @@ func (s *Store) CreateRepository(ctx context.Context, repository domain.Reposito
 	if err != nil {
 		return err
 	}
+	localTargetJSON, err := encodeRepositoryLocalTarget(repository)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin create repository: %w", err)
 	}
 	defer tx.Rollback()
+	if repository.RemoteHostID != "" {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, repository.RemoteHostID); err != nil {
+			return err
+		}
+	}
+	if err := requireRepositoryLocalTargetReference(ctx, tx, repository); err != nil {
+		return err
+	}
+	for _, secretID := range []string{passwordSecretID, repository.BackendSecretID} {
+		if secretID == "" {
+			continue
+		}
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, secretID); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO repositories(id, name, engine, kind, remote_host_id, path, password_secret_id, backend_json, backend_secret_id, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, repository.ID, repository.Name, repository.EffectiveEngine(), kind, nullString(repository.RemoteHostID), repository.Path, nullString(passwordSecretID), backendJSON, nullString(repository.BackendSecretID),
+		INSERT INTO repositories(id, name, engine, kind, local_target_json, remote_host_id, path, password_secret_id, backend_json, backend_secret_id, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, repository.ID, repository.Name, repository.EffectiveEngine(), kind, localTargetJSON, nullString(repository.RemoteHostID), repository.Path, nullString(passwordSecretID), backendJSON, nullString(repository.BackendSecretID),
 		repository.Status, formatTime(repository.CreatedAt), formatTime(repository.UpdatedAt))
 	if isUniqueConstraint(err) {
 		return ErrConflict
@@ -72,7 +101,7 @@ func (s *Store) CreateRepository(ctx context.Context, repository domain.Reposito
 
 func (s *Store) ListRepositories(ctx context.Context) ([]domain.Repository, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id, r.name, r.engine, r.kind, COALESCE(r.remote_host_id, ''), r.path, r.backend_json, COALESCE(r.backend_secret_id,''), r.status, r.created_at, r.updated_at,
+		SELECT r.id, r.name, r.engine, r.kind, r.local_target_json, COALESCE(r.remote_host_id, ''), r.path, r.backend_json, COALESCE(r.backend_secret_id,''), r.status, r.created_at, r.updated_at,
 		       c.total_bytes, c.available_bytes, COALESCE(c.checked_at,''), COALESCE(c.source_agent_id,'')
 		FROM repositories r LEFT JOIN repository_capacities c ON c.repository_id=r.id ORDER BY r.name, r.id
 	`)
@@ -85,11 +114,14 @@ func (s *Store) ListRepositories(ctx context.Context) ([]domain.Repository, erro
 		var item domain.Repository
 		var createdAt, updatedAt, checkedAt, sourceAgentID string
 		var totalBytes, availableBytes sql.NullInt64
-		var backendJSON, backendSecretID string
-		if err := rows.Scan(&item.ID, &item.Name, &item.Engine, &item.Kind, &item.RemoteHostID, &item.Path, &backendJSON, &backendSecretID, &item.Status, &createdAt, &updatedAt, &totalBytes, &availableBytes, &checkedAt, &sourceAgentID); err != nil {
+		var localTargetJSON, backendJSON, backendSecretID string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Engine, &item.Kind, &localTargetJSON, &item.RemoteHostID, &item.Path, &backendJSON, &backendSecretID, &item.Status, &createdAt, &updatedAt, &totalBytes, &availableBytes, &checkedAt, &sourceAgentID); err != nil {
 			return nil, fmt.Errorf("scan repository: %w", err)
 		}
 		if err := decodeRepositoryBackend(&item, backendJSON, backendSecretID); err != nil {
+			return nil, err
+		}
+		if err := decodeRepositoryLocalTarget(&item, localTargetJSON); err != nil {
 			return nil, err
 		}
 		item.CreatedAt, err = parseTime(createdAt)
@@ -126,6 +158,9 @@ func (s *Store) SaveRepositoryCapacity(ctx context.Context, repositoryID string,
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repositories WHERE id=?`, repositoryID); err != nil {
+		return err
+	}
 	if err := saveRepositoryCapacity(ctx, tx, repositoryID, capacity); err != nil {
 		return err
 	}
@@ -141,7 +176,15 @@ func (s *Store) CreateDatabaseConnection(ctx context.Context, connection domain.
 	if err != nil {
 		return fmt.Errorf("encode tool paths: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, passwordSecretID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO database_connections(
 			id, name, engine, purpose, network, host, port, socket_path,
 			username, password_secret_id, tls_json, tool_paths_json, status, preflight_checked_at,
@@ -158,7 +201,7 @@ func (s *Store) CreateDatabaseConnection(ctx context.Context, connection domain.
 	if err != nil {
 		return fmt.Errorf("create database connection: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) ListDatabaseConnections(ctx context.Context) ([]domain.DatabaseConnection, error) {
@@ -261,6 +304,14 @@ func (s *Store) CreateTask(ctx context.Context, task domain.Task) error {
 		return err
 	}
 	defer tx.Rollback()
+	if target := task.EffectiveExecutionTarget(); target.Kind == execution.Agent {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM agents WHERE id=?`, target.AgentID); err != nil {
+			return err
+		}
+	}
+	if err := validateTaskRepositoryTarget(ctx, tx, task.RepositoryID, task.EffectiveExecutionTarget()); err != nil {
+		return err
+	}
 	var source any
 	switch task.EffectiveEngine() {
 	case domain.ResticEngine:
@@ -286,6 +337,10 @@ func (s *Store) CreateTask(ctx context.Context, task domain.Task) error {
 			var status, engine string
 			if err := tx.QueryRowContext(ctx, `SELECT status,engine FROM repositories WHERE id=?`, task.RepositoryID).Scan(&status, &engine); err != nil || status != "ready" || engine != string(domain.RsyncEngine) {
 				return ErrConflict
+			}
+		} else if task.Rsync != nil && task.Rsync.EffectiveDestinationKind() == domain.RsyncDestinationSSH {
+			if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM remote_hosts WHERE id=?`, task.Rsync.DestinationHostID); err != nil {
+				return err
 			}
 		}
 		source = task.Rsync
@@ -441,13 +496,8 @@ func (s *Store) CreatePlan(ctx context.Context, plan domain.Plan) error {
 		return fmt.Errorf("begin create plan: %w", err)
 	}
 	defer tx.Rollback()
-	if plan.Enabled {
-		for _, taskID := range plan.TaskIDs {
-			var enabled int
-			if err := tx.QueryRowContext(ctx, `SELECT enabled FROM tasks WHERE id=?`, taskID).Scan(&enabled); err != nil || enabled == 0 {
-				return ErrConflict
-			}
-		}
+	if err := validatePlanTaskReferences(ctx, tx, plan.TaskIDs, plan.Enabled); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO plans(id, name, schedule_json, timezone, max_parallel, enabled, catch_up_window_minutes, schedule_anchor_at, created_at, updated_at)

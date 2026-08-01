@@ -115,7 +115,7 @@ func TestServiceRunsLocalRsyncDeleteDryRunAndMergesSafetySummary(t *testing.T) {
 	task := domain.Task{ID: "task-1", Name: "mirror", Engine: domain.RsyncEngine, Kind: domain.RsyncTask, RepositoryID: "repo", Rsync: &domain.RsyncSource{Path: "/srv/photos", Exclusions: []string{}, Delete: true}}
 	storage := &previewStorage{
 		tasks:          []domain.Task{task},
-		rsyncExecution: store.RsyncExecution{Task: task, Repository: domain.Repository{ID: "repo", Kind: domain.SFTPRepository, Path: "/backup/photos"}, Host: domain.RemoteHost{Host: "backup.example", Port: 22, Username: "backup", HostFingerprint: "known"}, PrivateKeySecretID: "key"},
+		rsyncExecution: store.RsyncExecution{Task: task, Repository: domain.Repository{ID: "repo", Engine: domain.RsyncEngine, Kind: domain.SSHRepository, Path: "/backup/photos"}, Host: domain.RemoteHost{Host: "backup.example", Port: 22, Username: "backup", HostFingerprint: "known"}, PrivateKeySecretID: "key"},
 	}
 	scope := &previewEngine{kind: agentfilesystem.Kind, outcome: execution.Outcome{Status: "succeeded", Summary: map[string]any{"includedFiles": 10, "truncated": false}}}
 	dryRun := &previewEngine{kind: "rsync", run: func(assignment execution.Assignment) (execution.Outcome, error) {
@@ -213,7 +213,7 @@ func TestServiceInventoriesRemoteScopeThroughBoundedAgentChunks(t *testing.T) {
 	if err := json.Unmarshal(storage.filesystemRequest.Definition, &definition); err != nil {
 		t.Fatal(err)
 	}
-	if !definition.IncludeEntries || !storage.filesystemRequest.ExpiresAt.Equal(now.Add(agentScopeInventoryTimeout)) || preview.Summary["entriesAvailable"] != true {
+	if !definition.IncludeEntries || !storage.filesystemRequest.ExpiresAt.Equal(now.Add(agentScopeClaimTimeout)) || preview.Summary["entriesAvailable"] != true {
 		t.Fatalf("definition=%+v preview=%+v", definition, preview)
 	}
 	page, err := service.Entries(t.Context(), preview.ID, EntryQuery{Limit: 10})

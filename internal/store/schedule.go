@@ -54,7 +54,15 @@ func (s *Store) CreateScheduleOccurrence(ctx context.Context, occurrence Schedul
 	if err != nil {
 		return false, fmt.Errorf("encode schedule occurrence runs: %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := validateScheduleOccurrenceReferences(ctx, tx, occurrence); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO schedule_occurrences(
 			id,owner_kind,owner_id,scheduled_at,observed_at,mode,status,target_ids_json,run_ids_json,started_at,finished_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?)
@@ -63,7 +71,54 @@ func (s *Store) CreateScheduleOccurrence(ctx context.Context, occurrence Schedul
 		return false, fmt.Errorf("create schedule occurrence: %w", err)
 	}
 	affected, err := result.RowsAffected()
-	return affected == 1, err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+func validateScheduleOccurrenceReferences(ctx context.Context, tx *sql.Tx, occurrence ScheduleOccurrence) error {
+	switch occurrence.OwnerKind {
+	case "plan":
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM plans WHERE id=?`, occurrence.OwnerID); err != nil {
+			return err
+		}
+		for _, taskID := range occurrence.TargetIDs {
+			if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM plan_tasks WHERE plan_id=? AND task_id=?`, occurrence.OwnerID, taskID); err != nil {
+				return err
+			}
+		}
+	case "maintenance":
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repository_maintenance WHERE repository_id=?`, occurrence.OwnerID); err != nil {
+			return err
+		}
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repositories WHERE id=?`, occurrence.OwnerID); err != nil {
+			return err
+		}
+		for _, targetID := range occurrence.TargetIDs {
+			if targetID != occurrence.OwnerID {
+				return ErrConflict
+			}
+		}
+	case "restore_verification":
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM restore_verification_policies WHERE task_id=?`, occurrence.OwnerID); err != nil {
+			return err
+		}
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=?`, occurrence.OwnerID); err != nil {
+			return err
+		}
+		for _, targetID := range occurrence.TargetIDs {
+			if targetID != occurrence.OwnerID {
+				return ErrConflict
+			}
+		}
+	default:
+		return errors.New("unsupported schedule occurrence owner")
+	}
+	return nil
 }
 
 func (s *Store) ClaimScheduleOccurrence(ctx context.Context, id string, at time.Time) (bool, error) {

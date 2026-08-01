@@ -261,6 +261,7 @@ func TestCreatesDraftAgentLocalToLocalRsyncTaskWithoutRemoteHost(t *testing.T) {
 	}
 	repositoryResponse := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
 		"name": "second disk", "engine": "rsync", "kind": "local", "path": "/mnt/disk-b/photos",
+		"localTarget": map[string]any{"kind": "agent", "agentId": "agent-local"},
 	}, cookie)
 	var repository domain.Repository
 	if repositoryResponse.Code != http.StatusCreated || json.Unmarshal(repositoryResponse.Body.Bytes(), &repository) != nil {
@@ -296,8 +297,13 @@ func TestCreatesDraftAgentLocalToLocalRsyncTaskWithoutRemoteHost(t *testing.T) {
 func TestCreatesReadyRsyncRepositoryWithoutResticPassword(t *testing.T) {
 	srv := newResourceTestServer(t)
 	cookie := setupSession(t, srv)
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	if err := srv.store.(*store.Store).SaveAgent(t.Context(), store.AgentRecord{ID: "agent-local", CertificateSerial: "serial", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	created := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
 		"name": "disk mirror", "engine": "rsync", "kind": "local", "path": "/mnt/disk-b/photos",
+		"localTarget": map[string]any{"kind": "agent", "agentId": "agent-local"},
 	}, cookie)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", created.Code, created.Body.String())
@@ -330,7 +336,7 @@ func TestRepositoryBackedRsyncActivationUsesRepositoryRemoteHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	createdRepository := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
-		"name": "sync repository", "engine": "rsync", "kind": "sftp", "remoteHostId": host.ID, "path": "/srv/sync",
+		"name": "sync repository", "engine": "rsync", "kind": "ssh", "remoteHostId": host.ID, "path": "/srv/sync",
 	}, cookie)
 	if createdRepository.Code != http.StatusCreated {
 		t.Fatalf("repository status=%d body=%s", createdRepository.Code, createdRepository.Body.String())
@@ -371,7 +377,7 @@ func TestRepositoryBackedRsyncActivationRequiresPinnedRepositoryHost(t *testing.
 		t.Fatal(err)
 	}
 	createdRepository := requestJSON(t, srv, http.MethodPost, "/api/repositories", map[string]any{
-		"name": "unpinned sync repository", "engine": "rsync", "kind": "sftp", "remoteHostId": host.ID, "path": "/srv/sync",
+		"name": "unpinned sync repository", "engine": "rsync", "kind": "ssh", "remoteHostId": host.ID, "path": "/srv/sync",
 	}, cookie)
 	if createdRepository.Code != http.StatusCreated {
 		t.Fatalf("repository status=%d body=%s", createdRepository.Code, createdRepository.Body.String())
@@ -667,6 +673,76 @@ func TestDeletePreviewNamesDependenciesAndRejectsStaleConfirmation(t *testing.T)
 	deleted := requestJSON(t, srv, http.MethodPost, "/api/delete-previews/repositories/"+repository.ID+"/confirm", map[string]any{"expectedUpdatedAt": fresh.UpdatedAt}, cookie)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("deleted=%d %s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestDisabledTaskCanBeDeletedWithItsRunHistory(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	ctx := t.Context()
+	now := time.Date(2026, 7, 31, 15, 0, 0, 0, time.UTC)
+	state := srv.store.(*store.Store)
+	if err := state.SaveSecret(ctx, "task-delete-password", "repository-password", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CreateRepository(ctx, domain.Repository{ID: "task-delete-repo", Name: "task delete repo", Kind: domain.LocalRepository, Path: "/backup/task-delete", Status: "ready", CreatedAt: now, UpdatedAt: now}, "task-delete-password"); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task-delete", Name: "task delete", Kind: domain.DirectoryTask, RepositoryID: "task-delete-repo", Directory: &domain.DirectorySource{Path: "/source"}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := state.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.StartRun(ctx, store.RunRecord{ID: "task-delete-run", TaskID: task.ID, Trigger: "manual", Status: "running", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	enabledResponse := requestJSON(t, srv, http.MethodGet, "/api/delete-previews/tasks/"+task.ID, nil, cookie)
+	var enabledPreview store.ResourceDeletePreview
+	if err := json.Unmarshal(enabledResponse.Body.Bytes(), &enabledPreview); err != nil {
+		t.Fatal(err)
+	}
+	if enabledResponse.Code != http.StatusOK || enabledPreview.Deletable {
+		t.Fatalf("enabled preview=%d %+v", enabledResponse.Code, enabledPreview)
+	}
+	blocked := requestJSON(t, srv, http.MethodPost, "/api/delete-previews/tasks/"+task.ID+"/confirm", map[string]any{"expectedUpdatedAt": enabledPreview.UpdatedAt}, cookie)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("enabled delete=%d %s", blocked.Code, blocked.Body.String())
+	}
+
+	task.Enabled = false
+	task.UpdatedAt = now.Add(time.Minute)
+	if err := state.UpdateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	disabledResponse := requestJSON(t, srv, http.MethodGet, "/api/delete-previews/tasks/"+task.ID, nil, cookie)
+	var disabledPreview store.ResourceDeletePreview
+	if err := json.Unmarshal(disabledResponse.Body.Bytes(), &disabledPreview); err != nil {
+		t.Fatal(err)
+	}
+	if disabledPreview.Deletable || len(disabledPreview.Dependencies) != 1 {
+		t.Fatalf("active disabled preview=%+v", disabledPreview)
+	}
+	blockedActive := requestJSON(t, srv, http.MethodPost, "/api/delete-previews/tasks/"+task.ID+"/confirm", map[string]any{"expectedUpdatedAt": disabledPreview.UpdatedAt}, cookie)
+	if blockedActive.Code != http.StatusConflict {
+		t.Fatalf("active disabled delete=%d %s", blockedActive.Code, blockedActive.Body.String())
+	}
+	if err := state.FinishRun(ctx, "task-delete-run", "success", now.Add(2*time.Minute), 1, "", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	completedResponse := requestJSON(t, srv, http.MethodGet, "/api/delete-previews/tasks/"+task.ID, nil, cookie)
+	var completedPreview store.ResourceDeletePreview
+	if err := json.Unmarshal(completedResponse.Body.Bytes(), &completedPreview); err != nil {
+		t.Fatal(err)
+	}
+	deleted := requestJSON(t, srv, http.MethodPost, "/api/delete-previews/tasks/"+task.ID+"/confirm", map[string]any{"expectedUpdatedAt": completedPreview.UpdatedAt}, cookie)
+	if !completedPreview.Deletable || deleted.Code != http.StatusNoContent {
+		t.Fatalf("completed preview=%+v delete=%d %s", completedPreview, deleted.Code, deleted.Body.String())
+	}
+	if tasks, err := state.ListTasks(ctx); err != nil || len(tasks) != 0 {
+		t.Fatalf("tasks=%+v err=%v", tasks, err)
+	}
+	if runs, err := state.ListRuns(ctx, 10); err != nil || len(runs) != 0 {
+		t.Fatalf("runs=%+v err=%v", runs, err)
 	}
 }
 

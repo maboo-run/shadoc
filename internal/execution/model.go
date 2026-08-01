@@ -55,6 +55,17 @@ type Assignment struct {
 	Target     Target          `json:"target"`
 	Definition json.RawMessage `json:"definition"`
 	ExpiresAt  time.Time       `json:"expiresAt"`
+	Progress   func(Progress)  `json:"-"`
+}
+
+type Progress struct {
+	Phase              string
+	BytesTransferred   int64
+	TotalBytes         int64
+	FilesTransferred   int64
+	FilesTotal         int64
+	RateBytesPerSecond int64
+	ETASeconds         int64
 }
 
 type Outcome struct {

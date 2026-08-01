@@ -108,12 +108,15 @@ func (s *Store) LoadDatabaseConnectionExecution(ctx context.Context, id string) 
 
 func (s *Store) LoadRepositoryExecution(ctx context.Context, id string) (RepositoryExecution, error) {
 	var r RepositoryExecution
-	var rc, ru, hc, hu, backendJSON, backendSecretID string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.name,r.engine,r.kind,COALESCE(r.remote_host_id,''),r.path,r.backend_json,COALESCE(r.backend_secret_id,''),r.status,r.created_at,r.updated_at,COALESCE(r.password_secret_id,''),COALESCE(h.id,''),COALESCE(h.name,''),COALESCE(h.host,''),COALESCE(h.port,0),COALESCE(h.username,''),COALESCE(h.host_fingerprint,''),COALESCE(h.created_at,''),COALESCE(h.updated_at,''),COALESCE(h.private_key_secret_id,'') FROM repositories r LEFT JOIN remote_hosts h ON h.id=r.remote_host_id WHERE r.id=?`, id).Scan(&r.Repository.ID, &r.Repository.Name, &r.Repository.Engine, &r.Repository.Kind, &r.Repository.RemoteHostID, &r.Repository.Path, &backendJSON, &backendSecretID, &r.Repository.Status, &rc, &ru, &r.RepositoryPasswordSecretID, &r.Host.ID, &r.Host.Name, &r.Host.Host, &r.Host.Port, &r.Host.Username, &r.Host.HostFingerprint, &hc, &hu, &r.PrivateKeySecretID)
+	var rc, ru, hc, hu, localTargetJSON, backendJSON, backendSecretID string
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.name,r.engine,r.kind,r.local_target_json,COALESCE(r.remote_host_id,''),r.path,r.backend_json,COALESCE(r.backend_secret_id,''),r.status,r.created_at,r.updated_at,COALESCE(r.password_secret_id,''),COALESCE(h.id,''),COALESCE(h.name,''),COALESCE(h.host,''),COALESCE(h.port,0),COALESCE(h.username,''),COALESCE(h.host_fingerprint,''),COALESCE(h.created_at,''),COALESCE(h.updated_at,''),COALESCE(h.private_key_secret_id,'') FROM repositories r LEFT JOIN remote_hosts h ON h.id=r.remote_host_id WHERE r.id=?`, id).Scan(&r.Repository.ID, &r.Repository.Name, &r.Repository.Engine, &r.Repository.Kind, &localTargetJSON, &r.Repository.RemoteHostID, &r.Repository.Path, &backendJSON, &backendSecretID, &r.Repository.Status, &rc, &ru, &r.RepositoryPasswordSecretID, &r.Host.ID, &r.Host.Name, &r.Host.Host, &r.Host.Port, &r.Host.Username, &r.Host.HostFingerprint, &hc, &hu, &r.PrivateKeySecretID)
 	if err != nil {
 		return r, err
 	}
 	if err := decodeRepositoryBackend(&r.Repository, backendJSON, backendSecretID); err != nil {
+		return RepositoryExecution{}, err
+	}
+	if err := decodeRepositoryLocalTarget(&r.Repository, localTargetJSON); err != nil {
 		return RepositoryExecution{}, err
 	}
 	r.Repository.CreatedAt, _ = parseTime(rc)
@@ -157,6 +160,9 @@ func (s *Store) CommitRepositoryPasswordRotation(ctx context.Context, id, newSec
 	if currentSecretID != oldSecretID {
 		return ErrConflict
 	}
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM secrets WHERE id=?`, newSecretID); err != nil {
+		return err
+	}
 	var pending int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM repository_key_revocations WHERE repository_id=?`, id).Scan(&pending); err != nil {
 		return err
@@ -173,6 +179,13 @@ func (s *Store) CommitRepositoryPasswordRotation(ctx context.Context, id, newSec
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE protection_draft_items
+		SET repository_password_secret_id=?,updated_at=?
+		WHERE repository_id=? AND repository_password_secret_id=?
+	`, newSecretID, formatTime(at), id, oldSecretID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -208,8 +221,19 @@ func (s *Store) CompleteRepositoryKeyRevocation(ctx context.Context, id, keyID s
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return sql.ErrNoRows
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM secrets WHERE id=?`, secretID); err != nil {
+	referenced, err := secretReferenced(ctx, tx, secretID)
+	if err != nil {
 		return err
+	}
+	if referenced {
+		return ErrConflict
+	}
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM secrets WHERE id=?`, secretID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := deleted.RowsAffected(); affected != 1 {
+		return ErrConflict
 	}
 	return tx.Commit()
 }
@@ -231,15 +255,18 @@ func (s *Store) LoadTaskExecution(ctx context.Context, taskID string) (TaskExecu
 	}
 	var result TaskExecution
 	result.Task = task
-	var created, updated, backendJSON, backendSecretID string
+	var created, updated, localTargetJSON, backendJSON, backendSecretID string
 	var hostCreated, hostUpdated string
-	err = s.db.QueryRowContext(ctx, `SELECT r.id,r.name,r.engine,r.kind,COALESCE(r.remote_host_id,''),r.path,r.backend_json,COALESCE(r.backend_secret_id,''),r.status,r.created_at,r.updated_at,COALESCE(r.password_secret_id,''),COALESCE(h.id,''),COALESCE(h.name,''),COALESCE(h.host,''),COALESCE(h.port,0),COALESCE(h.username,''),COALESCE(h.host_fingerprint,''),COALESCE(h.created_at,''),COALESCE(h.updated_at,''),COALESCE(h.private_key_secret_id,'') FROM repositories r LEFT JOIN remote_hosts h ON h.id=r.remote_host_id WHERE r.id=?`, task.RepositoryID).Scan(
-		&result.Repository.ID, &result.Repository.Name, &result.Repository.Engine, &result.Repository.Kind, &result.Repository.RemoteHostID, &result.Repository.Path, &backendJSON, &backendSecretID, &result.Repository.Status, &created, &updated, &result.RepositoryPasswordSecretID,
+	err = s.db.QueryRowContext(ctx, `SELECT r.id,r.name,r.engine,r.kind,r.local_target_json,COALESCE(r.remote_host_id,''),r.path,r.backend_json,COALESCE(r.backend_secret_id,''),r.status,r.created_at,r.updated_at,COALESCE(r.password_secret_id,''),COALESCE(h.id,''),COALESCE(h.name,''),COALESCE(h.host,''),COALESCE(h.port,0),COALESCE(h.username,''),COALESCE(h.host_fingerprint,''),COALESCE(h.created_at,''),COALESCE(h.updated_at,''),COALESCE(h.private_key_secret_id,'') FROM repositories r LEFT JOIN remote_hosts h ON h.id=r.remote_host_id WHERE r.id=?`, task.RepositoryID).Scan(
+		&result.Repository.ID, &result.Repository.Name, &result.Repository.Engine, &result.Repository.Kind, &localTargetJSON, &result.Repository.RemoteHostID, &result.Repository.Path, &backendJSON, &backendSecretID, &result.Repository.Status, &created, &updated, &result.RepositoryPasswordSecretID,
 		&result.Host.ID, &result.Host.Name, &result.Host.Host, &result.Host.Port, &result.Host.Username, &result.Host.HostFingerprint, &hostCreated, &hostUpdated, &result.PrivateKeySecretID)
 	if err != nil {
 		return TaskExecution{}, fmt.Errorf("load task repository: %w", err)
 	}
 	if err := decodeRepositoryBackend(&result.Repository, backendJSON, backendSecretID); err != nil {
+		return TaskExecution{}, err
+	}
+	if err := decodeRepositoryLocalTarget(&result.Repository, localTargetJSON); err != nil {
 		return TaskExecution{}, err
 	}
 	result.Repository.CreatedAt, _ = parseTime(created)
@@ -318,8 +345,23 @@ type AuditPage struct {
 }
 
 func (s *Store) StartRun(ctx context.Context, r RunRecord) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,task_id,plan_id,trigger,status,started_at,attempt_count) VALUES(?,?,?,?,?,?,?)`, r.ID, r.TaskID, nullString(r.PlanID), r.Trigger, r.Status, formatTime(r.StartedAt), r.AttemptCount)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=?`, r.TaskID); err != nil {
+		return err
+	}
+	if r.PlanID != "" {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM plans WHERE id=?`, r.PlanID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,task_id,plan_id,trigger,status,started_at,attempt_count) VALUES(?,?,?,?,?,?,?)`, r.ID, r.TaskID, nullString(r.PlanID), r.Trigger, r.Status, formatTime(r.StartedAt), r.AttemptCount); err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 func (s *Store) FinishRun(ctx context.Context, id, status string, finished time.Time, attempts int, snapshot string, summary map[string]any, rawLog string) error {
 	if _, ok := runcontrol.ParseTerminalStatus(status); !ok {

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/maboo-run/shadoc/internal/agentcontrol"
 	"github.com/maboo-run/shadoc/internal/agentfilesystem"
 	"github.com/maboo-run/shadoc/internal/agentprotocol"
 	"github.com/maboo-run/shadoc/internal/domain"
@@ -28,8 +29,7 @@ var (
 )
 
 const (
-	agentScopePreviewTimeout   = 30 * time.Second
-	agentScopeInventoryTimeout = 10 * time.Minute
+	agentScopeClaimTimeout = 5 * time.Minute
 )
 
 type Storage interface {
@@ -317,11 +317,7 @@ func scopeSummary(summary agentfilesystem.ScopeSummary) map[string]any {
 
 func (s *Service) previewAgentScope(ctx context.Context, task domain.Task, definition json.RawMessage, previewID string, includeEntries bool) (map[string]any, error) {
 	now := s.now().UTC()
-	timeout := agentScopePreviewTimeout
-	if includeEntries {
-		timeout = agentScopeInventoryTimeout
-	}
-	request := store.AgentFilesystemRequest{ID: newID("scope", now), AgentID: task.EffectiveExecutionTarget().AgentID, Definition: definition, ExpiresAt: now.Add(timeout), CreatedAt: now}
+	request := store.AgentFilesystemRequest{ID: newID("scope", now), AgentID: task.EffectiveExecutionTarget().AgentID, Definition: definition, ExpiresAt: now.Add(agentScopeClaimTimeout), CreatedAt: now}
 	inventoryOpen := false
 	if includeEntries {
 		if err := s.startRemoteInventory(request.ID, request.AgentID, previewID); err != nil {
@@ -337,10 +333,8 @@ func (s *Service) previewAgentScope(ctx context.Context, task domain.Task, defin
 	if err := s.store.CreateAgentFilesystemRequest(ctx, request); err != nil {
 		return nil, err
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	for {
-		current, err := s.store.AgentFilesystemRequestStatus(waitCtx, request.ID)
+		current, err := s.store.AgentFilesystemRequestStatus(ctx, request.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -359,7 +353,15 @@ func (s *Service) previewAgentScope(ctx context.Context, task domain.Task, defin
 			}
 			return summary, resultErr
 		}
-		if err := waitPoll(waitCtx, s.poll); err != nil {
+		if !current.ExpiresAt.After(s.now().UTC()) {
+			reason := "Agent did not claim the scope inventory before it expired"
+			if current.Status == "running" {
+				reason = "Agent stopped renewing the scope inventory"
+			}
+			_ = s.store.ExpireAgentFilesystemRequest(context.WithoutCancel(ctx), request.ID, reason, s.now().UTC())
+			return nil, errors.Join(ErrPreviewFailed, errors.New(reason))
+		}
+		if err := waitPoll(ctx, s.poll); err != nil {
 			_ = s.store.ExpireAgentFilesystemRequest(context.WithoutCancel(ctx), request.ID, err.Error(), s.now().UTC())
 			return nil, errors.Join(ErrPreviewFailed, err)
 		}
@@ -559,7 +561,7 @@ func (s *Service) requireAgent(ctx context.Context, task domain.Task, capabiliti
 	}
 	now := s.now().UTC()
 	for _, agent := range agents {
-		if agent.ID != task.EffectiveExecutionTarget().AgentID || agent.RevokedAt != nil || agent.Status != "online" || agent.LastHeartbeatAt == nil || now.Sub(*agent.LastHeartbeatAt) > time.Minute {
+		if agent.ID != task.EffectiveExecutionTarget().AgentID || agent.RevokedAt != nil || !agentcontrol.IsOnline(agent, now) {
 			continue
 		}
 		available := make(map[string]bool, len(agent.Capabilities))

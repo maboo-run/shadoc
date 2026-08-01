@@ -77,6 +77,7 @@ type ScheduleWatermark struct {
 type AgentIdentity struct {
 	ID                  string     `json:"id"`
 	RemoteHostID        string     `json:"remoteHostId,omitempty"`
+	ManagedInstallation bool       `json:"managedInstallation"`
 	CertificateSerial   string     `json:"certificateSerial"`
 	CertificateNotAfter *time.Time `json:"certificateNotAfter,omitempty"`
 	Capabilities        []string   `json:"capabilities"`
@@ -630,7 +631,7 @@ func validateManifest(manifest Manifest) error {
 		if err := item.Validate(); err != nil {
 			return fmt.Errorf("invalid repository %q: %w", item.ID, err)
 		}
-		if item.EffectiveKind() == domain.SFTPRepository && !hosts[item.RemoteHostID] {
+		if (item.EffectiveKind() == domain.SFTPRepository || item.EffectiveKind() == domain.SSHRepository) && !hosts[item.RemoteHostID] {
 			return fmt.Errorf("repository %q references an unknown remote host", item.ID)
 		}
 		repositories[item.ID] = true

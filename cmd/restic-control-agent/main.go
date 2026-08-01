@@ -164,12 +164,12 @@ func probeAgentToolVersion(ctx context.Context, executor command.Executor, progr
 func filesystemCapabilities(pathStyle string) []string {
 	return []string{
 		"filesystem-browse", "filesystem-create-directory", "filesystem-scope-preview",
-		agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", "path-style:" + pathStyle,
+		agentprotocol.FilesystemScopeEntryCapability, "filesystem-restore-target", agentfilesystem.CapacityCapability, "repository-capacity", "path-style:" + pathStyle,
 	}
 }
 
 func agentCapabilities(pathStyle, goos string) []string {
-	capabilities := filesystemCapabilities(pathStyle)
+	capabilities := append(filesystemCapabilities(pathStyle), agentprotocol.AssignmentProgressCapability)
 	if goos == "linux" {
 		capabilities = append(capabilities, agentprotocol.ManagedResticInstallCapability)
 	}

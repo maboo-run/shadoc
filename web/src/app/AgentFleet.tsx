@@ -38,12 +38,13 @@ type AgentFleetProps = {
   onInstallRestic?(agent: AgentRecord): void;
   onReprobeTools?(agent: AgentRecord): void;
   onProbeHeartbeat?(agent: AgentRecord): void;
+  onBindRemoteHost?(agent: AgentRecord): void;
   onRedeploy(agent: AgentRecord): void;
   onRemove(agent: AgentRecord, mode: AgentRemovalMode): void;
   onDelete?(agent: AgentRecord): void;
 };
 
-export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, locale, timeZone, currentServiceURL, latestResticVersion, busy, upgradeOperation, toolProbeOperation, heartbeatOperation, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onProbeHeartbeat, onRedeploy, onRemove, onDelete }: AgentFleetProps) {
+export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, locale, timeZone, currentServiceURL, latestResticVersion, busy, upgradeOperation, toolProbeOperation, heartbeatOperation, resticOperation, onCancelRestic, onUpgrade, onInstallRestic, onReprobeTools, onProbeHeartbeat, onBindRemoteHost, onRedeploy, onRemove, onDelete }: AgentFleetProps) {
   const t = (source: string) => translate(locale, source);
   const [expandedAgents, setExpandedAgents] = useState<Set<string>>(() => new Set());
   if (!agents.length) {
@@ -53,7 +54,7 @@ export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, loc
     {agents.map((agent) => {
       const id = String(agent.id ?? "");
       const remoteHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent.remoteHostId ?? ""));
-      const managedInstallation = Boolean(agent.remoteHostId);
+      const managedInstallation = agent.managedInstallation === true;
       const missingManagedHost = remoteHostsLoaded && managedInstallation && !remoteHost;
       const managed = managedInstallation && !missingManagedHost;
       const uninstalled = Boolean(agent.uninstalledAt);
@@ -74,6 +75,7 @@ export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, loc
       const canInstallRestic = Boolean(showResticAction && online && supportsManagedRestic && latestResticVersion);
       const canReprobeTools = Boolean(onReprobeTools && managed && !uninstalled && !revoked && online);
       const canProbeHeartbeat = Boolean(onProbeHeartbeat && managed && !uninstalled && !revoked);
+      const canBindRemoteHost = Boolean(onBindRemoteHost && remoteHostsLoaded && remoteHosts.length > 0 && !managedInstallation && !uninstalled && !revoked);
       const resticAvailability = !managesRestic || resticCurrent ? ""
         : !supportsManagedRestic ? "该 Agent 版本不支持一键安装 Restic，请先升级或重新部署 Agent。"
         : !online ? "Agent 在线后才可安装或升级 Restic。"
@@ -137,13 +139,14 @@ export function AgentFleet({ agents, remoteHosts, remoteHostsLoaded = false, loc
               {agent.endpointStatus !== "migration_required" && <div><dt>{t("Service 地址")}</dt><dd><code>{String(agent.serviceUrl || t("未报告地址"))}</code></dd></div>}
             </dl>
             <div className="agent-node-actions">
+              {canBindRemoteHost && <button className="secondary-button" type="button" disabled={busy} onClick={() => onBindRemoteHost?.(agent)}>{t(agent.remoteHostId ? "变更关联主机" : "关联远程主机")}</button>}
               {canProbeHeartbeat && <button className={`secondary-button agent-heartbeat-button${heartbeatProbing ? " agent-heartbeat-button-probing" : ""}`} type="button" disabled={busy || heartbeatProbing} aria-busy={heartbeatProbing} onClick={() => onProbeHeartbeat?.(agent)}>
                 {heartbeatProbing && <span className="agent-heartbeat-spinner" aria-hidden="true" />}
                 {t(heartbeatProbing ? "探测中…" : "主动探测心跳")}
               </button>}
               {managed && !uninstalled && !revoked && <button className="secondary-button" type="button" disabled={busy || !canReprobeTools} onClick={() => onReprobeTools?.(agent)}>{t("重新探测工具")}</button>}
               {showResticAction && <button className="primary-button" type="button" disabled={busy || !canInstallRestic} onClick={() => onInstallRestic?.(agent)}>{t(currentResticVersion ? "升级 Agent Restic" : "安装 Agent Restic")}</button>}
-              {managed && upgradeAvailable && <button className="primary-button" type="button" disabled={busy} onClick={() => onUpgrade(agent)}>{managedResticRepair ? t("更新 Agent 以启用 Restic 安装") : locale === "en-US" ? `Upgrade Agent to ${targetVersion}` : `升级 Agent 至 ${targetVersion}`}</button>}
+              {managed && !uninstalled && !revoked && <button className={upgradeAvailable ? "primary-button" : "secondary-button"} type="button" disabled={busy} onClick={() => onUpgrade(agent)}>{upgradeAvailable ? (managedResticRepair ? t("更新 Agent 以启用 Restic 安装") : locale === "en-US" ? `Upgrade Agent to ${targetVersion}` : `升级 Agent 至 ${targetVersion}`) : t("重新安装 Agent")}</button>}
               {canRedeploy
                 ? <button className="secondary-button" type="button" disabled={busy} onClick={() => onRedeploy(agent)}>{t("重新部署")}</button>
                 : <button className="danger-text text-button" type="button" disabled={busy || (revoked && !managed)} onClick={() => onRemove(agent, managed ? "uninstall" : "revoke")}>{t(managed ? "停止并卸载" : revoked ? "凭据已撤销" : "撤销凭据")}</button>}

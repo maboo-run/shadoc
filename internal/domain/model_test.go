@@ -157,6 +157,64 @@ func TestLegacyDirectoryTaskDefaultsToLocalRestic(t *testing.T) {
 	}
 }
 
+func TestLocalRepositoryRequiresAnExplicitFilesystemOwner(t *testing.T) {
+	serviceRepository := Repository{
+		Name: "service archive", Kind: LocalRepository, Path: "/srv/archive",
+		LocalTarget: execution.Target{Kind: execution.Local},
+	}
+	if err := serviceRepository.Validate(); err != nil {
+		t.Fatalf("service-local repository rejected: %v", err)
+	}
+
+	agentRepository := Repository{
+		Name: "agent archive", Kind: LocalRepository, Path: `D:\\Archive`,
+		LocalTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"},
+	}
+	if err := agentRepository.Validate(); err != nil {
+		t.Fatalf("agent-local repository rejected: %v", err)
+	}
+
+	missingAgent := agentRepository
+	missingAgent.LocalTarget.AgentID = ""
+	if err := missingAgent.Validate(); err == nil {
+		t.Fatal("agent-local repository without an agent was accepted")
+	}
+
+	remoteWithLocalOwner := Repository{
+		Name: "remote archive", Kind: SFTPRepository, RemoteHostID: "nas", Path: "/archive",
+		LocalTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"},
+	}
+	if err := remoteWithLocalOwner.Validate(); err == nil {
+		t.Fatal("remote repository with a local filesystem owner was accepted")
+	}
+}
+
+func TestLocalRepositoryCanOnlyBeUsedFromItsOwningFilesystem(t *testing.T) {
+	serviceRepository := Repository{Name: "service", Kind: LocalRepository, Path: "/archive"}
+	if err := serviceRepository.ValidateExecutionTarget(execution.Target{Kind: execution.Local}); err != nil {
+		t.Fatalf("service owner rejected: %v", err)
+	}
+	if err := serviceRepository.ValidateExecutionTarget(execution.Target{Kind: execution.Agent, AgentID: "agent-a"}); err == nil {
+		t.Fatal("Agent was allowed to use a Service-local repository")
+	}
+
+	agentRepository := Repository{
+		Name: "agent", Kind: LocalRepository, Path: "/archive",
+		LocalTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-a"},
+	}
+	if err := agentRepository.ValidateExecutionTarget(execution.Target{Kind: execution.Agent, AgentID: "agent-a"}); err != nil {
+		t.Fatalf("owning Agent rejected: %v", err)
+	}
+	if err := agentRepository.ValidateExecutionTarget(execution.Target{Kind: execution.Agent, AgentID: "agent-b"}); err == nil {
+		t.Fatal("a different Agent was allowed to use the repository")
+	}
+
+	remoteRepository := Repository{Name: "remote", Kind: SFTPRepository, RemoteHostID: "host", Path: "/archive"}
+	if err := remoteRepository.ValidateExecutionTarget(execution.Target{Kind: execution.Agent, AgentID: "agent-a"}); err != nil {
+		t.Fatalf("remote repository unexpectedly tied to execution filesystem: %v", err)
+	}
+}
+
 func TestAgentDirectoryTaskAcceptsPortableAbsolutePaths(t *testing.T) {
 	base := Task{
 		Name: "remote photos", Kind: DirectoryTask, RepositoryID: "repo",
@@ -397,7 +455,23 @@ func TestRepositoryEngineDefaultsToResticAndAcceptsRsync(t *testing.T) {
 	if err := legacy.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if err := (Repository{Name: "mirror", Engine: RsyncEngine, Kind: LocalRepository, Path: "/mnt/disk-b/photos"}).Validate(); err != nil {
+	if err := (Repository{Name: "mirror", Engine: RsyncEngine, Kind: LocalRepository, LocalTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"}, Path: "/mnt/disk-b/photos"}).Validate(); err != nil {
 		t.Fatalf("rsync repository: %v", err)
+	}
+	if err := (Repository{Name: "invalid service mirror", Engine: RsyncEngine, Kind: LocalRepository, Path: "/mnt/disk-b/photos"}).Validate(); err == nil {
+		t.Fatal("Service-local rsync repository was accepted")
+	}
+}
+
+func TestRemoteRepositoryTransportKindMatchesEngine(t *testing.T) {
+	rsync := Repository{Name: "mirror", Engine: RsyncEngine, Kind: SSHRepository, RemoteHostID: "nas", Path: "/srv/sync"}
+	if err := rsync.Validate(); err != nil {
+		t.Fatalf("valid SSH rsync target rejected: %v", err)
+	}
+	if err := (Repository{Name: "incorrect transport", Engine: RsyncEngine, Kind: SFTPRepository, RemoteHostID: "nas", Path: "/srv/sync"}).Validate(); err == nil {
+		t.Fatal("rsync target accepted the Restic SFTP repository kind")
+	}
+	if err := (Repository{Name: "incorrect transport", Engine: ResticEngine, Kind: SSHRepository, RemoteHostID: "nas", Path: "/srv/repository"}).Validate(); err == nil {
+		t.Fatal("Restic repository accepted the rsync SSH target kind")
 	}
 }

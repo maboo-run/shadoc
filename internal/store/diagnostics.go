@@ -31,7 +31,7 @@ type DiagnosticResourceCounts struct {
 }
 
 type DiagnosticRepositoryCounts struct {
-	Total, Ready, Uninitialized, Disconnected, Abnormal, Local, SFTP, S3 int
+	Total, Ready, Uninitialized, Disconnected, Abnormal, Local, SFTP, SSH, S3 int
 }
 
 type DiagnosticDatabaseCounts struct {
@@ -143,10 +143,10 @@ func loadDiagnosticResourceCounts(ctx context.Context, tx *sql.Tx, counts *Diagn
 		SELECT COUNT(*),
 		       COALESCE(SUM(status='ready'),0),COALESCE(SUM(status='uninitialized'),0),
 		       COALESCE(SUM(status='disconnected'),0),COALESCE(SUM(status='abnormal' OR status LIKE 'unprotected-partial:%'),0),
-		       COALESCE(SUM(kind='local'),0),COALESCE(SUM(kind='sftp'),0),COALESCE(SUM(kind='s3'),0)
+		       COALESCE(SUM(kind='local'),0),COALESCE(SUM(kind='sftp'),0),COALESCE(SUM(kind='ssh'),0),COALESCE(SUM(kind='s3'),0)
 		FROM repositories
 	`).Scan(&counts.Repositories.Total, &counts.Repositories.Ready, &counts.Repositories.Uninitialized, &counts.Repositories.Disconnected,
-		&counts.Repositories.Abnormal, &counts.Repositories.Local, &counts.Repositories.SFTP, &counts.Repositories.S3); err != nil {
+		&counts.Repositories.Abnormal, &counts.Repositories.Local, &counts.Repositories.SFTP, &counts.Repositories.SSH, &counts.Repositories.S3); err != nil {
 		return fmt.Errorf("count diagnostic repositories: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx, `

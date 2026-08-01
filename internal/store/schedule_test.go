@@ -103,7 +103,11 @@ INSERT INTO schedule_occurrences VALUES ('legacy','plan','plan-a','2026-07-15T01
 	}
 	defer s.Close()
 	now := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
-	created, err := s.CreateScheduleOccurrence(context.Background(), ScheduleOccurrence{ID: "verification", OwnerKind: "restore_verification", OwnerID: "task-a", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{"task-a"}})
+	taskID, _ := createScheduleFixture(t, s, now)
+	if err := s.SaveRestoreVerificationPolicy(context.Background(), domain.RestoreVerificationPolicy{TaskID: taskID, Schedule: domain.Schedule{Kind: domain.IntervalSchedule, IntervalHours: 24}, Timezone: "UTC", SelectionPath: "sample", MaximumBytes: 1024, MaximumSuccessAgeHours: 24, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.CreateScheduleOccurrence(context.Background(), ScheduleOccurrence{ID: "verification", OwnerKind: "restore_verification", OwnerID: taskID, ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{taskID}})
 	if err != nil || !created {
 		t.Fatalf("restore verification occurrence created=%v err=%v", created, err)
 	}
@@ -117,6 +121,24 @@ func TestScheduleOccurrenceIsUniqueClaimedOnceAndSummarized(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	scheduled := time.Date(2026, 7, 15, 2, 30, 0, 0, time.UTC)
+	taskA, _ := createScheduleFixture(t, s, scheduled)
+	if err := s.SaveSecret(ctx, "password-b", "repository-password", []byte("ciphertext"), scheduled); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateRepository(ctx, domain.Repository{ID: "schedule-repository-b", Name: "schedule repository b", Kind: domain.LocalRepository, Path: "/backup/schedule-b", Status: "ready", CreatedAt: scheduled, UpdatedAt: scheduled}, "password-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, domain.Task{ID: "task-b", Name: "task b", Kind: domain.DirectoryTask, RepositoryID: "schedule-repository-b", Directory: &domain.DirectorySource{Path: "/source-b"}, Enabled: true, CreatedAt: scheduled, UpdatedAt: scheduled}); err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range []domain.Plan{
+		{ID: "plan-a", Name: "plan a", Schedule: domain.Schedule{Kind: domain.DailySchedule, TimeOfDay: "03:00"}, Timezone: "UTC", MaxParallel: 1, TaskIDs: []string{taskA, "task-b"}, CreatedAt: scheduled, UpdatedAt: scheduled},
+		{ID: "plan-other", Name: "plan other", Schedule: domain.Schedule{Kind: domain.DailySchedule, TimeOfDay: "03:00"}, Timezone: "UTC", MaxParallel: 1, TaskIDs: []string{"task-b"}, CreatedAt: scheduled, UpdatedAt: scheduled},
+	} {
+		if err := s.CreatePlan(ctx, plan); err != nil {
+			t.Fatal(err)
+		}
+	}
 	occurrence := ScheduleOccurrence{
 		ID:          "occurrence-a",
 		OwnerKind:   "plan",
@@ -125,7 +147,7 @@ func TestScheduleOccurrenceIsUniqueClaimedOnceAndSummarized(t *testing.T) {
 		ObservedAt:  scheduled.Add(30 * time.Minute),
 		Mode:        "catch_up",
 		Status:      "pending",
-		TargetIDs:   []string{"task-a", "task-b"},
+		TargetIDs:   []string{taskA, "task-b"},
 	}
 	created, err := s.CreateScheduleOccurrence(ctx, occurrence)
 	if err != nil || !created {
@@ -174,11 +196,11 @@ func TestScheduleOccurrenceIsUniqueClaimedOnceAndSummarized(t *testing.T) {
 		t.Fatal(err)
 	}
 	missedAt := scheduled.Add(24 * time.Hour)
-	missed := ScheduleOccurrence{ID: "occurrence-b", OwnerKind: "plan", OwnerID: "plan-a", ScheduledAt: missedAt, ObservedAt: missedAt.Add(2 * time.Hour), Mode: "missed", Status: "missed", TargetIDs: []string{"task-a", "task-b"}, FinishedAt: timePointer(missedAt.Add(2 * time.Hour))}
+	missed := ScheduleOccurrence{ID: "occurrence-b", OwnerKind: "plan", OwnerID: "plan-a", ScheduledAt: missedAt, ObservedAt: missedAt.Add(2 * time.Hour), Mode: "missed", Status: "missed", TargetIDs: []string{taskA, "task-b"}, FinishedAt: timePointer(missedAt.Add(2 * time.Hour))}
 	if created, err := s.CreateScheduleOccurrence(ctx, missed); err != nil || !created {
 		t.Fatalf("create missed=%v err=%v", created, err)
 	}
-	other := ScheduleOccurrence{ID: "occurrence-other", OwnerKind: "plan", OwnerID: "plan-other", ScheduledAt: missedAt.Add(time.Hour), ObservedAt: missedAt.Add(time.Hour), Mode: "on_time", Status: "success", TargetIDs: []string{"task-other"}, FinishedAt: timePointer(missedAt.Add(time.Hour))}
+	other := ScheduleOccurrence{ID: "occurrence-other", OwnerKind: "plan", OwnerID: "plan-other", ScheduledAt: missedAt.Add(time.Hour), ObservedAt: missedAt.Add(time.Hour), Mode: "on_time", Status: "success", TargetIDs: []string{"task-b"}, FinishedAt: timePointer(missedAt.Add(time.Hour))}
 	if created, err := s.CreateScheduleOccurrence(ctx, other); err != nil || !created {
 		t.Fatalf("create other=%v err=%v", created, err)
 	}
@@ -205,10 +227,16 @@ func TestRecoverInterruptedScheduleOccurrences(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 15, 3, 0, 0, 0, time.UTC)
+	taskID, _ := createScheduleFixture(t, s, now)
+	for _, planID := range []string{"pending-plan", "running-plan", "successful-plan"} {
+		if err := s.CreatePlan(ctx, domain.Plan{ID: planID, Name: planID, Schedule: domain.Schedule{Kind: domain.DailySchedule, TimeOfDay: "03:00"}, Timezone: "UTC", MaxParallel: 1, TaskIDs: []string{taskID}, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	items := []ScheduleOccurrence{
-		{ID: "pending", OwnerKind: "plan", OwnerID: "pending-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{"task"}},
-		{ID: "running", OwnerKind: "plan", OwnerID: "running-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{"task"}},
-		{ID: "success", OwnerKind: "plan", OwnerID: "successful-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "success", TargetIDs: []string{"task"}, FinishedAt: timePointer(now)},
+		{ID: "pending", OwnerKind: "plan", OwnerID: "pending-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{taskID}},
+		{ID: "running", OwnerKind: "plan", OwnerID: "running-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "pending", TargetIDs: []string{taskID}},
+		{ID: "success", OwnerKind: "plan", OwnerID: "successful-plan", ScheduledAt: now, ObservedAt: now, Mode: "on_time", Status: "success", TargetIDs: []string{taskID}, FinishedAt: timePointer(now)},
 	}
 	for _, item := range items {
 		if created, err := s.CreateScheduleOccurrence(ctx, item); err != nil || !created {

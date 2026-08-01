@@ -99,6 +99,14 @@ func (d *Dispatcher) probe(ctx context.Context, repositoryID string) {
 		_, err = d.runner.Probe(ctx, repositoryID, nil)
 	}
 	if err != nil {
+		if errors.Is(err, repositorycapacity.ErrUnsupported) {
+			if source, ok := d.source.(interface {
+				DeferRepositoryCapacityProbe(context.Context, string, time.Time) error
+			}); ok {
+				_ = source.DeferRepositoryCapacityProbe(context.WithoutCancel(ctx), repositoryID, d.now().UTC())
+			}
+			return
+		}
 		_ = d.source.RecordRepositoryCapacityFailure(context.WithoutCancel(ctx), repositoryID, d.now().UTC(), err.Error())
 	}
 }

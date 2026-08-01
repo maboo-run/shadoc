@@ -145,7 +145,7 @@ func manifestFromSnapshot(snapshot store.ControlPlaneSnapshotData) Manifest {
 		manifest.ScheduleWatermarks = append(manifest.ScheduleWatermarks, ScheduleWatermark{OwnerKind: item.OwnerKind, OwnerID: item.OwnerID, ScheduledAt: item.ScheduledAt, ObservedAt: item.ObservedAt, Mode: item.Mode, Status: item.Status})
 	}
 	for _, item := range snapshot.Agents {
-		manifest.Agents = append(manifest.Agents, AgentIdentity{ID: item.ID, RemoteHostID: item.RemoteHostID, CertificateSerial: item.CertificateSerial, CertificateNotAfter: item.CertificateNotAfter, Capabilities: append([]string(nil), item.Capabilities...), Status: item.Status, CreatedAt: item.CreatedAt, RevokedAt: item.RevokedAt})
+		manifest.Agents = append(manifest.Agents, AgentIdentity{ID: item.ID, RemoteHostID: item.RemoteHostID, ManagedInstallation: item.ManagedInstallation, CertificateSerial: item.CertificateSerial, CertificateNotAfter: item.CertificateNotAfter, Capabilities: append([]string(nil), item.Capabilities...), Status: item.Status, CreatedAt: item.CreatedAt, RevokedAt: item.RevokedAt})
 	}
 	if snapshot.AgentServiceSettings != nil {
 		manifest.AgentServiceSettings = &AgentServiceSettings{Enabled: snapshot.AgentServiceSettings.Enabled, ListenHost: snapshot.AgentServiceSettings.ListenHost, Port: snapshot.AgentServiceSettings.Port, AdvertisedHost: snapshot.AgentServiceSettings.AdvertisedHost, TLSNames: append([]string(nil), snapshot.AgentServiceSettings.TLSNames...)}

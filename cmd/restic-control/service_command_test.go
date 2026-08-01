@@ -89,6 +89,19 @@ func TestUnknownCommandReturnsAnErrorInsteadOfStartingServer(t *testing.T) {
 	}
 }
 
+func TestVersionCommandPrintsBuildVersionWithoutOpeningTheService(t *testing.T) {
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		var stdout bytes.Buffer
+		handled, err := handleVersionCommand(args, &stdout, "0.1.4")
+		if err != nil || !handled || stdout.String() != "0.1.4\n" {
+			t.Fatalf("args=%v handled=%t err=%v stdout=%q", args, handled, err, stdout.String())
+		}
+	}
+	if handled, err := handleVersionCommand([]string{"--version", "unexpected"}, ioDiscard{}, "0.1.4"); !handled || err == nil {
+		t.Fatalf("version arguments handled=%t err=%v", handled, err)
+	}
+}
+
 func TestLifecycleCommandsDispatchThroughBackgroundService(t *testing.T) {
 	service := &backgroundServiceFake{status: "running"}
 	var stdout bytes.Buffer
@@ -114,7 +127,7 @@ func TestHelpDescribesPublicShadocCommandsWithoutTouchingService(t *testing.T) {
 		if err != nil || !handled {
 			t.Fatalf("args=%v handled=%t err=%v", args, handled, err)
 		}
-		for _, expected := range []string{"shadoc start [--port PORT]", "shadoc stop", "shadoc restart", "shadoc status", "shadoc update-app", "shadoc uninstall-app", "shadoc help"} {
+		for _, expected := range []string{"shadoc start [--port PORT]", "shadoc stop", "shadoc restart", "shadoc status", "shadoc update-app", "shadoc uninstall-app", "shadoc --version", "shadoc help"} {
 			if !strings.Contains(stdout.String(), expected) {
 				t.Fatalf("args=%v help missing %q:\n%s", args, expected, stdout.String())
 			}

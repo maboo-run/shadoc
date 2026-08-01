@@ -10,6 +10,7 @@ import (
 
 	"github.com/maboo-run/shadoc/internal/agentfilesystem"
 	"github.com/maboo-run/shadoc/internal/domain"
+	"github.com/maboo-run/shadoc/internal/execution"
 	"github.com/maboo-run/shadoc/internal/store"
 	"github.com/maboo-run/shadoc/internal/taskpreview"
 )
@@ -90,7 +91,7 @@ func TestRsyncDeletePreviewRequiresSeparateConfirmation(t *testing.T) {
 	if err := resources.SaveAgent(t.Context(), store.AgentRecord{ID: "agent-1", CertificateSerial: "serial-preview", Capabilities: []string{"rsync", "filesystem-scope-preview"}, BuildVersion: "test", ProtocolMin: 1, ProtocolMax: 1, OS: "linux", Arch: "amd64", Status: "online", LastHeartbeatAt: &heartbeat, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := resources.CreateRepository(t.Context(), domain.Repository{ID: "sync-repo", Name: "sync repo", Engine: domain.RsyncEngine, Kind: domain.LocalRepository, Path: "/mnt/target", Status: "ready", CreatedAt: now, UpdatedAt: now}, ""); err != nil {
+	if err := resources.CreateRepository(t.Context(), domain.Repository{ID: "sync-repo", Name: "sync repo", Engine: domain.RsyncEngine, Kind: domain.LocalRepository, LocalTarget: execution.Target{Kind: execution.Agent, AgentID: "agent-1"}, Path: "/mnt/target", Status: "ready", CreatedAt: now, UpdatedAt: now}, ""); err != nil {
 		t.Fatal(err)
 	}
 	payload := map[string]any{

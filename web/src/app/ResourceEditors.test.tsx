@@ -20,7 +20,7 @@ describe("RepositoryEditor connection mode", () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     expect(onSubmit).toHaveBeenCalledWith({
       name: "数据库备份", engine: "restic", kind: "local", remoteHostId: "", path: "/backup/db",
-      password: "", passwordConfirmed: true,
+	  localTarget: { kind: "local" }, password: "", passwordConfirmed: true,
     });
   });
 
@@ -54,6 +54,7 @@ describe("RepositoryEditor connection mode", () => {
       name: "既有照片仓库",
       engine: "restic",
       kind: "local",
+	  localTarget: { kind: "local" },
       remoteHostId: "",
       path: "/backup/existing",
       password: "old-key",

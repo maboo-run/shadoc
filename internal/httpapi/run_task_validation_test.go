@@ -18,6 +18,21 @@ func (r *countingTaskRunner) Run(context.Context, string, string, string) (store
 	return store.RunRecord{}, nil
 }
 
+type blockingTaskRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingTaskRunner) Run(ctx context.Context, taskID, _, _ string) (store.RunRecord, error) {
+	close(r.started)
+	select {
+	case <-r.release:
+		return store.RunRecord{ID: "run-blocking", TaskID: taskID, Status: "success"}, nil
+	case <-ctx.Done():
+		return store.RunRecord{}, ctx.Err()
+	}
+}
+
 func TestDashboardReportsAbnormalRepositoryInsteadOfHealthySummary(t *testing.T) {
 	srv := newResourceTestServer(t)
 	cookie := setupSession(t, srv)
@@ -140,5 +155,105 @@ func TestManualRunRejectsMissingOrDisabledTaskBeforeQueuing(t *testing.T) {
 	disabled := requestJSON(t, srv, http.MethodPost, "/api/tasks/disabled/run", map[string]any{}, cookie)
 	if disabled.Code != http.StatusConflict || runner.calls != 0 {
 		t.Fatalf("disabled status=%d calls=%d body=%s", disabled.Code, runner.calls, disabled.Body.String())
+	}
+}
+
+func TestTaskListReportsTheActiveManualRunUntilWorkFinishes(t *testing.T) {
+	srv := newResourceTestServer(t)
+	runner := &blockingTaskRunner{started: make(chan struct{}), release: make(chan struct{})}
+	srv.runner = runner
+	cookie := setupSession(t, srv)
+	resources := createReadyMaintenanceRepository(t, srv, "repo-active-run")
+	now := time.Now().UTC()
+	task := domain.Task{ID: "task-active-run", Name: "active task", Kind: domain.DirectoryTask, RepositoryID: "repo-active-run", Directory: &domain.DirectorySource{Path: "/srv/source"}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := resources.CreateTask(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+
+	started := requestJSON(t, srv, http.MethodPost, "/api/tasks/"+task.ID+"/run", map[string]any{}, cookie)
+	if started.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", started.Code, started.Body.String())
+	}
+	var accepted struct {
+		OperationID string `json:"operationId"`
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &accepted); err != nil || accepted.OperationID == "" {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(10 * time.Second):
+		close(runner.release)
+		t.Fatal("manual task run did not start")
+	}
+
+	listed := requestJSON(t, srv, http.MethodGet, "/api/tasks", nil, cookie)
+	var tasks []struct {
+		ID              string                 `json:"id"`
+		ActiveOperation *store.OperationRecord `json:"activeOperation"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &tasks); err != nil {
+		close(runner.release)
+		t.Fatal(err)
+	}
+	if listed.Code != http.StatusOK || len(tasks) != 1 || tasks[0].ID != task.ID || tasks[0].ActiveOperation == nil || tasks[0].ActiveOperation.ID != accepted.OperationID || tasks[0].ActiveOperation.Status != "running" {
+		close(runner.release)
+		t.Fatalf("tasks=%+v status=%d body=%s", tasks, listed.Code, listed.Body.String())
+	}
+
+	close(runner.release)
+	waitForOperation(t, srv, cookie, accepted.OperationID, "success")
+}
+
+func TestActiveTaskOperationIncludesRenewedAgentProgressAndStallState(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	resources := createReadyMaintenanceRepository(t, srv, "repo-progress")
+	now := time.Now().UTC().Truncate(time.Second)
+	task := domain.Task{ID: "task-progress", Name: "progress task", Kind: domain.DirectoryTask, RepositoryID: "repo-progress", Directory: &domain.DirectorySource{Path: "/srv/source"}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := resources.CreateTask(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.SaveAgent(t.Context(), store.AgentRecord{ID: "agent-progress", CertificateSerial: "serial", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	operation := store.OperationRecord{ID: "operation-progress", Kind: "sync", Actor: "admin", TaskID: task.ID, Status: "queued", Stage: "queued", CreatedAt: now}
+	if err := resources.CreateOperation(t.Context(), operation); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.StartOperation(t.Context(), operation.ID, "syncing", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.CreateAgentLease(t.Context(), store.AgentLease{ID: "lease-progress", AgentID: "agent-progress", TaskID: task.ID, Engine: "rsync", Definition: json.RawMessage(`{}`), ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resources.ClaimAgentLease(t.Context(), "agent-progress", now); err != nil {
+		t.Fatal(err)
+	}
+	progress := json.RawMessage(`{"version":1,"assignmentId":"lease-progress","agentId":"agent-progress","sequence":2,"phase":"transferring","bytesTransferred":4096,"totalBytes":8192,"filesTransferred":4,"filesTotal":8,"rateBytesPerSecond":1024,"etaSeconds":4}`)
+	if err := resources.UpdateAgentLeaseProgress(t.Context(), "lease-progress", "agent-progress", progress, now.Add(10*time.Second), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestJSON(t, srv, http.MethodGet, "/api/operations/"+operation.ID, nil, cookie)
+	var got store.OperationRecord
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	progressDetail, _ := got.Detail["progress"].(map[string]any)
+	if response.Code != http.StatusOK || progressDetail["phase"] != "transferring" || progressDetail["bytesTransferred"] != float64(4096) || progressDetail["totalBytes"] != float64(8192) || got.Detail["progressState"] != "active" {
+		t.Fatalf("operation=%+v status=%d body=%s", got, response.Code, response.Body.String())
+	}
+
+	stalledAt := time.Now().UTC().Add(-45 * time.Second)
+	if err := resources.UpdateAgentLeaseProgress(t.Context(), "lease-progress", "agent-progress", progress, stalledAt, time.Now().UTC().Add(75*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, srv, http.MethodGet, "/api/operations/"+operation.ID, nil, cookie)
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Detail["progressState"] != "stalled" {
+		t.Fatalf("stale Agent progress was still presented as active: %+v", got.Detail)
 	}
 }

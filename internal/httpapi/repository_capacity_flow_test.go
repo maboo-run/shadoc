@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func (s *fakeCapacityService) Probe(_ context.Context, repositoryID string, repo
 
 func TestRepositoryCapacityProbeReturnsTrackedOperation(t *testing.T) {
 	srv := newResourceTestServer(t)
+	createRepositoryForCapacityAPI(t, srv.store.(*store.Store), "repo", time.Now().UTC())
 	capacity := &fakeCapacityService{}
 	srv.repositoryCapacity = capacity
 	cookie := setupSession(t, srv)
@@ -44,6 +46,40 @@ func TestRepositoryCapacityProbeReturnsTrackedOperation(t *testing.T) {
 	operation := waitForOperation(t, srv, cookie, accepted.OperationID, "success")
 	if operation.Kind != "repository_capacity_probe" || operation.RepositoryID != "repo" || capacity.repositoryID != "repo" {
 		t.Fatalf("operation=%+v probed=%q", operation, capacity.repositoryID)
+	}
+}
+
+func TestRemoteRsyncCapacityRequiresMatchingAgentWithoutBlockingSSHSync(t *testing.T) {
+	srv := newResourceTestServer(t)
+	storage := srv.store.(*store.Store)
+	now := time.Now().UTC()
+	if err := storage.SaveSecret(t.Context(), "host-key", "ssh-private-key", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.SaveSecret(t.Context(), "repo-password", "repository-password", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CreateRemoteHost(t.Context(), domain.RemoteHost{ID: "host-a", Name: "sync host", Host: "sync.example", Port: 22, Username: "backup", HostFingerprint: "sync.example ssh-ed25519 AAAA", CreatedAt: now, UpdatedAt: now}, "host-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CreateRepository(t.Context(), domain.Repository{ID: "rsync-repo", Name: "rsync", Engine: domain.RsyncEngine, Kind: domain.SSHRepository, RemoteHostID: "host-a", Path: "/srv/sync", Status: "ready", CreatedAt: now, UpdatedAt: now}, "repo-password"); err != nil {
+		t.Fatal(err)
+	}
+	capacity := &fakeCapacityService{}
+	srv.repositoryCapacity = capacity
+	cookie := setupSession(t, srv)
+	response := requestJSON(t, srv, http.MethodPost, "/api/repositories/rsync-repo/capacity", map[string]any{}, cookie)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "未关联 Agent") || capacity.repositoryID != "" {
+		t.Fatalf("status=%d body=%s probed=%q", response.Code, response.Body.String(), capacity.repositoryID)
+	}
+	list := requestJSON(t, srv, http.MethodGet, "/api/repositories", nil, cookie)
+	var items []struct {
+		ID                        string `json:"id"`
+		CapacitySupported         bool   `json:"capacitySupported"`
+		CapacityUnsupportedReason string `json:"capacityUnsupportedReason"`
+	}
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &items) != nil || len(items) != 1 || items[0].ID != "rsync-repo" || items[0].CapacitySupported || !strings.Contains(items[0].CapacityUnsupportedReason, "未关联 Agent") {
+		t.Fatalf("status=%d body=%s items=%+v", list.Code, list.Body.String(), items)
 	}
 }
 

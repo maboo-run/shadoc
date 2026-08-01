@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maboo-run/shadoc/internal/agentcontrol"
 	"github.com/maboo-run/shadoc/internal/agentdeploy"
 	"github.com/maboo-run/shadoc/internal/agentprotocol"
 	"github.com/maboo-run/shadoc/internal/domain"
@@ -196,10 +197,10 @@ func (s *Service) findManagedAgent(ctx context.Context, agentID string) (store.A
 	if agent.ID == "" || agent.RevokedAt != nil {
 		return agent, domain.RemoteHost{}, sql.ErrNoRows
 	}
-	if agent.RemoteHostID == "" || agent.UninstalledAt != nil {
+	if !agent.ManagedInstallation || agent.RemoteHostID == "" || agent.UninstalledAt != nil {
 		return agent, domain.RemoteHost{}, errors.New("Agent is not managed through a remote host")
 	}
-	if agent.Status != "online" || agent.LastHeartbeatAt == nil || s.now().UTC().Sub(agent.LastHeartbeatAt.UTC()) > 2*time.Minute {
+	if !agentcontrol.IsOnline(agent, s.now().UTC()) {
 		return agent, domain.RemoteHost{}, errors.New("Agent must be online before installing Restic")
 	}
 	if !slices.Contains(agent.Capabilities, agentprotocol.ManagedResticInstallCapability) {

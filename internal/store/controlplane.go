@@ -149,7 +149,7 @@ func snapshotRemoteHosts(ctx context.Context, tx *sql.Tx) ([]ControlPlaneRemoteH
 }
 
 func snapshotRepositories(ctx context.Context, tx *sql.Tx) ([]ControlPlaneRepository, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,name,engine,kind,COALESCE(remote_host_id,''),path,backend_json,COALESCE(backend_secret_id,''),COALESCE(password_secret_id,''),status,created_at,updated_at FROM repositories ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,name,engine,kind,local_target_json,COALESCE(remote_host_id,''),path,backend_json,COALESCE(backend_secret_id,''),COALESCE(password_secret_id,''),status,created_at,updated_at FROM repositories ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot repositories: %w", err)
 	}
@@ -157,12 +157,15 @@ func snapshotRepositories(ctx context.Context, tx *sql.Tx) ([]ControlPlaneReposi
 	result := make([]ControlPlaneRepository, 0)
 	for rows.Next() {
 		var item ControlPlaneRepository
-		var backendJSON, created, updated string
-		if err := rows.Scan(&item.Repository.ID, &item.Repository.Name, &item.Repository.Engine, &item.Repository.Kind, &item.Repository.RemoteHostID, &item.Repository.Path, &backendJSON, &item.BackendSecretID, &item.PasswordSecretID, &item.Repository.Status, &created, &updated); err != nil {
+		var localTargetJSON, backendJSON, created, updated string
+		if err := rows.Scan(&item.Repository.ID, &item.Repository.Name, &item.Repository.Engine, &item.Repository.Kind, &localTargetJSON, &item.Repository.RemoteHostID, &item.Repository.Path, &backendJSON, &item.BackendSecretID, &item.PasswordSecretID, &item.Repository.Status, &created, &updated); err != nil {
 			return nil, err
 		}
 		if err := decodeRepositoryBackend(&item.Repository, backendJSON, item.BackendSecretID); err != nil {
 			return nil, fmt.Errorf("decode snapshot repository backend: %w", err)
+		}
+		if err := decodeRepositoryLocalTarget(&item.Repository, localTargetJSON); err != nil {
+			return nil, fmt.Errorf("decode snapshot repository local target: %w", err)
 		}
 		if item.Repository.CreatedAt, err = parseTime(created); err != nil {
 			return nil, err
@@ -416,7 +419,7 @@ func snapshotScheduleWatermarks(ctx context.Context, tx *sql.Tx) ([]ControlPlane
 }
 
 func snapshotAgents(ctx context.Context, tx *sql.Tx) ([]AgentRecord, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,''),certificate_serial,certificate_not_after,capabilities_json,status,created_at,revoked_at FROM agents ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),certificate_serial,certificate_not_after,capabilities_json,status,created_at,revoked_at FROM agents ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -425,10 +428,12 @@ func snapshotAgents(ctx context.Context, tx *sql.Tx) ([]AgentRecord, error) {
 	for rows.Next() {
 		var item AgentRecord
 		var capabilities, created string
+		var managedInstallation int
 		var certificateNotAfter, revoked sql.NullString
-		if err := rows.Scan(&item.ID, &item.RemoteHostID, &item.CertificateSerial, &certificateNotAfter, &capabilities, &item.Status, &created, &revoked); err != nil {
+		if err := rows.Scan(&item.ID, &item.RemoteHostID, &managedInstallation, &item.CertificateSerial, &certificateNotAfter, &capabilities, &item.Status, &created, &revoked); err != nil {
 			return nil, err
 		}
+		item.ManagedInstallation = managedInstallation != 0
 		if err := json.Unmarshal([]byte(capabilities), &item.Capabilities); err != nil {
 			return nil, err
 		}

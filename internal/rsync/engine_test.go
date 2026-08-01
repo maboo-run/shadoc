@@ -106,6 +106,29 @@ func TestRunParsesControlledStatsIntoComparableMetrics(t *testing.T) {
 	}
 }
 
+func TestRunStreamsOverallTransferProgress(t *testing.T) {
+	executor := &progressExecutor{output: "\r      4,096  50%    1.00MB/s    0:00:04 (xfr#4, to-chk=4/8)\r      8,192 100%    2.00MB/s    0:00:00 (xfr#8, to-chk=0/8)\n"}
+	engine := New("rsync", executor, t.TempDir())
+	raw, _ := json.Marshal(Definition{SourcePath: "/mnt/source/", Destination: Destination{Kind: DestinationLocal, Path: "/mnt/target"}})
+	var progress []execution.Progress
+	if _, err := engine.Run(t.Context(), execution.Assignment{Definition: raw, Progress: func(value execution.Progress) { progress = append(progress, value) }}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(executor.spec.Args, "--info=progress2") || !slices.Contains(executor.spec.Args, "--outbuf=L") {
+		t.Fatalf("rsync progress flags=%v", executor.spec.Args)
+	}
+	if len(progress) < 3 {
+		t.Fatalf("progress=%+v", progress)
+	}
+	transfer := progress[len(progress)-2]
+	if transfer.Phase != "transferring" || transfer.BytesTransferred != 8192 || transfer.TotalBytes != 8192 || transfer.FilesTransferred != 8 || transfer.FilesTotal != 8 || transfer.RateBytesPerSecond != 2_000_000 || transfer.ETASeconds != 0 {
+		t.Fatalf("transfer progress=%+v", transfer)
+	}
+	if progress[len(progress)-1].Phase != "finalizing" {
+		t.Fatalf("terminal progress=%+v", progress[len(progress)-1])
+	}
+}
+
 func TestRunCountsAllNonDirectoryEntriesAndKeepsEmptySuccessAtZeroEqualsZero(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -158,7 +181,7 @@ func TestEngineRunsIncrementalSyncWithProtectedSSHFiles(t *testing.T) {
 		t.Fatalf("outcome=%+v called=%v", outcome, executor.called)
 	}
 	joined := strings.Join(executor.spec.Args, " ")
-	for _, required := range []string{"--archive", "--protect-args", "--delete", "--exclude", "cache/**", "backup@backup.example:/archive/data"} {
+	for _, required := range []string{"--archive", "--protect-args", "--delete", "--exclude", "cache/**", "backup@backup.example:/archive/data/"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing %q in %s", required, joined)
 		}
@@ -256,6 +279,19 @@ func (e *hostKeyCompatibilityExecutor) Run(_ context.Context, spec command.Spec)
 type sequenceExecutor struct {
 	specs  []command.Spec
 	result command.Result
+}
+
+type progressExecutor struct {
+	output string
+	spec   command.Spec
+}
+
+func (e *progressExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {
+	e.spec = spec
+	if spec.Stdout != nil {
+		_, _ = spec.Stdout.Write([]byte(e.output))
+	}
+	return command.Result{ExitCode: 0, Stdout: e.output}, nil
 }
 
 func (e *sequenceExecutor) Run(_ context.Context, spec command.Spec) (command.Result, error) {

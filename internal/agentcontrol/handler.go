@@ -69,6 +69,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case "/progress":
+		var input agentprotocol.AssignmentProgress
+		if json.NewDecoder(r.Body).Decode(&input) != nil || input.ValidateFor(agentID) != nil {
+			http.Error(w, "invalid assignment progress", http.StatusUnprocessableEntity)
+			return
+		}
+		if err := h.service.Progress(r.Context(), agentID, input); err != nil {
+			http.Error(w, "unable to update assignment progress", http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	case "/filesystem/claim":
 		assignment, err := h.service.ClaimFilesystem(r.Context(), agentID)
 		if errors.Is(err, sql.ErrNoRows) {

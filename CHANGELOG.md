@@ -4,25 +4,30 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 
 ## [Unreleased]
 
-## [0.1.3] - 2026-07-27
-
-### Added
-
-- 支持 Linux 控制服务以 root 系统服务运行，并提供离线的普通用户实例迁移命令；迁移会校验本机程序 SHA-256，成功后移除旧实例。
-- 新增分层的保护范围预览，可按文件夹查看完整或部分保护状态，并在预览中排除或恢复文件与目录。
-- 新增本机备份工具重新探测与手动路径配置，便于安装 MySQL、PostgreSQL 或 rsync 客户端后立即刷新能力。
-
-### Changed
-
-- 任务运行统计区分源目录发现的文件总数与实际同步文件数，并据此判定成功或部分成功。
-- 大型任务的文件清单改为有界、分页读取，任务详情不再一次性加载全部文件到内存。
-- 管理页面的日期和时间统一使用设置中配置的时区。
+## [0.1.5] - 2026-08-01
 
 ### Fixed
 
-- 修复大型 Immich 等多文件任务打开运行详情时可能返回 500 的问题。
-- 修复保护范围目录无法返回上一层、返回目标错误，以及应用排除规则后预览未在当前页面更新的问题。
-- 修复 Race detector 下异步操作测试因固定墙钟阈值产生的误报，并加强手动工具路径与预览分页输入校验。
+- Linux root system 服务在未显式设置 `SHADOC_LISTEN` 的 `install-app --system` 或 `update-app --system` 中，会安全保留现有 Shadoc systemd 单元的监听地址，不再意外回落到回环地址。
+- 本地仓库明确保存为 Service 本地或唯一 Agent 本地归属；Service 本地仓库不再显示 Agent 选择器，Agent 本地 rsync 目录只能绑定同一 Agent 的任务。
+- rsync 新仓库默认使用 SSH 远程同步目录；容量检测、任务筛选和 Agent 删除依赖统一读取仓库归属，不再从临时浏览选择或任务状态推断。
+
+## [0.1.4] - 2026-08-01
+
+### Changed
+
+- 停用备份任务后可以删除任务，不再要求先解除计划依赖；删除时清理任务管理记录、计划关联和仅剩该任务的空计划。
+- SQLite 关系改为代码事务维护，移除硬外键并为旧数据库提供兼容迁移；仓库、远程主机、数据库连接、Agent 和秘密的逻辑引用继续阻止误删。
+- 保护范围中将未保存的排除/恢复状态明确显示为“排除未保存”和“恢复未保存”。
+
+### Fixed
+
+- 删除任务前检查活动运行、操作和 Agent 租约，避免后台工作失去持久化记录。
+- 修复共享计划发生记录、保护草稿和调度竞态在删除任务后的残留或回写问题。
+- 远程 rsync 仓库改为明确的 SSH 目标类型；升级时会迁移此前被错误标为 SFTP 的 rsync 仓库，避免以 SFTP 语义展示或探测 SSH 同步目录。
+- 将手工 Agent 的主机关联与 Service 受管安装分离。关联可用于 rsync 容量检测和目录浏览，不再错误授予升级、卸载或工具安装权限。
+- 统一 Agent 在线心跳窗口，避免列表显示在线而目录浏览、恢复或容量检测拒绝同一 Agent。
+- 控制服务支持 `shadoc --version`，用于无副作用的部署版本核验。
 
 ## [0.1.2] - 2026-07-25
 
@@ -68,8 +73,9 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 - 官方 GitHub 仓库身份统一为 `maboo-run/shadoc`。
 - README 调整为面向管理员的安装和使用手册。
 
-[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.3
+[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.5
+[0.1.4]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.4
 [0.1.2]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.2
 [0.1.1]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.0

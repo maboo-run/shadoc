@@ -83,6 +83,7 @@ type RepositoryCounts struct {
 	Abnormal      int `json:"abnormal"`
 	Local         int `json:"local"`
 	SFTP          int `json:"sftp"`
+	SSH           int `json:"ssh"`
 	S3            int `json:"s3"`
 }
 
@@ -282,7 +283,7 @@ func resourceSection(value store.DiagnosticResourceCounts) ResourceSection {
 		RemoteHosts: value.RemoteHosts,
 		Repositories: RepositoryCounts{
 			Total: value.Repositories.Total, Ready: value.Repositories.Ready, Uninitialized: value.Repositories.Uninitialized,
-			Disconnected: value.Repositories.Disconnected, Abnormal: value.Repositories.Abnormal, Local: value.Repositories.Local, SFTP: value.Repositories.SFTP, S3: value.Repositories.S3,
+			Disconnected: value.Repositories.Disconnected, Abnormal: value.Repositories.Abnormal, Local: value.Repositories.Local, SFTP: value.Repositories.SFTP, SSH: value.Repositories.SSH, S3: value.Repositories.S3,
 		},
 		DatabaseConnections: DatabaseCounts{
 			Total: value.DatabaseConnections.Total, Ready: value.DatabaseConnections.Ready, Draft: value.DatabaseConnections.Draft,

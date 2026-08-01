@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maboo-run/shadoc/internal/agentcontrol"
 	"github.com/maboo-run/shadoc/internal/agentprotocol"
 	"github.com/maboo-run/shadoc/internal/domain"
 	runcontrol "github.com/maboo-run/shadoc/internal/run"
 	"github.com/maboo-run/shadoc/internal/store"
 )
 
-const AgentHeartbeatTimeout = 2 * time.Minute
+const AgentHeartbeatTimeout = agentcontrol.HeartbeatTimeout
 
 type ReconciliationStorage interface {
 	Storage
@@ -279,7 +280,7 @@ func (r *reconciliation) reconcileAgent(ctx context.Context, agent store.AgentRe
 		r.resolve(ctx, renewalKey)
 		return
 	}
-	fresh := agent.Status == "online" && agent.LastHeartbeatAt != nil && !agent.LastHeartbeatAt.Before(now.Add(-AgentHeartbeatTimeout))
+	fresh := agentcontrol.IsOnline(agent, now)
 	if fresh {
 		r.resolve(ctx, offlineKey)
 	} else {

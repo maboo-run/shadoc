@@ -515,6 +515,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/agent-service", s.configureAgentService)
 	s.mux.HandleFunc("POST /api/agents/enrollment-token", s.createAgentEnrollmentToken)
 	s.mux.HandleFunc("POST /api/agents/deploy", s.deployAgent)
+	s.mux.HandleFunc("PUT /api/agents/{id}/remote-host", s.bindAgentRemoteHost)
 	s.mux.HandleFunc("DELETE /api/agents/{id}", s.deleteAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/revoke", s.revokeAgent)
 	s.mux.HandleFunc("POST /api/agents/{id}/uninstall", s.uninstallAgent)
@@ -914,6 +915,31 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "无法读取操作记录")
 		return
+	}
+	if record.TaskID != "" && (record.Status == "queued" || record.Status == "running") {
+		if progressStore, ok := s.store.(interface {
+			ActiveAgentLeaseForTask(context.Context, string) (store.AgentLease, error)
+		}); ok {
+			if lease, leaseErr := progressStore.ActiveAgentLeaseForTask(r.Context(), record.TaskID); leaseErr == nil && len(lease.Progress) > 0 {
+				var progress map[string]any
+				if json.Unmarshal(lease.Progress, &progress) == nil && len(progress) > 0 {
+					detail := make(map[string]any, len(record.Detail)+3)
+					for key, value := range record.Detail {
+						detail[key] = value
+					}
+					detail["progress"] = progress
+					if lease.RenewedAt != nil {
+						detail["progressObservedAt"] = lease.RenewedAt.UTC().Format(time.RFC3339Nano)
+						detail["progressState"] = "active"
+						if time.Since(lease.RenewedAt.UTC()) > 30*time.Second {
+							detail["progressState"] = "stalled"
+						}
+					}
+					detail["leaseExpiresAt"] = lease.ExpiresAt.UTC().Format(time.RFC3339Nano)
+					record.Detail = detail
+				}
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, record)
 }
@@ -2740,6 +2766,17 @@ func (s *Server) probeRepositoryCapacity(w http.ResponseWriter, r *http.Request)
 	if resources == nil {
 		return
 	}
+	if _, support, err := repositoryCapacitySupportForID(r.Context(), resources, repositoryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "备份仓库不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "无法读取仓库容量支持状态")
+		}
+		return
+	} else if !support.Supported {
+		writeError(w, http.StatusConflict, support.Reason)
+		return
+	}
 	record, _, err := s.operations.StartUnique("repository:"+repositoryID+":capacity", operationruntime.StartRequest{
 		Kind: "repository_capacity_probe", Actor: username, RepositoryID: repositoryID,
 	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
@@ -2782,16 +2819,30 @@ func (s *Server) getRepositoryCapacityPolicy(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "无法读取仓库状态")
 		return
 	}
-	writeJSON(w, http.StatusOK, repositoryCapacityPolicyViewFor(policy, status, time.Now().UTC()))
+	view := repositoryCapacityPolicyViewFor(policy, status, time.Now().UTC())
+	if repositories, listErr := resources.ListRepositories(r.Context()); listErr == nil {
+		if agents, agentErr := resources.ListAgents(r.Context()); agentErr == nil {
+			for _, repository := range repositories {
+				if repository.ID != policy.RepositoryID {
+					continue
+				}
+				view.CapacitySupported, view.CapacityUnsupportedReason = repositoryCapacitySupportView(repository, agents)
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 type repositoryCapacityPolicyView struct {
 	domain.RepositoryCapacityPolicy
-	Stale bool `json:"stale"`
+	Stale                     bool   `json:"stale"`
+	CapacitySupported         bool   `json:"capacitySupported"`
+	CapacityUnsupportedReason string `json:"capacityUnsupportedReason,omitempty"`
 }
 
 func repositoryCapacityPolicyViewFor(policy domain.RepositoryCapacityPolicy, repositoryStatus string, now time.Time) repositoryCapacityPolicyView {
-	view := repositoryCapacityPolicyView{RepositoryCapacityPolicy: policy}
+	view := repositoryCapacityPolicyView{RepositoryCapacityPolicy: policy, CapacitySupported: true}
 	if !policy.Enabled || repositoryStatus == "uninitialized" || repositoryStatus == "disconnected" || policy.ProbeIntervalMinutes <= 0 {
 		return view
 	}
@@ -2801,6 +2852,35 @@ func repositoryCapacityPolicyViewFor(policy domain.RepositoryCapacityPolicy, rep
 	}
 	view.Stale = !baseline.IsZero() && !now.Before(baseline.Add(2*time.Duration(policy.ProbeIntervalMinutes)*time.Minute))
 	return view
+}
+
+type repositoryCapacitySupport struct {
+	Supported bool
+	Reason    string
+}
+
+func repositoryCapacitySupportFor(repository domain.Repository, agents []store.AgentRecord) repositoryCapacitySupport {
+	if repository.EffectiveKind() == domain.S3Repository {
+		return repositoryCapacitySupport{Reason: "对象存储容量不适用"}
+	}
+	if repository.EffectiveEngine() == domain.RsyncEngine && repository.EffectiveKind() == domain.SSHRepository {
+		resolved := repositorycapacity.ResolveRemoteRsyncCapacityAgent(repository, agents, time.Now().UTC())
+		if !resolved.SupportsCapacity() {
+			return repositoryCapacitySupport{Reason: resolved.UnsupportedReason()}
+		}
+	}
+	if repository.EffectiveKind() == domain.LocalRepository && repository.EffectiveLocalTarget().Kind == execution.Agent {
+		resolved := repositorycapacity.ResolveOwnedLocalCapacityAgent(repository, agents, time.Now().UTC())
+		if !resolved.SupportsCapacity() {
+			return repositoryCapacitySupport{Reason: resolved.UnsupportedReason()}
+		}
+	}
+	return repositoryCapacitySupport{Supported: true}
+}
+
+func repositoryCapacitySupportView(repository domain.Repository, agents []store.AgentRecord) (bool, string) {
+	support := repositoryCapacitySupportFor(repository, agents)
+	return support.Supported, support.Reason
 }
 
 func repositoryStatusForCapacity(ctx context.Context, resources *store.Store, repositoryID string) (string, error) {
@@ -2814,6 +2894,28 @@ func repositoryStatusForCapacity(ctx context.Context, resources *store.Store, re
 		}
 	}
 	return "", sql.ErrNoRows
+}
+
+func repositoryCapacitySupportForID(ctx context.Context, resources *store.Store, repositoryID string) (domain.Repository, repositoryCapacitySupport, error) {
+	repositories, err := resources.ListRepositories(ctx)
+	if err != nil {
+		return domain.Repository{}, repositoryCapacitySupport{}, err
+	}
+	var repository domain.Repository
+	for _, item := range repositories {
+		if item.ID == repositoryID {
+			repository = item
+			break
+		}
+	}
+	if repository.ID == "" {
+		return domain.Repository{}, repositoryCapacitySupport{}, sql.ErrNoRows
+	}
+	agents, err := resources.ListAgents(ctx)
+	if err != nil {
+		return domain.Repository{}, repositoryCapacitySupport{}, err
+	}
+	return repository, repositoryCapacitySupportFor(repository, agents), nil
 }
 
 type repositoryCapacityPolicyRequest struct {
@@ -2847,6 +2949,17 @@ func (s *Server) saveRepositoryCapacityPolicy(w http.ResponseWriter, r *http.Req
 	if resources == nil {
 		return
 	}
+	if _, support, err := repositoryCapacitySupportForID(r.Context(), resources, policy.RepositoryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "备份仓库不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "无法读取仓库容量支持状态")
+		}
+		return
+	} else if policy.Enabled && !support.Supported {
+		writeError(w, http.StatusConflict, support.Reason)
+		return
+	}
 	if err := resources.SaveRepositoryCapacityPolicy(r.Context(), policy, time.Now().UTC()); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "备份仓库不存在")
@@ -2870,7 +2983,11 @@ func (s *Server) saveRepositoryCapacityPolicy(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "无法读取仓库状态")
 		return
 	}
-	writeJSON(w, http.StatusOK, repositoryCapacityPolicyViewFor(saved, status, time.Now().UTC()))
+	view := repositoryCapacityPolicyViewFor(saved, status, time.Now().UTC())
+	if _, support, supportErr := repositoryCapacitySupportForID(r.Context(), resources, policy.RepositoryID); supportErr == nil {
+		view.CapacitySupported, view.CapacityUnsupportedReason = support.Supported, support.Reason
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) listRepositoryCapacitySamples(w http.ResponseWriter, r *http.Request) {
@@ -4221,6 +4338,7 @@ type createRepositoryRequest struct {
 	Name              string                `json:"name"`
 	Engine            domain.EngineKind     `json:"engine"`
 	Kind              domain.RepositoryKind `json:"kind"`
+	LocalTarget       execution.Target      `json:"localTarget"`
 	RemoteHostID      string                `json:"remoteHostId"`
 	Path              string                `json:"path"`
 	Password          string                `json:"password"`
@@ -4294,11 +4412,11 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	repository := domain.Repository{
-		ID: newID("repo"), Name: input.Name, Engine: input.Engine, Kind: input.Kind, RemoteHostID: input.RemoteHostID, Path: input.Path,
+		ID: newID("repo"), Name: input.Name, Engine: input.Engine, Kind: input.Kind, LocalTarget: input.LocalTarget, RemoteHostID: input.RemoteHostID, Path: input.Path,
 		Status: "uninitialized", CreatedAt: now, UpdatedAt: now,
 	}
 	if repository.Kind == "" {
-		repository.Kind = domain.SFTPRepository
+		repository.Kind = defaultRepositoryKind(repository.EffectiveEngine())
 	}
 	applyS3RepositoryInput(&repository, input)
 	if repository.EffectiveEngine() == domain.RsyncEngine {
@@ -4364,6 +4482,13 @@ func (s *Server) createRepository(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, repository)
 }
 
+func defaultRepositoryKind(engine domain.EngineKind) domain.RepositoryKind {
+	if engine == domain.RsyncEngine {
+		return domain.SSHRepository
+	}
+	return domain.SFTPRepository
+}
+
 func (s *Server) connectExistingRepository(w http.ResponseWriter, r *http.Request) {
 	username, ok := s.requireMutationSession(w, r)
 	if !ok {
@@ -4388,7 +4513,7 @@ func (s *Server) connectExistingRepository(w http.ResponseWriter, r *http.Reques
 	now := time.Now().UTC()
 	candidate := domain.Repository{
 		ID: newID("repo"), Name: input.Name, Engine: input.Engine, Kind: input.Kind,
-		RemoteHostID: input.RemoteHostID, Path: input.Path, CreatedAt: now, UpdatedAt: now,
+		LocalTarget: input.LocalTarget, RemoteHostID: input.RemoteHostID, Path: input.Path, CreatedAt: now, UpdatedAt: now,
 	}
 	applyS3RepositoryInput(&candidate, input)
 	credentials, credentialsErr := s3Credentials(input, candidate.EffectiveKind() == domain.S3Repository)
@@ -4436,6 +4561,7 @@ func (s *Server) listRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tasks, _ := resources.ListTasks(r.Context())
+	agents, _ := resources.ListAgents(r.Context())
 	runs, _ := resources.ListRuns(r.Context(), 1000)
 	plans, _ := resources.ListPlans(r.Context())
 	taskRepository := map[string]string{}
@@ -4482,14 +4608,18 @@ func (s *Server) listRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 	type repositoryListItem struct {
 		domain.Repository
-		CapacityPolicy *repositoryCapacityPolicyView `json:"capacityPolicy,omitempty"`
+		CapacityPolicy            *repositoryCapacityPolicyView `json:"capacityPolicy,omitempty"`
+		CapacitySupported         bool                          `json:"capacitySupported"`
+		CapacityUnsupportedReason string                        `json:"capacityUnsupportedReason,omitempty"`
 	}
 	now := time.Now().UTC()
 	response := make([]repositoryListItem, 0, len(items))
 	for _, item := range items {
-		view := repositoryListItem{Repository: item}
+		support := repositoryCapacitySupportFor(item, agents)
+		view := repositoryListItem{Repository: item, CapacitySupported: support.Supported, CapacityUnsupportedReason: support.Reason}
 		if policy, ok := policyByRepository[item.ID]; ok {
 			policyView := repositoryCapacityPolicyViewFor(policy, item.Status, now)
+			policyView.CapacitySupported, policyView.CapacityUnsupportedReason = support.Supported, support.Reason
 			view.CapacityPolicy = &policyView
 		}
 		response = append(response, view)
@@ -5202,7 +5332,42 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "无法读取任务")
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	type activeTaskOperation struct {
+		ID     string `json:"id"`
+		Kind   string `json:"kind"`
+		Status string `json:"status"`
+		Stage  string `json:"stage"`
+	}
+	type taskView struct {
+		domain.Task
+		ActiveOperation *activeTaskOperation `json:"activeOperation,omitempty"`
+	}
+	active := make(map[string]activeTaskOperation)
+	for _, status := range []string{"running", "queued"} {
+		operations, listErr := s.operations.List(r.Context(), 1000, "", status)
+		if listErr != nil {
+			writeError(w, http.StatusInternalServerError, "无法读取任务运行状态")
+			return
+		}
+		for _, operation := range operations {
+			if operation.TaskID == "" || (operation.Kind != "backup" && operation.Kind != "sync") {
+				continue
+			}
+			if _, exists := active[operation.TaskID]; exists {
+				continue
+			}
+			active[operation.TaskID] = activeTaskOperation{ID: operation.ID, Kind: operation.Kind, Status: operation.Status, Stage: operation.Stage}
+		}
+	}
+	result := make([]taskView, 0, len(items))
+	for _, item := range items {
+		view := taskView{Task: item}
+		if operation, ok := active[item.ID]; ok {
+			view.ActiveOperation = &operation
+		}
+		result = append(result, view)
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
@@ -5221,6 +5386,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	type agentView struct {
 		ID                  string     `json:"id"`
 		RemoteHostID        string     `json:"remoteHostId,omitempty"`
+		ManagedInstallation bool       `json:"managedInstallation"`
 		CertificateSerial   string     `json:"certificateSerial"`
 		CertificateNotAfter *time.Time `json:"certificateNotAfter,omitempty"`
 		CertificateStatus   string     `json:"certificateStatus"`
@@ -5255,7 +5421,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, agent := range agents {
 		status := agent.Status
-		if status == "online" && (agent.LastHeartbeatAt == nil || agent.LastHeartbeatAt.Before(now.Add(-alerting.AgentHeartbeatTimeout))) {
+		if status == "online" && !agentcontrol.IsOnline(agent, now) {
 			status = "offline"
 		}
 		runtimeStatus := "unknown"
@@ -5287,12 +5453,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		taskEligible := compatibilityStatus == "compatible" && agentHasTaskEngine(agent.Capabilities)
-		managedResticRepairAvailable := agent.RemoteHostID != "" && agent.OS == "linux" && agent.RevokedAt == nil && agent.UninstalledAt == nil &&
+		managedResticRepairAvailable := agent.ManagedInstallation && agent.RemoteHostID != "" && agent.OS == "linux" && agent.RevokedAt == nil && agent.UninstalledAt == nil &&
 			!slices.Contains(agent.Capabilities, agentprotocol.ManagedResticInstallCapability)
 		upgradeAvailable := agent.BuildVersion != "" && s.applicationVersion != "" &&
 			(agent.BuildVersion != s.applicationVersion || managedResticRepairAvailable)
 		items = append(items, agentView{
-			ID: agent.ID, RemoteHostID: agent.RemoteHostID, CertificateSerial: agent.CertificateSerial,
+			ID: agent.ID, RemoteHostID: agent.RemoteHostID, ManagedInstallation: agent.ManagedInstallation, CertificateSerial: agent.CertificateSerial,
 			CertificateNotAfter: agent.CertificateNotAfter, CertificateStatus: certificateStatus,
 			Capabilities: agent.Capabilities, BuildVersion: agent.BuildVersion, ProtocolMin: agent.ProtocolMin, ProtocolMax: agent.ProtocolMax,
 			ProtocolCompatible: protocolCompatible, CompatibilityStatus: compatibilityStatus,
@@ -5304,6 +5470,101 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// bindAgentRemoteHost records an administrator-confirmed physical-host
+// association for a manually installed Agent. It deliberately does not grant
+// managed deployment privileges; those are recorded only after agentdeploy
+// verifies a Service-initiated deployment and heartbeat.
+func (s *Server) bindAgentRemoteHost(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireMutationSession(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		RemoteHostID string `json:"remoteHostId"`
+	}
+	if decodeJSON(r, &input) != nil {
+		writeError(w, http.StatusBadRequest, "请求格式无效")
+		return
+	}
+	agentID := strings.TrimSpace(r.PathValue("id"))
+	input.RemoteHostID = strings.TrimSpace(input.RemoteHostID)
+	if agentID == "" || input.RemoteHostID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "Agent 和远程主机不能为空")
+		return
+	}
+	resources := s.resourceStore(w)
+	if resources == nil {
+		return
+	}
+	agents, err := resources.ListAgents(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取 Agent")
+		return
+	}
+	var agent store.AgentRecord
+	for _, candidate := range agents {
+		if candidate.ID == agentID {
+			agent = candidate
+			break
+		}
+	}
+	if agent.ID == "" {
+		writeError(w, http.StatusNotFound, "Agent 不存在")
+		return
+	}
+	if agent.RevokedAt != nil || agent.UninstalledAt != nil {
+		writeError(w, http.StatusConflict, "已撤销或卸载的 Agent 不能关联远程主机")
+		return
+	}
+	if agent.ManagedInstallation {
+		writeError(w, http.StatusConflict, "托管安装的 Agent 只能通过重新部署变更远程主机")
+		return
+	}
+	hosts, err := resources.ListRemoteHosts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取远程主机")
+		return
+	}
+	hostExists := false
+	for _, host := range hosts {
+		if host.ID == input.RemoteHostID {
+			hostExists = true
+			break
+		}
+	}
+	if !hostExists {
+		writeError(w, http.StatusNotFound, "远程主机不存在")
+		return
+	}
+	replacedAgentID := ""
+	for _, candidate := range agents {
+		if candidate.ID != agentID && candidate.RemoteHostID == input.RemoteHostID {
+			if candidate.ManagedInstallation {
+				writeError(w, http.StatusConflict, "该远程主机已关联托管安装的 Agent；请先完成其卸载或重新部署")
+				return
+			}
+			replacedAgentID = candidate.ID
+			break
+		}
+	}
+	if err := resources.BindAgentRemoteHost(r.Context(), agentID, input.RemoteHostID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "Agent 不存在或已撤销")
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "远程主机关联发生冲突")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "无法关联 Agent 与远程主机")
+		return
+	}
+	s.appendSemanticAudit(r.Context(), username, "agent.remote_host.bind", "agent", agentID, map[string]any{
+		"remoteHostId": input.RemoteHostID, "replacedAgentId": replacedAgentID, "managedInstallation": false,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"agentId": agentID, "remoteHostId": input.RemoteHostID, "managedInstallation": false})
 }
 
 func agentHasTaskEngine(capabilities []string) bool {
@@ -5445,7 +5706,7 @@ func (s *Server) deployAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request := agentdeploy.DeployRequest{HostID: input.HostID, AgentID: input.AgentID, ServiceURL: input.ServiceURL}
-	record, _, err := s.operations.StartUnique("agent-deploy:"+input.HostID, operationruntime.StartRequest{
+	record, reused, err := s.operations.StartUnique("agent-management:"+input.AgentID, operationruntime.StartRequest{
 		Kind: "agent_deploy", Actor: username, Target: input.AgentID, Detail: map[string]any{"hostId": input.HostID},
 	}, func(ctx context.Context, reporter operationruntime.Reporter) error {
 		deploy := s.agentDeployer
@@ -5459,6 +5720,10 @@ func (s *Server) deployAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "无法启动 Agent 部署："+err.Error())
+		return
+	}
+	if reused && record.Kind != "agent_deploy" {
+		writeError(w, http.StatusConflict, "Agent 正在执行其他管理操作")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"operationId": record.ID, "status": record.Status})
@@ -6159,8 +6424,9 @@ func (s *Server) agentFilesystemOperation(w http.ResponseWriter, r *http.Request
 		required = "filesystem-create-directory"
 	}
 	available := false
+	now := time.Now().UTC()
 	for _, agent := range agents {
-		if agent.ID != agentID || agent.RevokedAt != nil || agent.Status != "online" || agent.LastHeartbeatAt == nil || time.Since(*agent.LastHeartbeatAt) > time.Minute {
+		if agent.ID != agentID || agent.RevokedAt != nil || !agentcontrol.IsOnline(agent, now) {
 			continue
 		}
 		for _, capability := range agent.Capabilities {
@@ -6172,7 +6438,6 @@ func (s *Server) agentFilesystemOperation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	definition, _ := json.Marshal(agentfilesystem.Definition{Operation: operation, Path: input.Path})
-	now := time.Now().UTC()
 	request := store.AgentFilesystemRequest{ID: newID("filesystem"), AgentID: agentID, Definition: definition, ExpiresAt: now.Add(15 * time.Second), CreatedAt: now}
 	if err := resources.CreateAgentFilesystemRequest(r.Context(), request); err != nil {
 		writeError(w, http.StatusConflict, "无法提交目录操作")
@@ -6375,16 +6640,16 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 			previous = v
 		}
 	}
-	item := domain.Repository{ID: r.PathValue("id"), Name: input.Name, Engine: input.Engine, Kind: input.Kind, RemoteHostID: input.RemoteHostID, Path: input.Path, Status: status, CreatedAt: created, UpdatedAt: time.Now().UTC()}
+	item := domain.Repository{ID: r.PathValue("id"), Name: input.Name, Engine: input.Engine, Kind: input.Kind, LocalTarget: input.LocalTarget, RemoteHostID: input.RemoteHostID, Path: input.Path, Status: status, CreatedAt: created, UpdatedAt: time.Now().UTC()}
+	if item.Engine == "" && previous.ID != "" {
+		item.Engine = previous.EffectiveEngine()
+	}
 	if item.Kind == "" {
 		if previous.ID != "" {
 			item.Kind = previous.EffectiveKind()
 		} else {
-			item.Kind = domain.SFTPRepository
+			item.Kind = defaultRepositoryKind(item.EffectiveEngine())
 		}
-	}
-	if item.Engine == "" && previous.ID != "" {
-		item.Engine = previous.EffectiveEngine()
 	}
 	applyS3RepositoryInput(&item, input)
 	credentials, credentialsErr := s3Credentials(input, false)
@@ -6428,7 +6693,7 @@ func (s *Server) updateRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func repositoryLocationChanged(previous, next domain.Repository) bool {
-	if previous.EffectiveEngine() != next.EffectiveEngine() || previous.EffectiveKind() != next.EffectiveKind() || previous.RemoteHostID != next.RemoteHostID || previous.Path != next.Path {
+	if previous.EffectiveEngine() != next.EffectiveEngine() || previous.EffectiveKind() != next.EffectiveKind() || previous.EffectiveLocalTarget() != next.EffectiveLocalTarget() || previous.RemoteHostID != next.RemoteHostID || previous.Path != next.Path {
 		return true
 	}
 	if previous.S3 == nil || next.S3 == nil {
@@ -6742,7 +7007,7 @@ func validateTaskActivationWithPreflight(ctx context.Context, resources *store.S
 				if repository.EffectiveEngine() != domain.RsyncEngine || repository.Status != "ready" {
 					return errors.New("rsync 同步仓库不可用")
 				}
-				if repository.EffectiveKind() != domain.SFTPRepository {
+				if repository.EffectiveKind() != domain.SSHRepository {
 					return errors.New("Service 本机 rsync 必须使用 SSH 远程同步仓库")
 				}
 				destinationHostID = repository.RemoteHostID
@@ -6881,7 +7146,7 @@ func validateAgentTaskEligibility(agent store.AgentRecord, requiredCapability st
 	if agent.RevokedAt != nil || agent.UninstalledAt != nil {
 		return errors.New("目标 Agent 已撤销")
 	}
-	if agent.Status != "online" || agent.LastHeartbeatAt == nil || agent.LastHeartbeatAt.Before(now.Add(-alerting.AgentHeartbeatTimeout)) {
+	if !agentcontrol.IsOnline(agent, now) {
 		return errors.New("目标 Agent 离线；可以先保存为停用草稿")
 	}
 	if agent.ProtocolMin < 1 || agent.ProtocolMin > agentprotocol.Version || agent.ProtocolMax < agentprotocol.Version {
@@ -6890,10 +7155,8 @@ func validateAgentTaskEligibility(agent store.AgentRecord, requiredCapability st
 	if agent.CertificateNotAfter != nil && !agent.CertificateNotAfter.After(now) {
 		return errors.New("目标 Agent 证书已过期；请先恢复证书身份或保存为停用草稿")
 	}
-	for _, capability := range agent.Capabilities {
-		if capability == requiredCapability {
-			return nil
-		}
+	if agentcontrol.HasCapability(agent, requiredCapability) {
+		return nil
 	}
 	return fmt.Errorf("目标 Agent 未提供所需引擎 %s；请先安装兼容工具或保存为停用草稿", requiredCapability)
 }

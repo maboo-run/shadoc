@@ -17,7 +17,7 @@ func TestRemovalServiceStopsBeforeRemovingAndRevokingAgent(t *testing.T) {
 	events := []string{}
 	storage := &removalStore{
 		host:   domain.RemoteHost{ID: "host-1", Host: "192.168.0.104", Port: 22, Username: "tmen", HostFingerprint: "known-host"},
-		agent:  store.AgentRecord{ID: "mini-debian", RemoteHostID: "host-1", Status: "revoked", RevokedAt: &now},
+		agent:  store.AgentRecord{ID: "mini-debian", RemoteHostID: "host-1", ManagedInstallation: true, Status: "revoked", RevokedAt: &now},
 		events: &events,
 	}
 	remote := &removalRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/example"}, events: &events}
@@ -41,11 +41,30 @@ func TestRemovalServiceStopsBeforeRemovingAndRevokingAgent(t *testing.T) {
 	}
 }
 
+func TestRemovalServiceDrainsAgentBeforeStoppingIt(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	events := []string{}
+	storage := &removalStore{
+		host:   domain.RemoteHost{ID: "host-1", Host: "192.168.0.105", Port: 22, Username: "tmen", HostFingerprint: "known-host"},
+		agent:  store.AgentRecord{ID: "ugreen-agent", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online"},
+		events: &events,
+	}
+	remote := &removalRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/tmen"}, events: &events}
+	service := NewRemovalService(storage, removalSecrets{}, removalDialer{remote: remote}, func() time.Time { return now })
+
+	if _, err := service.Uninstall(t.Context(), "ugreen-agent", nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"begin-drain", "active-work", "stop", "mark-stopped", "remove", "complete", "end-drain"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events=%v want=%v", events, want)
+	}
+}
+
 func TestRemovalServiceDoesNotRemoveOrChangeStatusWhenStopFails(t *testing.T) {
 	events := []string{}
 	storage := &removalStore{
 		host:   domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "tmen", HostFingerprint: "known"},
-		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", Status: "online"},
+		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online"},
 		events: &events,
 	}
 	remote := &removalRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/example"}, stopErr: errors.New("stop failed"), events: &events}
@@ -53,7 +72,7 @@ func TestRemovalServiceDoesNotRemoveOrChangeStatusWhenStopFails(t *testing.T) {
 	if _, err := service.Uninstall(context.Background(), "agent-1", nil); err == nil {
 		t.Fatal("stop failure was ignored")
 	}
-	if want := []string{"stop"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"begin-drain", "active-work", "stop", "end-drain"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("events=%v want=%v", events, want)
 	}
 }
@@ -62,7 +81,7 @@ func TestRemovalServiceKeepsConfirmedStoppedStateWhenFileRemovalFails(t *testing
 	events := []string{}
 	storage := &removalStore{
 		host:   domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "tmen", HostFingerprint: "known"},
-		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", Status: "online"},
+		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "host-1", ManagedInstallation: true, Status: "online"},
 		events: &events,
 	}
 	remote := &removalRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/example"}, removeErr: errors.New("remove failed"), events: &events}
@@ -70,7 +89,7 @@ func TestRemovalServiceKeepsConfirmedStoppedStateWhenFileRemovalFails(t *testing
 	if _, err := service.Uninstall(context.Background(), "agent-1", nil); err == nil {
 		t.Fatal("remove failure was ignored")
 	}
-	if want := []string{"stop", "mark-stopped", "remove"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"begin-drain", "active-work", "stop", "mark-stopped", "remove", "end-drain"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("events=%v want=%v", events, want)
 	}
 }
@@ -78,7 +97,7 @@ func TestRemovalServiceKeepsConfirmedStoppedStateWhenFileRemovalFails(t *testing
 func TestRemovalServiceExplainsMissingManagedRemoteHost(t *testing.T) {
 	events := []string{}
 	storage := &removalStore{
-		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "deleted-host", Status: "offline"},
+		agent:  store.AgentRecord{ID: "agent-1", RemoteHostID: "deleted-host", ManagedInstallation: true, Status: "offline"},
 		events: &events,
 	}
 	service := NewRemovalService(storage, removalSecrets{}, removalDialer{remote: &removalRemote{events: &events}}, time.Now)
@@ -118,6 +137,18 @@ func (s *removalStore) MarkAgentStopped(context.Context, string, time.Time) erro
 func (s *removalStore) CompleteAgentUninstall(context.Context, string, time.Time) error {
 	*s.events = append(*s.events, "complete")
 	return nil
+}
+func (s *removalStore) BeginAgentDrain(context.Context, string, time.Time) error {
+	*s.events = append(*s.events, "begin-drain")
+	return nil
+}
+func (s *removalStore) EndAgentDrain(context.Context, string) error {
+	*s.events = append(*s.events, "end-drain")
+	return nil
+}
+func (s *removalStore) AgentActiveWorkCount(context.Context, string) (int, error) {
+	*s.events = append(*s.events, "active-work")
+	return 0, nil
 }
 
 type removalSecrets struct{}

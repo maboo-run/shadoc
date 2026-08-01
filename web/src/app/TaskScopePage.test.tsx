@@ -193,6 +193,9 @@ describe("TaskScopePage", () => {
     expect(screen.getByText("3 项规则变更尚未预览")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "预览规则效果" }));
     expect(await screen.findByText("当前结果是临时预览，尚未保存到任务。")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "已排除" }));
+    expect(await screen.findByText("排除未保存")).toBeVisible();
+    expect(screen.queryByText("待排除")).not.toBeInTheDocument();
     const summary = screen.getByRole("region", { name: "范围统计" });
     expect(within(within(summary).getByText("将保护").closest(".scope-lens-stat")!).getByText("0")).toBeVisible();
     expect(onSaved).not.toHaveBeenCalled();

@@ -84,15 +84,20 @@ func TestEnabledRestoreVerificationPolicyRejectsUnsupportedTask(t *testing.T) {
 	}
 }
 
-func TestEnabledRestoreVerificationPolicyPreventsTaskDisable(t *testing.T) {
+func TestDisablingTaskAlsoDisablesRestoreVerificationPolicy(t *testing.T) {
 	s, task := createIdentityFixture(t)
+	ctx := context.Background()
 	policy := domain.RestoreVerificationPolicy{TaskID: task.ID, SelectionPath: "sample", MaximumBytes: 1024, MaximumSuccessAgeHours: 48, Schedule: domain.Schedule{Kind: domain.IntervalSchedule, IntervalHours: 24}, Timezone: "UTC", Enabled: true, UpdatedAt: time.Now().UTC()}
-	if err := s.SaveRestoreVerificationPolicy(context.Background(), policy); err != nil {
+	if err := s.SaveRestoreVerificationPolicy(ctx, policy); err != nil {
 		t.Fatal(err)
 	}
 	task.Enabled = false
 	task.UpdatedAt = task.UpdatedAt.Add(time.Minute)
-	if err := s.UpdateTask(context.Background(), task); err != ErrConflict {
+	if err := s.UpdateTask(ctx, task); err != nil {
 		t.Fatalf("disable task error=%v", err)
+	}
+	stored, err := s.RestoreVerificationPolicy(ctx, task.ID)
+	if err != nil || stored.Enabled {
+		t.Fatalf("restore verification policy=%+v err=%v", stored, err)
 	}
 }
