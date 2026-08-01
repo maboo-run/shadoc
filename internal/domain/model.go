@@ -68,6 +68,7 @@ type RepositoryKind string
 const (
 	LocalRepository RepositoryKind = "local"
 	SFTPRepository  RepositoryKind = "sftp"
+	SSHRepository   RepositoryKind = "ssh"
 	S3Repository    RepositoryKind = "s3"
 )
 
@@ -86,6 +87,7 @@ type Repository struct {
 	Name            string              `json:"name"`
 	Engine          EngineKind          `json:"engine,omitempty"`
 	Kind            RepositoryKind      `json:"kind"`
+	LocalTarget     execution.Target    `json:"localTarget,omitempty"`
 	RemoteHostID    string              `json:"remoteHostId"`
 	Path            string              `json:"path"`
 	S3              *S3RepositoryConfig `json:"s3,omitempty"`
@@ -200,14 +202,38 @@ func (r Repository) Validate() error {
 	}
 	switch r.EffectiveKind() {
 	case LocalRepository:
-		if r.S3 != nil || r.RemoteHostID != "" || !filepath.IsAbs(r.Path) {
+		target := r.EffectiveLocalTarget()
+		if err := target.Validate(); err != nil {
+			return fmt.Errorf("validate local repository target: %w", err)
+		}
+		absolute := filepath.IsAbs(r.Path)
+		if target.Kind == execution.Agent {
+			absolute = portableAbsoluteAgentPath(r.Path)
+		}
+		if r.S3 != nil || r.RemoteHostID != "" || !absolute {
 			return errors.New("local repository requires an absolute local path and no remote host")
 		}
+		if r.EffectiveEngine() == RsyncEngine && target.Kind != execution.Agent {
+			return errors.New("local rsync repository requires an Agent filesystem owner")
+		}
 	case SFTPRepository:
-		if r.S3 != nil || strings.TrimSpace(r.Path) == "" || strings.TrimSpace(r.RemoteHostID) == "" {
-			return errors.New("sftp repository requires a remote host")
+		if r.LocalTarget != (execution.Target{}) {
+			return errors.New("remote repository cannot declare a local filesystem owner")
+		}
+		if r.EffectiveEngine() != ResticEngine || r.S3 != nil || strings.TrimSpace(r.Path) == "" || strings.TrimSpace(r.RemoteHostID) == "" {
+			return errors.New("SFTP repository requires Restic and a remote host")
+		}
+	case SSHRepository:
+		if r.LocalTarget != (execution.Target{}) {
+			return errors.New("remote repository cannot declare a local filesystem owner")
+		}
+		if r.EffectiveEngine() != RsyncEngine || r.S3 != nil || strings.TrimSpace(r.Path) == "" || strings.TrimSpace(r.RemoteHostID) == "" {
+			return errors.New("SSH repository requires rsync and a remote host")
 		}
 	case S3Repository:
+		if r.LocalTarget != (execution.Target{}) {
+			return errors.New("remote repository cannot declare a local filesystem owner")
+		}
 		if r.EffectiveEngine() != ResticEngine || r.RemoteHostID != "" || r.S3 == nil {
 			return errors.New("S3 repository requires Restic, structured backend settings, and no remote host")
 		}
@@ -216,6 +242,28 @@ func (r Repository) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported repository kind %q", r.Kind)
+	}
+	return nil
+}
+
+// EffectiveLocalTarget identifies the process whose filesystem gives meaning to
+// a local repository path. Legacy repositories default to the Service process.
+func (r Repository) EffectiveLocalTarget() execution.Target {
+	return r.LocalTarget.Normalized()
+}
+
+// ValidateExecutionTarget prevents a local path from silently changing
+// meaning between the Service filesystem and an Agent filesystem.
+func (r Repository) ValidateExecutionTarget(target execution.Target) error {
+	target = target.Normalized()
+	if err := target.Validate(); err != nil {
+		return err
+	}
+	if r.EffectiveKind() != LocalRepository {
+		return nil
+	}
+	if r.EffectiveLocalTarget() != target {
+		return errors.New("task execution target does not own the local repository path")
 	}
 	return nil
 }
@@ -283,6 +331,9 @@ func (r Repository) EffectiveEngine() EngineKind {
 
 func (r Repository) EffectiveKind() RepositoryKind {
 	if r.Kind == "" {
+		if r.EffectiveEngine() == RsyncEngine {
+			return SSHRepository
+		}
 		return SFTPRepository
 	}
 	return r.Kind

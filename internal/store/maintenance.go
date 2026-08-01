@@ -30,17 +30,21 @@ func ensureRepositoryRetentionPolicy(ctx context.Context, tx *sql.Tx, repository
 }
 
 func (s *Store) SaveMaintenancePolicy(ctx context.Context, p domain.MaintenancePolicy) error {
-	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE id=?`, p.RepositoryID).Scan(&exists); err != nil || exists == 0 {
-		return ErrConflict
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repositories WHERE id=?`, p.RepositoryID); err != nil {
+		return err
 	}
 	schedule, _ := json.Marshal(p.Schedule)
 	retention, _ := json.Marshal(p.Retention)
 	anchor := p.ScheduleAnchorAt
 	var previousSchedule, previousTimezone, previousAnchor string
 	var previousEnabled int
-	err := s.db.QueryRowContext(ctx, `SELECT schedule_json,timezone,enabled,schedule_anchor_at FROM repository_maintenance WHERE repository_id=?`, p.RepositoryID).Scan(&previousSchedule, &previousTimezone, &previousEnabled, &previousAnchor)
-	if err == sql.ErrNoRows {
+	err = tx.QueryRowContext(ctx, `SELECT schedule_json,timezone,enabled,schedule_anchor_at FROM repository_maintenance WHERE repository_id=?`, p.RepositoryID).Scan(&previousSchedule, &previousTimezone, &previousEnabled, &previousAnchor)
+	if errors.Is(err, sql.ErrNoRows) {
 		anchor = p.UpdatedAt
 	} else if err != nil {
 		return err
@@ -53,8 +57,10 @@ func (s *Store) SaveMaintenancePolicy(ctx context.Context, p domain.MaintenanceP
 			anchor = p.UpdatedAt
 		}
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO repository_maintenance(repository_id,schedule_json,timezone,retention_json,enabled,catch_up_window_minutes,schedule_anchor_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET schedule_json=excluded.schedule_json,timezone=excluded.timezone,retention_json=excluded.retention_json,enabled=excluded.enabled,catch_up_window_minutes=excluded.catch_up_window_minutes,schedule_anchor_at=excluded.schedule_anchor_at,updated_at=excluded.updated_at`, p.RepositoryID, string(schedule), p.Timezone, string(retention), boolInt(p.Enabled), p.CatchUpWindowMinutes, formatTime(anchor), formatTime(p.UpdatedAt))
-	return err
+	if _, err = tx.ExecContext(ctx, `INSERT INTO repository_maintenance(repository_id,schedule_json,timezone,retention_json,enabled,catch_up_window_minutes,schedule_anchor_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET schedule_json=excluded.schedule_json,timezone=excluded.timezone,retention_json=excluded.retention_json,enabled=excluded.enabled,catch_up_window_minutes=excluded.catch_up_window_minutes,schedule_anchor_at=excluded.schedule_anchor_at,updated_at=excluded.updated_at`, p.RepositoryID, string(schedule), p.Timezone, string(retention), boolInt(p.Enabled), p.CatchUpWindowMinutes, formatTime(anchor), formatTime(p.UpdatedAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) ListMaintenancePolicies(ctx context.Context) ([]domain.MaintenancePolicy, error) {
 	rows, err := s.db.QueryContext(ctx, `

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -29,6 +30,9 @@ func (s *Store) ResourceDeletePreview(ctx context.Context, resourceType, id stri
 	if resourceType == "agents" {
 		return s.agentDeletePreview(ctx, id)
 	}
+	if resourceType == "tasks" {
+		return s.taskDeletePreview(ctx, id)
+	}
 	table, _, err := deletableResource(resourceType)
 	if err != nil {
 		return ResourceDeletePreview{}, err
@@ -37,33 +41,11 @@ func (s *Store) ResourceDeletePreview(ctx context.Context, resourceType, id stri
 	if err := s.db.QueryRowContext(ctx, `SELECT name,updated_at FROM `+table+` WHERE id=?`, id).Scan(&preview.Name, &preview.UpdatedAt); err != nil {
 		return ResourceDeletePreview{}, err
 	}
-	queries := map[string][]struct{ dependencyType, query string }{
-		"remote-hosts":         {{"repositories", `SELECT name FROM repositories WHERE remote_host_id=? ORDER BY name`}},
-		"repositories":         {{"tasks", `SELECT name FROM tasks WHERE repository_id=? ORDER BY name`}},
-		"database-connections": {{"tasks", `SELECT name FROM tasks WHERE kind='database' AND json_extract(source_json,'$.connectionId')=? ORDER BY name`}},
-		"tasks":                {{"plans", `SELECT DISTINCT p.name FROM plans p JOIN plan_tasks pt ON pt.plan_id=p.id WHERE pt.task_id=? ORDER BY p.name`}},
+	dependencies, err := resourceDeleteDependencies(ctx, s.db, resourceType, id)
+	if err != nil {
+		return ResourceDeletePreview{}, err
 	}
-	for _, dependency := range queries[resourceType] {
-		rows, err := s.db.QueryContext(ctx, dependency.query, id)
-		if err != nil {
-			return ResourceDeletePreview{}, err
-		}
-		names := make([]string, 0)
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err != nil {
-				_ = rows.Close()
-				return ResourceDeletePreview{}, err
-			}
-			names = append(names, name)
-		}
-		if err := rows.Close(); err != nil {
-			return ResourceDeletePreview{}, err
-		}
-		if len(names) > 0 {
-			preview.Dependencies = append(preview.Dependencies, ResourceDependency{Type: dependency.dependencyType, Count: len(names), Names: names})
-		}
-	}
+	preview.Dependencies = dependencies
 	preview.Deletable = len(preview.Dependencies) == 0
 	if !preview.Deletable {
 		preview.BlockedReason = "资源仍被其他配置引用"
@@ -71,9 +53,102 @@ func (s *Store) ResourceDeletePreview(ctx context.Context, resourceType, id stri
 	return preview, nil
 }
 
+func resourceDeleteDependencies(ctx context.Context, queryer deletePreviewQueryer, resourceType, id string) ([]ResourceDependency, error) {
+	queries := map[string][]struct{ dependencyType, query string }{
+		"remote-hosts": {
+			{"repositories", `SELECT name FROM repositories WHERE remote_host_id=? ORDER BY name`},
+			{"tasks", `SELECT name FROM tasks WHERE engine='rsync' AND json_extract(source_json,'$.destinationHostId')=? ORDER BY name`},
+		},
+		"repositories": {
+			{"tasks", `SELECT name FROM tasks WHERE repository_id=? ORDER BY name`},
+		},
+		"database-connections": {{"tasks", `SELECT name FROM tasks WHERE kind='database' AND json_extract(source_json,'$.connectionId')=? ORDER BY name`}},
+	}
+	result := make([]ResourceDependency, 0)
+	for _, dependency := range queries[resourceType] {
+		rows, err := queryer.QueryContext(ctx, dependency.query, id)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0)
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			names = append(names, name)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if len(names) > 0 {
+			result = append(result, ResourceDependency{Type: dependency.dependencyType, Count: len(names), Names: names})
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) taskDeletePreview(ctx context.Context, id string) (ResourceDeletePreview, error) {
+	preview := ResourceDeletePreview{ResourceType: "tasks", ID: id, Dependencies: []ResourceDependency{}}
+	var enabled int
+	if err := s.db.QueryRowContext(ctx, `SELECT name,updated_at,enabled FROM tasks WHERE id=?`, id).Scan(&preview.Name, &preview.UpdatedAt, &enabled); err != nil {
+		return ResourceDeletePreview{}, err
+	}
+	active, err := taskActiveWorkDependencies(ctx, s.db, id)
+	if err != nil {
+		return ResourceDeletePreview{}, err
+	}
+	preview.Dependencies = active
+	preview.Deletable = enabled == 0 && len(active) == 0
+	if enabled != 0 {
+		preview.BlockedReason = "请先停用备份任务，再确认删除"
+	} else if len(active) > 0 {
+		preview.BlockedReason = "任务仍在执行，请等待运行、操作或 Agent 租约完成后再删除"
+	}
+	return preview, nil
+}
+
+func taskActiveWorkDependencies(ctx context.Context, queryer deletePreviewQueryer, id string) ([]ResourceDependency, error) {
+	queries := []struct {
+		dependencyType string
+		query          string
+	}{
+		{"active-runs", `SELECT id FROM runs WHERE task_id=? AND status IN ('queued','running') ORDER BY id`},
+		{"active-operations", `SELECT id FROM operations WHERE task_id=? AND status IN ('queued','running') ORDER BY id`},
+		{"active-agent-leases", `SELECT id FROM agent_leases WHERE task_id=? AND status IN ('queued','running') AND completed_at IS NULL ORDER BY id`},
+	}
+	dependencies := make([]ResourceDependency, 0, len(queries))
+	for _, dependency := range queries {
+		rows, err := queryer.QueryContext(ctx, dependency.query, id)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0)
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			names = append(names, name)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if len(names) > 0 {
+			dependencies = append(dependencies, ResourceDependency{Type: dependency.dependencyType, Count: len(names), Names: names})
+		}
+	}
+	return dependencies, nil
+}
+
 func (s *Store) DeleteResourceVersioned(ctx context.Context, resourceType, id, expectedUpdatedAt string) ([]string, error) {
 	if resourceType == "agents" {
 		return nil, s.deleteAgentVersioned(ctx, id, expectedUpdatedAt)
+	}
+	if resourceType == "tasks" {
+		return nil, s.deleteTaskVersioned(ctx, id, expectedUpdatedAt)
 	}
 	table, secretColumns, err := deletableResource(resourceType)
 	if err != nil || expectedUpdatedAt == "" {
@@ -103,10 +178,32 @@ func (s *Store) DeleteResourceVersioned(ctx context.Context, resourceType, id, e
 	if updatedAt != expectedUpdatedAt {
 		return nil, ErrConflict
 	}
-	if resourceType == "remote-hosts" {
-		if _, err := tx.ExecContext(ctx, `UPDATE agents SET remote_host_id=NULL WHERE remote_host_id=?`, id); err != nil {
-			return nil, constraintError(err)
+	dependencies, err := resourceDeleteDependencies(ctx, tx, resourceType, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(dependencies) > 0 {
+		return nil, ErrConflict
+	}
+	if resourceType == "repositories" {
+		rows, err := tx.QueryContext(ctx, `SELECT secret_id FROM repository_key_revocations WHERE repository_id=? ORDER BY secret_id`, id)
+		if err != nil {
+			return nil, err
 		}
+		for rows.Next() {
+			var secret string
+			if err := rows.Scan(&secret); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			secrets = append(secrets, secret)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	if err := deleteResourceOwnedRecords(ctx, tx, resourceType, id); err != nil {
+		return nil, err
 	}
 	deleteResult, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE id=? AND updated_at=?`, id, expectedUpdatedAt)
 	if err != nil {
@@ -129,6 +226,330 @@ func (s *Store) DeleteResourceVersioned(ctx context.Context, resourceType, id, e
 		}
 	}
 	return result, nil
+}
+
+func deleteResourceOwnedRecords(ctx context.Context, tx *sql.Tx, resourceType, id string) error {
+	var statements []string
+	switch resourceType {
+	case "remote-hosts":
+		statements = []string{`UPDATE agents SET remote_host_id=NULL WHERE remote_host_id=?`}
+	case "repositories":
+		statements = []string{
+			`UPDATE protection_draft_items SET repository_password_secret_id='' WHERE repository_id=?`,
+			`DELETE FROM repository_key_revocations WHERE repository_id=?`,
+			`DELETE FROM repository_capacities WHERE repository_id=?`,
+			`DELETE FROM repository_capacity_policies WHERE repository_id=?`,
+			`DELETE FROM repository_capacity_samples WHERE repository_id=?`,
+			`DELETE FROM repository_maintenance WHERE repository_id=?`,
+			`DELETE FROM maintenance_previews WHERE repository_id=?`,
+			`DELETE FROM snapshot_metadata WHERE repository_id=?`,
+			`DELETE FROM restore_verifications WHERE repository_id=?`,
+			`DELETE FROM schedule_occurrences WHERE owner_kind='maintenance' AND owner_id=?`,
+		}
+	case "plans":
+		statements = []string{
+			`UPDATE runs SET plan_id=NULL WHERE plan_id=?`,
+			`DELETE FROM plan_tasks WHERE plan_id=?`,
+			`DELETE FROM schedule_occurrences WHERE owner_kind='plan' AND owner_id=?`,
+		}
+	case "protection-templates":
+		statements = []string{`UPDATE protection_drafts SET template_id='' WHERE template_id=?`}
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) deleteTaskVersioned(ctx context.Context, id, expectedUpdatedAt string) error {
+	if expectedUpdatedAt == "" {
+		return ErrConflict
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updatedAt, err := ensureTaskDeletableInTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if updatedAt != expectedUpdatedAt {
+		return ErrConflict
+	}
+	if err := deleteTaskOwnedRecords(ctx, tx, id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=? AND updated_at=? AND enabled=0`, id, expectedUpdatedAt)
+	if err != nil {
+		return constraintError(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrConflict
+	}
+	return tx.Commit()
+}
+
+func ensureTaskDeletableInTx(ctx context.Context, tx *sql.Tx, id string) (string, error) {
+	var updatedAt string
+	var enabled int
+	if err := tx.QueryRowContext(ctx, `SELECT updated_at,enabled FROM tasks WHERE id=?`, id).Scan(&updatedAt, &enabled); err != nil {
+		return "", err
+	}
+	if enabled != 0 {
+		return "", ErrConflict
+	}
+	active, err := taskActiveWorkDependencies(ctx, tx, id)
+	if err != nil {
+		return "", err
+	}
+	if len(active) > 0 {
+		return "", ErrConflict
+	}
+	return updatedAt, nil
+}
+
+func deleteTaskOwnedRecords(ctx context.Context, tx *sql.Tx, id string) error {
+	if err := deleteTaskPlanAssociations(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := deleteTaskProtectionDrafts(ctx, tx, id); err != nil {
+		return err
+	}
+	statements := []string{
+		`DELETE FROM agent_leases WHERE task_id=?`,
+		`DELETE FROM operations WHERE task_id=?`,
+		`DELETE FROM runs WHERE task_id=?`,
+		`DELETE FROM task_scope_previews WHERE task_id=?`,
+		`DELETE FROM restore_verifications WHERE task_id=?`,
+		`DELETE FROM restore_verification_policies WHERE task_id=?`,
+		`DELETE FROM schedule_occurrences WHERE owner_kind='restore_verification' AND owner_id=?`,
+		`DELETE FROM notification_deliveries WHERE state_key IN (SELECT state_key FROM alert_states WHERE object_type='task' AND object_id=?) OR state_key IN (SELECT state_key FROM alert_events WHERE object_type='task' AND object_id=?)`,
+		`DELETE FROM notifications WHERE state_key IN (SELECT state_key FROM alert_states WHERE object_type='task' AND object_id=?) OR state_key IN (SELECT state_key FROM alert_events WHERE object_type='task' AND object_id=?)`,
+		`DELETE FROM alert_events WHERE object_type='task' AND object_id=?`,
+		`DELETE FROM alert_states WHERE object_type='task' AND object_id=?`,
+	}
+	for _, statement := range statements {
+		arguments := []any{id}
+		if strings.Count(statement, "?") == 2 {
+			arguments = append(arguments, id)
+		}
+		if _, err := tx.ExecContext(ctx, statement, arguments...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteTaskProtectionDrafts(ctx context.Context, tx *sql.Tx, taskID string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT d.id,d.plan_id
+		FROM protection_drafts d
+		JOIN protection_draft_items i ON i.draft_id=d.id
+		WHERE i.task_id=?`, taskID)
+	if err != nil {
+		return err
+	}
+	type draftReference struct{ id, planID string }
+	drafts := make([]draftReference, 0)
+	for rows.Next() {
+		var draft draftReference
+		if err := rows.Scan(&draft.id, &draft.planID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		drafts = append(drafts, draft)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM protection_draft_items WHERE task_id=?`, taskID); err != nil {
+		return err
+	}
+	for _, draft := range drafts {
+		var remaining int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM protection_draft_items WHERE draft_id=?`, draft.id).Scan(&remaining); err != nil {
+			return err
+		}
+		if remaining != 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM protection_drafts WHERE id=?`, draft.id); err != nil {
+			return err
+		}
+		if draft.planID == "" {
+			continue
+		}
+		var planTasks int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_tasks WHERE plan_id=?`, draft.planID).Scan(&planTasks); err != nil {
+			return err
+		}
+		if planTasks != 0 {
+			continue
+		}
+		if err := deleteResourceOwnedRecords(ctx, tx, "plans", draft.planID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plans WHERE id=?`, draft.planID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteTaskPlanAssociations(ctx context.Context, tx *sql.Tx, taskID string) error {
+	planIDs := make(map[string]struct{})
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT plan_id FROM plan_tasks WHERE task_id=?`, taskID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var planID string
+		if err := rows.Scan(&planID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		planIDs[planID] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = tx.QueryContext(ctx, `
+		SELECT DISTINCT owner_id FROM schedule_occurrences
+		WHERE owner_kind='plan' AND EXISTS (
+			SELECT 1 FROM json_each(schedule_occurrences.target_ids_json) WHERE value=?
+		)`, taskID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var planID string
+		if err := rows.Scan(&planID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		planIDs[planID] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for planID := range planIDs {
+		if err := prunePlanOccurrencesForTask(ctx, tx, planID, taskID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plan_tasks WHERE plan_id=? AND task_id=?`, planID, taskID); err != nil {
+			return err
+		}
+		var remaining int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_tasks WHERE plan_id=?`, planID).Scan(&remaining); err != nil {
+			return err
+		}
+		if remaining != 0 {
+			continue
+		}
+		if err := deleteResourceOwnedRecords(ctx, tx, "plans", planID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plans WHERE id=?`, planID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func prunePlanOccurrencesForTask(ctx context.Context, tx *sql.Tx, planID, taskID string) error {
+	runIDs := make(map[string]struct{})
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM runs WHERE task_id=?`, taskID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		runIDs[runID] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	occurrences, err := tx.QueryContext(ctx, `
+		SELECT id,target_ids_json,run_ids_json FROM schedule_occurrences
+		WHERE owner_kind='plan' AND owner_id=?`, planID)
+	if err != nil {
+		return err
+	}
+	type occurrenceData struct {
+		id, targetsJSON, runsJSON string
+	}
+	items := make([]occurrenceData, 0)
+	for occurrences.Next() {
+		var item occurrenceData
+		if err := occurrences.Scan(&item.id, &item.targetsJSON, &item.runsJSON); err != nil {
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := occurrences.Err(); err != nil {
+		return err
+	}
+	if err := occurrences.Close(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		var targets, runs []string
+		if err := json.Unmarshal([]byte(item.targetsJSON), &targets); err != nil {
+			return fmt.Errorf("decode plan occurrence targets: %w", err)
+		}
+		if err := json.Unmarshal([]byte(item.runsJSON), &runs); err != nil {
+			return fmt.Errorf("decode plan occurrence runs: %w", err)
+		}
+		filteredTargets := make([]string, 0, len(targets))
+		for _, target := range targets {
+			if target != taskID {
+				filteredTargets = append(filteredTargets, target)
+			}
+		}
+		filteredRuns := make([]string, 0, len(runs))
+		for _, runID := range runs {
+			if _, belongs := runIDs[runID]; !belongs {
+				filteredRuns = append(filteredRuns, runID)
+			}
+		}
+		if len(filteredTargets) == len(targets) && len(filteredRuns) == len(runs) {
+			continue
+		}
+		if len(filteredTargets) == 0 {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM schedule_occurrences WHERE id=?`, item.id); err != nil {
+				return err
+			}
+			continue
+		}
+		encodedTargets, err := json.Marshal(filteredTargets)
+		if err != nil {
+			return err
+		}
+		encodedRuns, err := json.Marshal(filteredRuns)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE schedule_occurrences
+			SET target_ids_json=?,run_ids_json=?,
+				status=CASE WHEN status IN ('pending','running') THEN 'cancelled' ELSE status END,
+				finished_at=CASE WHEN status IN ('pending','running') THEN COALESCE(finished_at,observed_at) ELSE finished_at END
+			WHERE id=?`, string(encodedTargets), string(encodedRuns), item.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type deletePreviewQueryer interface {
@@ -172,6 +593,14 @@ func agentDeleteDependencies(ctx context.Context, queryer deletePreviewQueryer, 
 			query: `SELECT name FROM tasks
 				WHERE json_extract(execution_target_json,'$.kind')='agent'
 				  AND json_extract(execution_target_json,'$.agentId')=?
+				ORDER BY name`,
+		},
+		{
+			dependencyType: "repositories",
+			query: `SELECT name FROM repositories
+				WHERE kind='local'
+				  AND json_extract(local_target_json,'$.kind')='agent'
+				  AND json_extract(local_target_json,'$.agentId')=?
 				ORDER BY name`,
 		},
 		{
@@ -271,6 +700,16 @@ func (s *Store) deleteAgentVersioned(ctx context.Context, id, expectedVersion st
 	}
 	if len(dependencies) > 0 {
 		return ErrConflict
+	}
+	for _, statement := range []string{
+		`DELETE FROM agent_certificates WHERE agent_id=?`,
+		`DELETE FROM agent_filesystem_requests WHERE agent_id=?`,
+		`DELETE FROM agent_restore_requests WHERE agent_id=?`,
+		`DELETE FROM agent_leases WHERE agent_id=?`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
+			return err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE id=?`, id)
 	if err != nil {

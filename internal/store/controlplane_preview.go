@@ -157,6 +157,10 @@ func importRepositories(ctx context.Context, tx *sql.Tx, items []ControlPlaneRep
 		if err != nil {
 			return err
 		}
+		localTargetJSON, err := encodeRepositoryLocalTarget(item.Repository)
+		if err != nil {
+			return err
+		}
 		if item.Repository.EffectiveKind() == domain.S3Repository {
 			if err := requireSecret(ctx, tx, item.BackendSecretID, s3backend.CredentialPurpose); err != nil {
 				return err
@@ -164,7 +168,7 @@ func importRepositories(ctx context.Context, tx *sql.Tx, items []ControlPlaneRep
 		} else if item.BackendSecretID != "" {
 			return errors.New("non-S3 repository cannot import a backend secret")
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO repositories(id,name,engine,kind,remote_host_id,path,backend_json,backend_secret_id,password_secret_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, item.Repository.ID, item.Repository.Name, item.Repository.EffectiveEngine(), item.Repository.EffectiveKind(), nullString(item.Repository.RemoteHostID), item.Repository.Path, backendJSON, nullString(item.BackendSecretID), nullString(item.PasswordSecretID), "disconnected", formatTime(item.Repository.CreatedAt), formatTime(item.Repository.UpdatedAt))
+		_, err = tx.ExecContext(ctx, `INSERT INTO repositories(id,name,engine,kind,local_target_json,remote_host_id,path,backend_json,backend_secret_id,password_secret_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.Repository.ID, item.Repository.Name, item.Repository.EffectiveEngine(), item.Repository.EffectiveKind(), localTargetJSON, nullString(item.Repository.RemoteHostID), item.Repository.Path, backendJSON, nullString(item.BackendSecretID), nullString(item.PasswordSecretID), "disconnected", formatTime(item.Repository.CreatedAt), formatTime(item.Repository.UpdatedAt))
 		if err != nil {
 			return constraintError(err)
 		}
@@ -209,7 +213,7 @@ func importAgents(ctx context.Context, tx *sql.Tx, items []AgentRecord) error {
 		if item.RevokedAt != nil {
 			status = "revoked"
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO agents(id,remote_host_id,certificate_serial,certificate_not_after,capabilities_json,status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, item.ID, nullString(item.RemoteHostID), item.CertificateSerial, nullableTime(item.CertificateNotAfter), "[]", status, nil, formatTime(item.CreatedAt), nullableTime(item.RevokedAt), nil, nil)
+		_, err := tx.ExecContext(ctx, `INSERT INTO agents(id,remote_host_id,managed_installation,certificate_serial,certificate_not_after,capabilities_json,status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, nullString(item.RemoteHostID), item.ManagedInstallation, item.CertificateSerial, nullableTime(item.CertificateNotAfter), "[]", status, nil, formatTime(item.CreatedAt), nullableTime(item.RevokedAt), nil, nil)
 		if err != nil {
 			return constraintError(err)
 		}
@@ -348,6 +352,9 @@ func importScheduleWatermarks(ctx context.Context, tx *sql.Tx, request ControlPl
 					break
 				}
 			}
+		}
+		if err := validateScheduleOccurrenceReferences(ctx, tx, ScheduleOccurrence{OwnerKind: item.OwnerKind, OwnerID: item.OwnerID, TargetIDs: targets}); err != nil {
+			return err
 		}
 		targetJSON, _ := json.Marshal(targets)
 		runJSON := "[]"

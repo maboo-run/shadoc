@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/maboo-run/shadoc/internal/agentfilesystem"
@@ -17,11 +19,16 @@ type Runtime struct {
 	now                func() time.Time
 	runtimeInfo        agentprotocol.RuntimeInfo
 	lastRenewalAttempt time.Time
+	progressInterval   time.Duration
 }
 
 const (
 	certificateRenewalWindow = 30 * 24 * time.Hour
 	certificateRetryInterval = 6 * time.Hour
+	defaultProgressInterval  = 10 * time.Second
+	progressRequestTimeout   = 5 * time.Second
+	completionRetryInitial   = 100 * time.Millisecond
+	completionRetryMaximum   = 5 * time.Second
 )
 
 func (r *Runtime) SetRuntimeInfo(info agentprotocol.RuntimeInfo) {
@@ -34,10 +41,14 @@ func New(agentID string, engines execution.Registry, now func() time.Time) *Runt
 	if now == nil {
 		now = time.Now
 	}
-	return &Runtime{agentID: agentID, engines: engines, now: now}
+	return &Runtime{agentID: agentID, engines: engines, now: now, progressInterval: defaultProgressInterval}
 }
 
 func (r *Runtime) Execute(ctx context.Context, assignment agentprotocol.Assignment) agentprotocol.Result {
+	return r.execute(ctx, assignment, nil)
+}
+
+func (r *Runtime) execute(ctx context.Context, assignment agentprotocol.Assignment, report func(execution.Progress)) agentprotocol.Result {
 	result := agentprotocol.Result{Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: r.agentID, Status: "failed"}
 	if err := assignment.ValidateFor(r.agentID, r.now().UTC()); err != nil {
 		result.Error = err.Error()
@@ -56,7 +67,7 @@ func (r *Runtime) Execute(ctx context.Context, assignment agentprotocol.Assignme
 		result.Error = err.Error()
 		return result
 	}
-	outcome, err := engine.Run(ctx, execution.Assignment{ID: assignment.ID, TaskID: assignment.TaskID, Engine: execution.EngineKind(assignment.Engine), Target: execution.Target{Kind: execution.Agent, AgentID: r.agentID}, Definition: assignment.Definition, ExpiresAt: assignment.ExpiresAt})
+	outcome, err := engine.Run(ctx, execution.Assignment{ID: assignment.ID, TaskID: assignment.TaskID, Engine: execution.EngineKind(assignment.Engine), Target: execution.Target{Kind: execution.Agent, AgentID: r.agentID}, Definition: assignment.Definition, ExpiresAt: assignment.ExpiresAt, Progress: report})
 	if outcome.Status == "" {
 		if err != nil {
 			outcome.Status = "failed"
@@ -96,15 +107,22 @@ func (r *Runtime) Step(ctx context.Context, control Control, capabilities []stri
 			return err
 		}
 		if found {
-			var result agentprotocol.Result
+			run := func(report func(execution.Progress)) agentprotocol.Result {
+				return r.execute(ctx, assignment, report)
+			}
 			if uploader, ok := control.(interface {
 				UploadFilesystemScopeEntries(context.Context, agentprotocol.FilesystemScopeEntryChunk) error
 			}); ok {
-				result = r.executeFilesystem(ctx, assignment, uploader)
-			} else {
-				result = r.Execute(ctx, assignment)
+				run = func(func(execution.Progress)) agentprotocol.Result {
+					return r.executeFilesystem(ctx, assignment, uploader)
+				}
 			}
-			return filesystem.CompleteFilesystem(ctx, result)
+			if progressControl, ok := control.(interface {
+				Progress(context.Context, agentprotocol.AssignmentProgress) error
+			}); ok {
+				return r.executeWithProgressUntilAcknowledged(ctx, progressControl, control, assignment, capabilities, run, filesystem.CompleteFilesystem)
+			}
+			return filesystem.CompleteFilesystem(ctx, run(nil))
 		}
 	}
 	if restore, ok := control.(interface {
@@ -116,6 +134,13 @@ func (r *Runtime) Step(ctx context.Context, control Control, capabilities []stri
 			return err
 		}
 		if found {
+			if progressControl, ok := control.(interface {
+				Progress(context.Context, agentprotocol.AssignmentProgress) error
+			}); ok {
+				return r.executeWithProgressUntilAcknowledged(ctx, progressControl, control, assignment, capabilities, func(report func(execution.Progress)) agentprotocol.Result {
+					return r.execute(ctx, assignment, report)
+				}, restore.CompleteRestore)
+			}
 			return restore.CompleteRestore(ctx, r.Execute(ctx, assignment))
 		}
 	}
@@ -123,7 +148,101 @@ func (r *Runtime) Step(ctx context.Context, control Control, capabilities []stri
 	if err != nil || !ok {
 		return err
 	}
+	if progressControl, ok := control.(interface {
+		Progress(context.Context, agentprotocol.AssignmentProgress) error
+	}); ok {
+		return r.executeWithProgressUntilAcknowledged(ctx, progressControl, control, assignment, capabilities, func(report func(execution.Progress)) agentprotocol.Result {
+			return r.execute(ctx, assignment, report)
+		}, control.Complete)
+	}
 	return control.Complete(ctx, r.Execute(ctx, assignment))
+}
+
+func (r *Runtime) executeWithProgressUntilAcknowledged(ctx context.Context, progressControl interface {
+	Progress(context.Context, agentprotocol.AssignmentProgress) error
+}, heartbeatControl Control, assignment agentprotocol.Assignment, capabilities []string, run func(func(execution.Progress)) agentprotocol.Result, complete func(context.Context, agentprotocol.Result) error) error {
+	progressCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	var progressMu sync.Mutex
+	latest := agentprotocol.AssignmentProgress{
+		Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: r.agentID, Phase: "starting",
+	}
+	r.sendProgress(progressCtx, progressControl, latest)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(r.progressInterval)
+		defer ticker.Stop()
+		var sequence int64
+		for {
+			select {
+			case <-progressCtx.Done():
+				return
+			case <-ticker.C:
+				progressMu.Lock()
+				progress := latest
+				progressMu.Unlock()
+				sequence++
+				progress.Sequence = sequence
+				r.sendProgress(progressCtx, progressControl, progress)
+				r.sendHeartbeat(progressCtx, heartbeatControl, capabilities)
+			}
+		}
+	}()
+	result := run(func(value execution.Progress) {
+		progressMu.Lock()
+		latest = agentprotocol.AssignmentProgress{
+			Version: agentprotocol.Version, AssignmentID: assignment.ID, AgentID: r.agentID,
+			Phase: value.Phase, BytesTransferred: value.BytesTransferred, TotalBytes: value.TotalBytes,
+			FilesTransferred: value.FilesTransferred, FilesTotal: value.FilesTotal,
+			RateBytesPerSecond: value.RateBytesPerSecond, ETASeconds: value.ETASeconds,
+		}
+		progressMu.Unlock()
+	})
+	progressMu.Lock()
+	latest.Phase = "finalizing"
+	progressMu.Unlock()
+	resultErr := r.completeWithRetry(ctx, complete, result)
+	cancel()
+	<-done
+	return resultErr
+}
+
+func (r *Runtime) completeWithRetry(ctx context.Context, complete func(context.Context, agentprotocol.Result) error, result agentprotocol.Result) error {
+	delay := completionRetryInitial
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, progressRequestTimeout)
+		err := complete(requestCtx, result)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if !retryableControlError(err) {
+			return err
+		}
+		slog.Warn("Agent result delivery failed; retrying while assignment remains renewed", "assignment", result.AssignmentID, "error", err)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, completionRetryMaximum)
+	}
+}
+
+func (r *Runtime) sendProgress(ctx context.Context, control interface {
+	Progress(context.Context, agentprotocol.AssignmentProgress) error
+}, progress agentprotocol.AssignmentProgress) {
+	requestCtx, cancel := context.WithTimeout(ctx, progressRequestTimeout)
+	defer cancel()
+	_ = control.Progress(requestCtx, progress)
+}
+
+func (r *Runtime) sendHeartbeat(ctx context.Context, control Control, capabilities []string) {
+	requestCtx, cancel := context.WithTimeout(ctx, progressRequestTimeout)
+	defer cancel()
+	_ = control.Heartbeat(requestCtx, agentprotocol.Heartbeat{Version: agentprotocol.Version, AgentID: r.agentID, Capabilities: capabilities, Runtime: r.runtimeInfo})
 }
 
 func (r *Runtime) executeFilesystem(ctx context.Context, assignment agentprotocol.Assignment, uploader interface {
@@ -245,7 +364,9 @@ func (r *Runtime) Run(ctx context.Context, control Control, capabilities []strin
 		interval = 10 * time.Second
 	}
 	for {
-		_ = r.Step(ctx, control, capabilities)
+		if err := r.Step(ctx, control, capabilities); err != nil && ctx.Err() == nil {
+			slog.Warn("Agent control cycle failed", "error", err)
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

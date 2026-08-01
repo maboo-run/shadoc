@@ -32,6 +32,20 @@ const (
 	systemServiceScope serviceScope = "system"
 )
 
+// handleVersionCommand stays before every command that loads configuration or
+// opens SQLite. It gives release verification a side-effect-free way to read
+// the build version from a controller binary.
+func handleVersionCommand(args []string, stdout io.Writer, version string) (bool, error) {
+	if len(args) == 0 || args[0] != "--version" && args[0] != "version" {
+		return false, nil
+	}
+	if len(args) != 1 {
+		return true, errors.New("version does not accept arguments")
+	}
+	_, err := fmt.Fprintln(stdout, version)
+	return true, err
+}
+
 func handleServiceCommand(args []string, stdout io.Writer, executable string, service backgroundService, loadConfig serviceLaunchConfigLoader) (bool, error) {
 	if len(args) == 0 {
 		return false, nil
@@ -214,6 +228,7 @@ Usage:
                               Remove the service and application binary
   shadoc reset-admin-password [--system]
                               Reset the local administrator password
+  shadoc --version            Print the controller build version
   shadoc help                 Show this help`)
 }
 

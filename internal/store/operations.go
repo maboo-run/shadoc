@@ -28,10 +28,22 @@ type OperationRecord struct {
 
 func (s *Store) CreateOperation(ctx context.Context, operation OperationRecord) error {
 	detail, _ := json.Marshal(nonNilMap(operation.Detail))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO operations(id,kind,actor,repository_id,task_id,snapshot_id,target,status,stage,created_at,attempt_count,error_summary,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if operation.TaskID != "" {
+		if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=?`, operation.TaskID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO operations(id,kind,actor,repository_id,task_id,snapshot_id,target,status,stage,created_at,attempt_count,error_summary,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		operation.ID, operation.Kind, operation.Actor, operation.RepositoryID, operation.TaskID, operation.SnapshotID, operation.Target,
-		operation.Status, operation.Stage, formatTime(operation.CreatedAt), operation.AttemptCount, operation.ErrorSummary, string(detail))
-	return err
+		operation.Status, operation.Stage, formatTime(operation.CreatedAt), operation.AttemptCount, operation.ErrorSummary, string(detail)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) StartOperation(ctx context.Context, id, stage string, started time.Time) error {

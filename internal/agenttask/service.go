@@ -30,6 +30,8 @@ type Service struct {
 	poll  time.Duration
 }
 
+const assignmentClaimLifetime = 5 * time.Minute
+
 func New(storage Storage, now func() time.Time) *Service {
 	if now == nil {
 		now = time.Now
@@ -52,6 +54,9 @@ func (s *Service) Run(ctx context.Context, taskID, planID, trigger string) (stor
 	if task.ID == "" {
 		return store.RunRecord{}, sql.ErrNoRows
 	}
+	if !task.Enabled {
+		return store.RunRecord{}, errors.New("Agent task is disabled")
+	}
 	target := task.EffectiveExecutionTarget()
 	if target.AgentID == "" {
 		return store.RunRecord{}, errors.New("agent task has no target agent")
@@ -62,7 +67,7 @@ func (s *Service) Run(ctx context.Context, taskID, planID, trigger string) (stor
 		return store.RunRecord{}, err
 	}
 	leaseID := fmt.Sprintf("lease_%d", started.UnixNano())
-	lease := store.AgentLease{ID: leaseID, AgentID: target.AgentID, TaskID: taskID, Engine: string(task.EffectiveEngine()), Definition: json.RawMessage(`{}`), ExpiresAt: started.Add(30 * time.Minute)}
+	lease := store.AgentLease{ID: leaseID, AgentID: target.AgentID, TaskID: taskID, Engine: string(task.EffectiveEngine()), Definition: json.RawMessage(`{}`), ExpiresAt: started.Add(assignmentClaimLifetime)}
 	if err := s.store.CreateAgentLease(ctx, lease); err != nil {
 		return record, err
 	}
@@ -80,8 +85,12 @@ func (s *Service) Run(ctx context.Context, taskID, planID, trigger string) (stor
 			}
 			if current.CompletedAt == nil {
 				if !current.ExpiresAt.After(s.now().UTC()) {
-					_ = s.store.ExpireAgentLease(context.Background(), leaseID, "agent assignment expired", s.now().UTC())
-					return s.finish(record, agentprotocol.Result{Status: "failed", Error: "agent assignment expired"}, errors.New("agent assignment expired"), task)
+					reason := "agent did not claim assignment before it expired"
+					if current.AcknowledgedAt != nil {
+						reason = "agent stopped renewing assignment progress"
+					}
+					_ = s.store.ExpireAgentLease(context.Background(), leaseID, reason, s.now().UTC())
+					return s.finish(record, agentprotocol.Result{Status: "failed", Error: reason}, errors.New(reason), task)
 				}
 				continue
 			}

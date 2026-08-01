@@ -354,7 +354,7 @@ func (s *UpgradeService) findManagedAgent(ctx context.Context, agentID string) (
 	if agent.ID == "" || agent.RevokedAt != nil {
 		return agent, domain.RemoteHost{}, sql.ErrNoRows
 	}
-	if agent.RemoteHostID == "" || agent.UninstalledAt != nil {
+	if !agent.ManagedInstallation || agent.RemoteHostID == "" || agent.UninstalledAt != nil {
 		return agent, domain.RemoteHost{}, errors.New("Agent is not managed through a remote host")
 	}
 	hosts, err := s.store.ListRemoteHosts(ctx)

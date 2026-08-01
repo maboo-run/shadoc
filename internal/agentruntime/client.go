@@ -20,6 +20,21 @@ type HTTPControl struct {
 	credentialDir string
 }
 
+type controlHTTPError struct{ statusCode int }
+
+func (e *controlHTTPError) Error() string {
+	return fmt.Sprintf("agent service returned HTTP %d", e.statusCode)
+}
+
+func retryableControlError(err error) bool {
+	var statusError *controlHTTPError
+	if !errors.As(err, &statusError) {
+		return true
+	}
+	return statusError.statusCode == http.StatusRequestTimeout || statusError.statusCode == http.StatusTooEarly ||
+		statusError.statusCode == http.StatusTooManyRequests || statusError.statusCode >= http.StatusInternalServerError
+}
+
 func NewHTTPControl(baseURL string, client *http.Client) (*HTTPControl, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -55,6 +70,13 @@ func (c *HTTPControl) Lease(ctx context.Context) (agentprotocol.Assignment, bool
 
 func (c *HTTPControl) Complete(ctx context.Context, result agentprotocol.Result) error {
 	return c.post(ctx, "/result", result, nil, http.StatusNoContent)
+}
+
+func (c *HTTPControl) Progress(ctx context.Context, progress agentprotocol.AssignmentProgress) error {
+	if err := progress.ValidateFor(progress.AgentID); err != nil {
+		return err
+	}
+	return c.post(ctx, "/progress", progress, nil, http.StatusNoContent)
 }
 
 func (c *HTTPControl) ClaimFilesystem(ctx context.Context) (agentprotocol.Assignment, bool, error) {
@@ -108,7 +130,7 @@ func (c *HTTPControl) post(ctx context.Context, path string, input, output any, 
 		return err
 	}
 	if status != expected {
-		return fmt.Errorf("agent service returned HTTP %d", status)
+		return &controlHTTPError{statusCode: status}
 	}
 	return nil
 }

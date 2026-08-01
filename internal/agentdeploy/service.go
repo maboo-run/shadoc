@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -132,7 +131,7 @@ type DeploymentStorage interface {
 	ListRemoteHosts(context.Context) ([]domain.RemoteHost, error)
 	RemoteHostPrivateKeySecretID(context.Context, string) (string, error)
 	ListAgents(context.Context) ([]store.AgentRecord, error)
-	BindAgentRemoteHost(context.Context, string, string) error
+	BindManagedAgentRemoteHost(context.Context, string, string) error
 }
 
 type DeploymentSecrets interface {
@@ -262,15 +261,10 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 	if err != nil {
 		return result, err
 	}
-	token, err := s.control.CreateEnrollmentToken(ctx, 15*time.Minute)
-	if err != nil {
-		return result, err
-	}
-	existingCapabilities := []string(nil)
-	// A managed deployment must consume the newly issued enrollment token
-	// unless it is an in-place migration of the same still-active identity.
-	// This also prevents credentials left by a deleted Agent record (or by a
-	// different Agent on the host) from silently bypassing enrollment.
+	// First-time deployment and re-enrollment are allowed here. Replacing an
+	// active installation must use UpgradeService, which stages a separate
+	// binary and can roll back atomically; the deployment upload path writes the
+	// active executable and its cleanup removes installation files.
 	replaceIdentity := true
 	existingAgents, err := s.store.ListAgents(ctx)
 	if err != nil {
@@ -282,9 +276,13 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 		}
 		replaceIdentity = agent.RevokedAt != nil || agent.UninstalledAt != nil || agent.Status == "revoked"
 		if !replaceIdentity {
-			existingCapabilities = append(existingCapabilities, agent.Capabilities...)
+			return result, errors.New("活动 Agent 已存在；请使用托管升级或重新安装")
 		}
 		break
+	}
+	token, err := s.control.CreateEnrollmentToken(ctx, 15*time.Minute)
+	if err != nil {
+		return result, err
 	}
 	succeeded := false
 	defer func() {
@@ -351,11 +349,8 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 			return result, listErr
 		}
 		for _, agent := range agents {
-			missingCapability := slices.ContainsFunc(existingCapabilities, func(capability string) bool {
-				return !slices.Contains(agent.Capabilities, capability)
-			})
-			if agent.ID == request.AgentID && agent.RevokedAt == nil && agent.LastHeartbeatAt != nil && !agent.LastHeartbeatAt.Before(started) && !missingCapability {
-				if err := s.store.BindAgentRemoteHost(context.WithoutCancel(ctx), request.AgentID, request.HostID); err != nil {
+			if agent.ID == request.AgentID && agent.RevokedAt == nil && agent.LastHeartbeatAt != nil && !agent.LastHeartbeatAt.Before(started) {
+				if err := s.store.BindManagedAgentRemoteHost(context.WithoutCancel(ctx), request.AgentID, request.HostID); err != nil {
 					return result, fmt.Errorf("bind Agent to remote host: %w", err)
 				}
 				if report != nil {
@@ -372,6 +367,29 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 		case <-waitCtx.Done():
 			return result, fmt.Errorf("wait for Agent heartbeat: %w", waitCtx.Err())
 		case <-ticker.C:
+		}
+	}
+}
+
+func waitForActiveAgentWork(ctx context.Context, storage interface {
+	AgentActiveWorkCount(context.Context, string) (int, error)
+}, agentID string, timeout, pollInterval time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		count, err := storage.AgentActiveWorkCount(waitCtx, agentID)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("wait for Agent work to drain: %w", waitCtx.Err())
+		case <-timer.C:
 		}
 	}
 }

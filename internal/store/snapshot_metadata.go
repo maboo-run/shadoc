@@ -16,8 +16,18 @@ type SnapshotMetadataRecord struct {
 }
 
 func (s *Store) SaveSnapshotMetadata(ctx context.Context, repositoryID, snapshotID string, metadata database.SnapshotMetadata, createdAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshot_metadata(repository_id,snapshot_id,metadata_version,engine,database_name,format,filename,server_version,client_version,encoding,collation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,snapshot_id) DO UPDATE SET metadata_version=excluded.metadata_version,engine=excluded.engine,database_name=excluded.database_name,format=excluded.format,filename=excluded.filename,server_version=excluded.server_version,client_version=excluded.client_version,encoding=excluded.encoding,collation=excluded.collation,created_at=excluded.created_at`, repositoryID, snapshotID, 1, string(metadata.Engine), metadata.Database, metadata.Format, metadata.Filename, metadata.ServerVersion, metadata.ClientVersion, metadata.Encoding, metadata.Collation, formatTime(createdAt))
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repositories WHERE id=?`, repositoryID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO snapshot_metadata(repository_id,snapshot_id,metadata_version,engine,database_name,format,filename,server_version,client_version,encoding,collation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,snapshot_id) DO UPDATE SET metadata_version=excluded.metadata_version,engine=excluded.engine,database_name=excluded.database_name,format=excluded.format,filename=excluded.filename,server_version=excluded.server_version,client_version=excluded.client_version,encoding=excluded.encoding,collation=excluded.collation,created_at=excluded.created_at`, repositoryID, snapshotID, 1, string(metadata.Engine), metadata.Database, metadata.Format, metadata.Filename, metadata.ServerVersion, metadata.ClientVersion, metadata.Encoding, metadata.Collation, formatTime(createdAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SnapshotMetadata(ctx context.Context, repositoryID, snapshotID string) (SnapshotMetadataRecord, error) {

@@ -140,7 +140,7 @@ func TestAgentListOffersSameVersionRepairForManagedLinuxAgentMissingResticInstal
 		t.Fatal(err)
 	}
 	if err := storage.SaveAgent(t.Context(), store.AgentRecord{
-		ID: "agent-a", RemoteHostID: "host-a", CertificateSerial: "serial-a", Status: "online",
+		ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, CertificateSerial: "serial-a", Status: "online",
 		Capabilities: []string{"filesystem-browse"}, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1,
 		OS: "linux", Arch: "amd64", LastHeartbeatAt: &now, CreatedAt: now.Add(-time.Hour),
 	}); err != nil {

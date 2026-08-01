@@ -122,8 +122,8 @@ export function AgentServiceSettings({
       {!!affectedAgents.length && <section className="agent-service-impact full-field" role="note">
         <div><h3>{locale === "en-US" ? `This change affects ${affectedAgents.length} Agents` : `此变更会影响 ${affectedAgents.length} 个 Agent`}</h3><p>{t("保存只会切换 Agent HTTPS 服务，不会静默改写远程节点；请按下列路径逐个迁移。")}</p></div>
         <ul>{affectedAgents.slice(0, 20).map((agent) => <li key={String(agent.id)}>{locale === "en-US"
-          ? `${String(agent.id)} · ${agent.remoteHostId ? "Managed migration: stop and uninstall, then redeploy with the same Agent ID." : "Manual migration: update --service while preserving the existing identity files."}`
-          : `${String(agent.id)} · ${agent.remoteHostId ? "托管迁移：停止并卸载后，使用同一 Agent ID 重新部署。" : "手工迁移：保留现有身份文件，只更新 --service 并重启。"}`}</li>)}</ul>
+          ? `${String(agent.id)} · ${agent.managedInstallation === true ? "Managed migration: stop and uninstall, then redeploy with the same Agent ID." : "Manual migration: update --service while preserving the existing identity files."}`
+          : `${String(agent.id)} · ${agent.managedInstallation === true ? "托管迁移：停止并卸载后，使用同一 Agent ID 重新部署。" : "手工迁移：保留现有身份文件，只更新 --service 并重启。"}`}</li>)}</ul>
         {affectedAgents.length > 20 && <p>{locale === "en-US" ? `${affectedAgents.length - 20} more affected Agents are shown on the Agents page.` : `另有 ${affectedAgents.length - 20} 个受影响 Agent，请在 Agent 节点页逐项处理。`}</p>}
         <label><input type="checkbox" checked={migrationAcknowledged} onChange={(event) => setMigrationAcknowledged(event.target.checked)} />{t("我已记录受影响 Agent，并会逐个完成地址迁移")}</label>
       </section>}

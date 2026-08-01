@@ -14,6 +14,7 @@ const (
 	Version                        = 1
 	ManagedResticInstallCapability = "managed-restic-install-v1"
 	FilesystemScopeEntryCapability = "filesystem-scope-entries-v1"
+	AssignmentProgressCapability   = "assignment-progress-v1"
 	MaxFilesystemScopeChunkEntries = 128
 )
 
@@ -157,6 +158,35 @@ type Result struct {
 	Summary      map[string]any `json:"summary,omitempty"`
 	RawLog       string         `json:"rawLog,omitempty"`
 	Error        string         `json:"error,omitempty"`
+}
+
+type AssignmentProgress struct {
+	Version            int    `json:"version"`
+	AssignmentID       string `json:"assignmentId"`
+	AgentID            string `json:"agentId"`
+	Sequence           int64  `json:"sequence"`
+	Phase              string `json:"phase"`
+	BytesTransferred   int64  `json:"bytesTransferred,omitempty"`
+	TotalBytes         int64  `json:"totalBytes,omitempty"`
+	FilesTransferred   int64  `json:"filesTransferred,omitempty"`
+	FilesTotal         int64  `json:"filesTotal,omitempty"`
+	RateBytesPerSecond int64  `json:"rateBytesPerSecond,omitempty"`
+	ETASeconds         int64  `json:"etaSeconds,omitempty"`
+}
+
+func (p AssignmentProgress) ValidateFor(agentID string) error {
+	if p.Version != Version || p.AgentID != agentID || !validAgentID(p.AgentID) || strings.TrimSpace(p.AssignmentID) == "" || len(p.AssignmentID) > 256 {
+		return errors.New("invalid assignment progress identity")
+	}
+	if p.Sequence < 0 || p.BytesTransferred < 0 || p.TotalBytes < 0 || p.FilesTransferred < 0 || p.FilesTotal < 0 || p.RateBytesPerSecond < 0 || p.ETASeconds < 0 {
+		return errors.New("assignment progress metrics are outside bounds")
+	}
+	switch p.Phase {
+	case "starting", "scanning", "transferring", "finalizing":
+		return nil
+	default:
+		return errors.New("assignment progress phase is invalid")
+	}
 }
 
 // FilesystemScopeEntryChunk carries a bounded, relative-path-only portion of a

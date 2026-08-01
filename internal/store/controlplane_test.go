@@ -78,7 +78,7 @@ func TestControlPlaneSnapshotIncludesDurableConfigurationAndSecretReferences(t *
 	if err := s.SaveAgent(ctx, AgentRecord{ID: "agent-a", RemoteHostID: host.ID, CertificateSerial: "serial-a", CertificateNotAfter: &certificateNotAfter, Capabilities: []string{"restic", "filesystem-browse"}, Status: "online", LastHeartbeatAt: &now, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BindAgentRemoteHost(ctx, "agent-a", host.ID); err != nil {
+	if err := s.BindManagedAgentRemoteHost(ctx, "agent-a", host.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveAgentServiceSettings(ctx, AgentServiceSettings{Enabled: true, ListenHost: "0.0.0.0", Port: 9443, AdvertisedHost: "control.example", TLSNames: []string{"control.example"}}, now); err != nil {
@@ -118,7 +118,7 @@ func TestControlPlaneSnapshotIncludesDurableConfigurationAndSecretReferences(t *
 	if len(snapshot.ScheduleWatermarks) != 2 || snapshot.ScheduleWatermarks[0].Status != "success" || snapshot.ScheduleWatermarks[1].Status != "success" {
 		t.Fatalf("watermarks = %+v", snapshot.ScheduleWatermarks)
 	}
-	if len(snapshot.Agents) != 1 || snapshot.Agents[0].LastHeartbeatAt != nil || snapshot.Agents[0].CertificateNotAfter == nil || !snapshot.Agents[0].CertificateNotAfter.Equal(certificateNotAfter) {
+	if len(snapshot.Agents) != 1 || !snapshot.Agents[0].ManagedInstallation || snapshot.Agents[0].LastHeartbeatAt != nil || snapshot.Agents[0].CertificateNotAfter == nil || !snapshot.Agents[0].CertificateNotAfter.Equal(certificateNotAfter) {
 		t.Fatalf("Agent heartbeat leaked into snapshot: %+v", snapshot.Agents)
 	}
 	if snapshot.AgentServiceSettings == nil || !snapshot.AgentServiceSettings.Enabled {

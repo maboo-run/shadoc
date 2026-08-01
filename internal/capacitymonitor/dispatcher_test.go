@@ -90,6 +90,29 @@ func TestDispatcherPersistsBoundedProbeFailure(t *testing.T) {
 	}
 }
 
+func TestDispatcherDefersUnsupportedProbeWithoutRecordingFailure(t *testing.T) {
+	storage := openCapacityMonitorStore(t)
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	createCapacityMonitorRepository(t, storage, "repo", now)
+	probe := &blockingCapacityProbe{
+		storage: storage, started: make(chan string, 1), release: make(chan struct{}), checked: now,
+		failure: repositorycapacity.ErrUnsupported,
+	}
+	dispatcher := New(storage, probe, 1)
+	dispatcher.SetClock(func() time.Time { return now.Add(2 * time.Minute) })
+	if count, err := dispatcher.Tick(context.Background(), now); err != nil || count != 1 {
+		t.Fatalf("tick count=%d err=%v", count, err)
+	}
+	<-probe.started
+	close(probe.release)
+	dispatcher.Wait()
+
+	policy, err := storage.RepositoryCapacityPolicy(context.Background(), "repo")
+	if err != nil || policy.LastError != "" || policy.LastAttemptAt == nil || !policy.LastAttemptAt.Equal(now.Add(2*time.Minute)) || policy.NextProbeAt == nil || !policy.NextProbeAt.Equal(now.Add(24*time.Hour+2*time.Minute)) {
+		t.Fatalf("deferred policy=%+v err=%v", policy, err)
+	}
+}
+
 func openCapacityMonitorStore(t *testing.T) *store.Store {
 	t.Helper()
 	storage, err := store.Open(t.TempDir() + "/state.db")

@@ -41,6 +41,19 @@ func TestEngineBrowsesAndCreatesOnlyInsideAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestEngineReportsCapacityForAllowedDirectory(t *testing.T) {
+	root := t.TempDir()
+	engine := New("posix", []string{root})
+	raw, _ := json.Marshal(Definition{Operation: Capacity, Path: root})
+	outcome, err := engine.Run(context.Background(), execution.Assignment{Definition: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Status != "succeeded" || outcome.Summary["totalBytes"].(uint64) == 0 {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
 func TestWindowsPathValidationIsPlatformIndependent(t *testing.T) {
 	engine := New("windows", []string{`D:\Backup`})
 	valid, _ := json.Marshal(Definition{Operation: Browse, Path: `D:\Backup\Photos`})

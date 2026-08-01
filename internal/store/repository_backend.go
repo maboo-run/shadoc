@@ -72,7 +72,7 @@ func (s *Store) ensureRepositoryBackendColumns(ctx context.Context) error {
 		}
 	}
 	if !present["backend_secret_id"] {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE repositories ADD COLUMN backend_secret_id TEXT REFERENCES secrets(id)`); err != nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE repositories ADD COLUMN backend_secret_id TEXT`); err != nil {
 			return fmt.Errorf("add repository backend secret: %w", err)
 		}
 	}

@@ -109,7 +109,15 @@ func TestArtifactResolverSelectsWindowsExecutable(t *testing.T) {
 func TestServiceDeploysAndWaitsForHeartbeat(t *testing.T) {
 	remote := &deploymentRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
 	now := time.Now().UTC()
-	storage := &deploymentStore{host: domain.RemoteHost{ID: "host-1", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "source.example ssh-ed25519 AAAA"}, agents: []store.AgentRecord{{ID: "source-1", Status: "online", Capabilities: []string{"restic"}, LastHeartbeatAt: &now}}}
+	storage := &deploymentStore{host: domain.RemoteHost{ID: "host-1", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "source.example ssh-ed25519 AAAA"}}
+	listCalls := 0
+	storage.listAgentsHook = func([]store.AgentRecord) []store.AgentRecord {
+		listCalls++
+		if listCalls > 1 {
+			return []store.AgentRecord{{ID: "source-1", Status: "online", Capabilities: []string{"restic"}, LastHeartbeatAt: &now}}
+		}
+		return nil
+	}
 	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
 	service.pollInterval = time.Millisecond
 	result, err := service.Deploy(context.Background(), DeployRequest{HostID: "host-1", AgentID: "source-1", ServiceURL: "https://service.example:9443"}, nil)
@@ -128,8 +136,26 @@ func TestServiceDeploysAndWaitsForHeartbeat(t *testing.T) {
 	if storage.boundAgentID != "source-1" || storage.boundHostID != "host-1" {
 		t.Fatalf("Agent host binding=%q/%q", storage.boundAgentID, storage.boundHostID)
 	}
-	if remote.reenrollmentPrepared {
-		t.Fatal("active Agent credentials were replaced during deployment")
+	if !remote.reenrollmentPrepared {
+		t.Fatal("new Agent was not prepared for enrollment")
+	}
+}
+
+func TestServiceRejectsDeployingOverAnActiveAgent(t *testing.T) {
+	now := time.Now().UTC()
+	storage := &deploymentStore{
+		host:   domain.RemoteHost{ID: "host-1", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
+		agents: []store.AgentRecord{{ID: "source-1", Status: "online", LastHeartbeatAt: &now}},
+	}
+	remote := &deploymentRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
+	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
+
+	_, err := service.Deploy(t.Context(), DeployRequest{HostID: "host-1", AgentID: "source-1", ServiceURL: "https://service.example:9443"}, nil)
+	if err == nil || err.Error() != "活动 Agent 已存在；请使用托管升级或重新安装" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if remote.activated || remote.cleaned || len(remote.files) != 0 {
+		t.Fatalf("active Agent installation was modified: %+v", remote)
 	}
 }
 
@@ -211,8 +237,15 @@ func TestServiceRollsBackWhenMigrationFinalizationFails(t *testing.T) {
 		finalizeErr: errors.New("failed"),
 	}
 	storage := &deploymentStore{
-		host:   domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agents: []store.AgentRecord{{ID: "source-1", Status: "online", LastHeartbeatAt: &now}},
+		host: domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"},
+	}
+	listCalls := 0
+	storage.listAgentsHook = func([]store.AgentRecord) []store.AgentRecord {
+		listCalls++
+		if listCalls > 1 {
+			return []store.AgentRecord{{ID: "source-1", Status: "online", LastHeartbeatAt: &now}}
+		}
+		return nil
 	}
 	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
 	service.pollInterval = time.Millisecond
@@ -224,32 +257,19 @@ func TestServiceRollsBackWhenMigrationFinalizationFails(t *testing.T) {
 	}
 }
 
-func TestServiceRollsBackWhenMigratedAgentLosesAnExistingCapability(t *testing.T) {
-	now := time.Now().UTC()
+func TestServiceRollsBackWhenNewAgentNeverReportsHeartbeat(t *testing.T) {
 	remote := &deploymentRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
 	storage := &deploymentStore{
 		host: domain.RemoteHost{ID: "host-1", Host: "host", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agents: []store.AgentRecord{{
-			ID: "source-1", Status: "online", Capabilities: []string{"restic"}, LastHeartbeatAt: &now,
-		}},
 	}
-	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, func() time.Time { return now })
+	service := NewService(storage, deploymentSecrets{}, &deploymentControl{}, staticArtifacts{}, deploymentDialer{remote: remote}, time.Now)
 	service.pollInterval = time.Millisecond
 	service.heartbeatTimeout = 5 * time.Millisecond
-	listCalls := 0
-	storage.listAgentsHook = func(records []store.AgentRecord) []store.AgentRecord {
-		listCalls++
-		result := append([]store.AgentRecord(nil), records...)
-		if listCalls > 1 {
-			result[0].Capabilities = nil
-		}
-		return result
-	}
 	if _, err := service.Deploy(context.Background(), DeployRequest{HostID: "host-1", AgentID: "source-1", ServiceURL: "https://service.example:9443"}, nil); err == nil {
-		t.Fatal("capability loss was accepted")
+		t.Fatal("missing heartbeat was accepted")
 	}
 	if !remote.cleaned {
-		t.Fatal("capability-loss migration was not rolled back")
+		t.Fatal("deployment without a heartbeat was not rolled back")
 	}
 }
 
@@ -275,6 +295,9 @@ type deploymentStore struct {
 	agents                    []store.AgentRecord
 	boundAgentID, boundHostID string
 	listAgentsHook            func([]store.AgentRecord) []store.AgentRecord
+	drainStarted, drainEnded  bool
+	activeWorkCounts          []int
+	activeWorkChecks          int
 }
 
 func (s *deploymentStore) ListRemoteHosts(context.Context) ([]domain.RemoteHost, error) {
@@ -289,9 +312,25 @@ func (s *deploymentStore) ListAgents(context.Context) ([]store.AgentRecord, erro
 	}
 	return s.agents, nil
 }
-func (s *deploymentStore) BindAgentRemoteHost(_ context.Context, agentID, hostID string) error {
+func (s *deploymentStore) BindManagedAgentRemoteHost(_ context.Context, agentID, hostID string) error {
 	s.boundAgentID, s.boundHostID = agentID, hostID
 	return nil
+}
+func (s *deploymentStore) BeginAgentDrain(context.Context, string, time.Time) error {
+	s.drainStarted = true
+	return nil
+}
+func (s *deploymentStore) EndAgentDrain(context.Context, string) error {
+	s.drainEnded = true
+	return nil
+}
+func (s *deploymentStore) AgentActiveWorkCount(context.Context, string) (int, error) {
+	index := min(s.activeWorkChecks, len(s.activeWorkCounts)-1)
+	s.activeWorkChecks++
+	if index < 0 {
+		return 0, nil
+	}
+	return s.activeWorkCounts[index], nil
 }
 
 type deploymentSecrets struct{}
@@ -327,6 +366,7 @@ type deploymentRemote struct {
 	reenrollmentPrepared, activatedAfterReenrollment bool
 	activateErr                                      error
 	finalizeErr                                      error
+	onActivate                                       func()
 }
 
 func (r *deploymentRemote) Probe(context.Context) (Platform, error) { return r.platform, nil }
@@ -342,6 +382,9 @@ func (r *deploymentRemote) PrepareReenrollment(context.Context, Platform) error 
 	return nil
 }
 func (r *deploymentRemote) Activate(context.Context, Platform) error {
+	if r.onActivate != nil {
+		r.onActivate()
+	}
 	r.activated = true
 	r.activatedAfterReenrollment = r.reenrollmentPrepared
 	return r.activateErr

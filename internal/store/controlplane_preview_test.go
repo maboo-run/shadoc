@@ -42,7 +42,7 @@ func TestControlPlaneImportConsumesMatchingPreviewAndActivatesConservatively(t *
 		Tasks:               []domain.Task{task}, Plans: []domain.Plan{plan}, MaintenancePolicies: []domain.MaintenancePolicy{maintenance}, RestoreVerificationPolicies: []domain.RestoreVerificationPolicy{restoreVerification},
 		LifecyclePolicy:      LifecyclePolicy{RunDays: 90, RawLogDays: 7, AuditDays: 365, RawLogMaxBytes: 1 << 30},
 		ScheduleWatermarks:   []ControlPlaneScheduleWatermark{{OwnerKind: "plan", OwnerID: plan.ID, ScheduledAt: now.Add(-time.Hour), ObservedAt: now.Add(-time.Hour), Mode: "on_time", Status: "success"}, {OwnerKind: "restore_verification", OwnerID: task.ID, ScheduledAt: now.Add(-time.Hour), ObservedAt: now.Add(-time.Hour), Mode: "on_time", Status: "success"}},
-		Agents:               []AgentRecord{{ID: "agent-a", RemoteHostID: host.ID, CertificateSerial: "serial-a", CertificateNotAfter: timePointer(now.Add(365 * 24 * time.Hour)), Capabilities: []string{"restic"}, Status: "online", LastHeartbeatAt: &now, CreatedAt: now}},
+		Agents:               []AgentRecord{{ID: "agent-a", RemoteHostID: host.ID, ManagedInstallation: true, CertificateSerial: "serial-a", CertificateNotAfter: timePointer(now.Add(365 * 24 * time.Hour)), Capabilities: []string{"restic"}, Status: "online", LastHeartbeatAt: &now, CreatedAt: now}},
 		AgentServiceSettings: &AgentServiceSettings{Enabled: true, ListenHost: "0.0.0.0", Port: 9443, AdvertisedHost: "control.example", TLSNames: []string{"control.example"}},
 		Ntfy:                 &ControlPlaneNtfy{BaseURL: "https://ntfy.example", Topic: "backup", TokenSecretID: "new-ntfy", Enabled: enabled},
 		Audits:               []AuditRecord{{OccurredAt: now.Add(-time.Hour), Actor: "source-admin", Action: "task.create", TargetType: "task", TargetID: task.ID, Detail: map[string]any{"source": "recovery"}}},
@@ -87,7 +87,7 @@ func TestControlPlaneImportConsumesMatchingPreviewAndActivatesConservatively(t *
 		t.Fatalf("imported database connections = %+v", connections)
 	}
 	agents, _ := s.ListAgents(ctx)
-	if len(agents) != 1 || agents[0].Status != "offline" || agents[0].LastHeartbeatAt != nil || len(agents[0].Capabilities) != 0 {
+	if len(agents) != 1 || !agents[0].ManagedInstallation || agents[0].Status != "offline" || agents[0].LastHeartbeatAt != nil || len(agents[0].Capabilities) != 0 {
 		t.Fatalf("imported Agents = %+v", agents)
 	}
 	if usable, err := s.AgentCertificateUsable(ctx, "agent-a", "serial-a", now); err != nil || !usable {

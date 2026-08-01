@@ -350,7 +350,7 @@ export function TaskScopePage({ taskId, taskName, task, api, locale, onBack, onS
                 <small>{entry.type === "directory"
                   ? directoryCoverageText(entry, locale)
                   : `${entryDisposition(entry.disposition, locale)} · ${entryTypeLabel(entry.type, locale)}`}</small>
-                {(pendingExclude || pendingRestore) && <span className="scope-entry-pending">{t(pendingExclude ? "待排除" : "待恢复保护")}</span>}
+                {(pendingExclude || pendingRestore) && <span className="scope-entry-pending">{t(pendingExclude ? "排除未保存" : "恢复未保存")}</span>}
                 {open && <span className="scope-entry-detail">
                   <span>{t("估算大小")}：{formatScopeBytes(entry.size, locale)}</span>
                   <span>{t("判定原因")}：{entryReason(entry.reasonCode, locale)}</span>

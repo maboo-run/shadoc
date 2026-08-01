@@ -319,12 +319,22 @@ func (s *Service) Cancel(ctx context.Context, id string) (Draft, error) {
 		if _, exists := repositoryByID(repositories, item.RepositoryID); exists {
 			item.Status = ItemRetained
 		} else {
-			if item.PasswordSecretID != "" {
-				if err := s.secrets.Delete(cleanupCtx, item.PasswordSecretID); err != nil {
+			previous := item
+			passwordSecretID := item.PasswordSecretID
+			item.PasswordSecretID, item.Status = "", ItemCancelled
+			item.Error, item.UpdatedAt = "", s.now().UTC()
+			if err := s.storage.UpdateProtectionDraftItem(cleanupCtx, item); err != nil {
+				return Draft{}, err
+			}
+			if passwordSecretID != "" {
+				if err := s.secrets.Delete(cleanupCtx, passwordSecretID); err != nil {
+					if restoreErr := s.storage.UpdateProtectionDraftItem(cleanupCtx, previous); restoreErr != nil {
+						return Draft{}, errors.Join(err, fmt.Errorf("restore protection draft item after secret cleanup failure: %w", restoreErr))
+					}
 					return Draft{}, err
 				}
 			}
-			item.PasswordSecretID, item.Status = "", ItemCancelled
+			continue
 		}
 		item.Error, item.UpdatedAt = "", s.now().UTC()
 		if err := s.storage.UpdateProtectionDraftItem(cleanupCtx, item); err != nil {

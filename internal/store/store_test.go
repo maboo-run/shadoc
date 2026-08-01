@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -56,6 +55,87 @@ INSERT INTO tasks VALUES ('task','photos','directory','repo','{"path":"/source",
 	}
 	if engine != "restic" || target != `{"kind":"local"}` || confirmation != "{}" || health != "{}" {
 		t.Fatalf("migrated task engine=%q target=%q confirmation=%q health=%q", engine, target, confirmation, health)
+	}
+	assertNoHardForeignKeys(t, s)
+}
+
+func TestOpenMigratesRsyncSFTPRepositoriesToSSH(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rsync-sftp.db")
+	createdAt := "2026-08-01T00:00:00Z"
+	storage, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.db.Exec(`
+		INSERT INTO repositories(id,name,engine,kind,remote_host_id,path,status,created_at,updated_at)
+		VALUES('rsync-repository','rsync repository','rsync','sftp','host-a','/srv/sync','ready',?,?)
+	`, createdAt, createdAt); err != nil {
+		_ = storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err = Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer storage.Close()
+	repositories, err := storage.ListRepositories(context.Background())
+	if err != nil || len(repositories) != 1 {
+		t.Fatalf("repositories=%+v err=%v", repositories, err)
+	}
+	if repositories[0].EffectiveEngine() != domain.RsyncEngine || repositories[0].EffectiveKind() != domain.SSHRepository {
+		t.Fatalf("migrated repository=%+v", repositories[0])
+	}
+}
+
+func TestOpenRebuildsLegacyTableLevelForeignKeysWithoutLosingDataOrIndexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "table-level-foreign-key.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE legacy_parents (id TEXT PRIMARY KEY);
+		CREATE TABLE legacy_children (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			parent_id TEXT NOT NULL,
+			CONSTRAINT legacy_parent FOREIGN KEY(parent_id) REFERENCES legacy_parents(id) ON DELETE CASCADE
+		);
+		CREATE INDEX legacy_children_parent ON legacy_children(parent_id);
+		INSERT INTO legacy_parents(id) VALUES('parent');
+		INSERT INTO legacy_children(parent_id) VALUES('parent');
+		INSERT INTO legacy_children(parent_id) VALUES('parent');
+		DELETE FROM legacy_children WHERE id=2;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer s.Close()
+	assertNoHardForeignKeys(t, s)
+	var parentID string
+	if err := s.db.QueryRow(`SELECT parent_id FROM legacy_children WHERE id=1`).Scan(&parentID); err != nil || parentID != "parent" {
+		t.Fatalf("legacy child parent=%q err=%v", parentID, err)
+	}
+	result, err := s.db.Exec(`INSERT INTO legacy_children(parent_id) VALUES('parent')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := result.LastInsertId(); err != nil || id != 3 {
+		t.Fatalf("next legacy child id=%d err=%v", id, err)
+	}
+	var indexCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='legacy_children_parent'`).Scan(&indexCount); err != nil || indexCount != 1 {
+		t.Fatalf("legacy index count=%d err=%v", indexCount, err)
 	}
 }
 
@@ -124,6 +204,47 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestStoreSchemaUsesLogicalReferencesOnly(t *testing.T) {
+	s := openTestStore(t)
+	assertNoHardForeignKeys(t, s)
+}
+
+func assertNoHardForeignKeys(t *testing.T, s *Store) {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := make([]string, 0)
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	withForeignKeys := make([]string, 0)
+	for _, table := range tables {
+		foreignKeys, err := s.db.Query(`PRAGMA foreign_key_list("` + table + `")`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if foreignKeys.Next() {
+			withForeignKeys = append(withForeignKeys, table)
+		}
+		if err := foreignKeys.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(withForeignKeys) != 0 {
+		t.Fatalf("tables still contain hard foreign keys: %v", withForeignKeys)
+	}
+}
+
 func TestRepositoryCapacitySnapshotIsReturnedWithRepository(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -148,7 +269,7 @@ func TestRepositoryCapacitySnapshotIsReturnedWithRepository(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskCannotDisableTaskInEnabledPlan(t *testing.T) {
+func TestTaskCanBeDisabledBeforeItsScheduleIsUpdated(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -173,12 +294,12 @@ func TestUpdateTaskCannotDisableTaskInEnabledPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	task.Enabled = false
-	if err := s.UpdateTask(ctx, task); !errors.Is(err, ErrConflict) {
-		t.Fatalf("disable referenced task error = %v, want conflict", err)
+	if err := s.UpdateTask(ctx, task); err != nil {
+		t.Fatalf("disable scheduled task: %v", err)
 	}
 	items, err := s.ListTasks(ctx)
-	if err != nil || len(items) != 1 || !items[0].Enabled {
-		t.Fatalf("task changed after rejected update: items=%+v err=%v", items, err)
+	if err != nil || len(items) != 1 || items[0].Enabled {
+		t.Fatalf("disabled task not persisted: items=%+v err=%v", items, err)
 	}
 }
 

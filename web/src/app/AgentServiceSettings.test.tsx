@@ -13,7 +13,7 @@ describe("Agent Service endpoint migration preview", () => {
       agentServiceStatus: async () => ({ enabled: true, running: true, port: 9443, advertisedHost: "old.internal", listenAddress: "0.0.0.0:9443", serviceUrl: "https://old.internal:9443" }),
       saveAgentServiceSettings,
       listResource: async () => [
-        { id: "managed-a", remoteHostId: "host-a", status: "online", serviceUrl: "https://old.internal:9443" },
+        { id: "managed-a", remoteHostId: "host-a", managedInstallation: true, status: "online", serviceUrl: "https://old.internal:9443" },
         { id: "manual-b", status: "online", serviceUrl: "https://old.internal:9443" },
       ],
     };

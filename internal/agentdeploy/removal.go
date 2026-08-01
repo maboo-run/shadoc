@@ -17,6 +17,9 @@ type RemovalStorage interface {
 	ListAgents(context.Context) ([]store.AgentRecord, error)
 	MarkAgentStopped(context.Context, string, time.Time) error
 	CompleteAgentUninstall(context.Context, string, time.Time) error
+	BeginAgentDrain(context.Context, string, time.Time) error
+	EndAgentDrain(context.Context, string) error
+	AgentActiveWorkCount(context.Context, string) (int, error)
 }
 
 type RemovalRemote interface {
@@ -41,17 +44,19 @@ type RemovalService struct {
 	secrets DeploymentSecrets
 	dialer  RemovalDialer
 	now     func() time.Time
+	poll    time.Duration
+	drain   time.Duration
 }
 
 func NewRemovalService(storage RemovalStorage, secrets DeploymentSecrets, dialer RemovalDialer, now func() time.Time) *RemovalService {
 	if now == nil {
 		now = time.Now
 	}
-	return &RemovalService{store: storage, secrets: secrets, dialer: dialer, now: now}
+	return &RemovalService{store: storage, secrets: secrets, dialer: dialer, now: now, poll: time.Second, drain: 2 * time.Minute}
 }
 
-func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report StageReporter) (RemovalResult, error) {
-	result := RemovalResult{AgentID: agentID}
+func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report StageReporter) (result RemovalResult, resultErr error) {
+	result = RemovalResult{AgentID: agentID}
 	if s == nil || s.store == nil || s.secrets == nil || s.dialer == nil {
 		return result, errors.New("Agent remover is not configured")
 	}
@@ -72,7 +77,7 @@ func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report S
 	if agent.ID == "" {
 		return result, sql.ErrNoRows
 	}
-	if agent.RemoteHostID == "" {
+	if !agent.ManagedInstallation || agent.RemoteHostID == "" {
 		return result, errors.New("Agent is not managed through a remote host")
 	}
 	result.HostID = agent.RemoteHostID
@@ -89,6 +94,24 @@ func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report S
 	}
 	if host.ID == "" {
 		return result, errManagedRemoteHostMissing
+	}
+	if agent.RevokedAt == nil && agent.UninstalledAt == nil {
+		if report != nil {
+			report("draining_agent")
+		}
+		if err := s.store.BeginAgentDrain(ctx, agentID, s.now().UTC()); err != nil {
+			return result, err
+		}
+		defer func() {
+			endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if err := s.store.EndAgentDrain(endCtx, agentID); err != nil && resultErr == nil {
+				resultErr = fmt.Errorf("resume Agent assignments: %w", err)
+			}
+		}()
+		if err := waitForActiveAgentWork(ctx, s.store, agentID, s.drain, s.poll); err != nil {
+			return result, err
+		}
 	}
 	secretID, err := s.store.RemoteHostPrivateKeySecretID(ctx, host.ID)
 	if err != nil {

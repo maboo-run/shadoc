@@ -59,6 +59,7 @@ type Engine struct {
 var rsyncVersionPattern = regexp.MustCompile(`(?i)version\s+(\d+)\.(\d+)`)
 var rsyncRegularFilesPattern = regexp.MustCompile(`(?:^|[(,]\s*)reg:\s*([0-9][0-9,]*)`)
 var rsyncDirectoriesPattern = regexp.MustCompile(`(?:^|[(,]\s*)dir:\s*([0-9][0-9,]*)`)
+var rsyncProgressPattern = regexp.MustCompile(`^\s*([0-9][0-9,]*)\s+([0-9]{1,3})%\s+([0-9]+(?:\.[0-9]+)?)([kKMGT]?B)/s\s+([0-9]+):([0-9]{2}):([0-9]{2})\s+\(xfr#([0-9][0-9,]*),\s+(?:to-chk|ir-chk)=([0-9][0-9,]*)/([0-9][0-9,]*)\)`)
 
 const maxRsyncRawLogBytes = 4 << 20
 
@@ -150,11 +151,21 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 		if strings.Contains(destinationHost, ":") && net.ParseIP(destinationHost) != nil {
 			destinationHost = "[" + destinationHost + "]"
 		}
-		destination = definition.Destination.Username + "@" + destinationHost + ":" + definition.Destination.Path
+		destinationPath := definition.Destination.Path
+		if !strings.HasSuffix(destinationPath, "/") {
+			destinationPath += "/"
+		}
+		destination = definition.Destination.Username + "@" + destinationHost + ":" + destinationPath
 	}
 	args := buildArguments(definition, destination, sshCommand)
-	collector := &rsyncMetricsCollector{}
+	if assignment.Progress != nil {
+		assignment.Progress(execution.Progress{Phase: "scanning"})
+	}
+	collector := &rsyncMetricsCollector{progress: assignment.Progress}
 	result, err := e.executor.Run(ctx, command.Spec{Program: e.selectedProgram(), Args: args, Env: map[string]string{"LC_ALL": "C"}, Stdout: collector})
+	if assignment.Progress != nil {
+		assignment.Progress(execution.Progress{Phase: "finalizing"})
+	}
 	if !collector.sawOutput() {
 		_, _ = collector.Write([]byte(result.Stdout))
 	}
@@ -196,7 +207,7 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 }
 
 func buildArguments(definition Definition, destination, sshCommand string) []string {
-	args := []string{"--archive", "--partial", "--delay-updates", "--itemize-changes", "--stats", "--protect-args"}
+	args := []string{"--archive", "--partial", "--delay-updates", "--itemize-changes", "--stats", "--info=progress2", "--outbuf=L", "--protect-args"}
 	if definition.DryRun {
 		args = append(args, "--dry-run")
 	}
@@ -236,10 +247,11 @@ type rsyncParsedMetrics struct {
 }
 
 type rsyncMetricsCollector struct {
-	mu      sync.Mutex
-	buffer  strings.Builder
-	seen    bool
-	metrics rsyncParsedMetrics
+	mu       sync.Mutex
+	buffer   strings.Builder
+	seen     bool
+	metrics  rsyncParsedMetrics
+	progress func(execution.Progress)
 }
 
 func (c *rsyncMetricsCollector) Write(value []byte) (int, error) {
@@ -248,13 +260,15 @@ func (c *rsyncMetricsCollector) Write(value []byte) (int, error) {
 	written := len(value)
 	c.seen = c.seen || len(value) > 0
 	for len(value) > 0 {
-		index := strings.IndexByte(string(value), '\n')
+		index := strings.IndexAny(string(value), "\r\n")
 		if index < 0 {
 			c.appendLineFragment(value)
 			break
 		}
 		c.appendLineFragment(value[:index])
-		c.consumeLine(c.buffer.String())
+		if c.buffer.Len() > 0 {
+			c.consumeLine(c.buffer.String())
+		}
 		c.buffer.Reset()
 		value = value[index+1:]
 	}
@@ -287,6 +301,12 @@ func (c *rsyncMetricsCollector) finish() rsyncParsedMetrics {
 
 func (c *rsyncMetricsCollector) consumeLine(value string) {
 	line := strings.TrimSpace(value)
+	if progress, ok := parseRsyncProgress(line); ok {
+		if c.progress != nil {
+			c.progress(progress)
+		}
+		return
+	}
 	if strings.HasPrefix(line, "*deleting") {
 		c.metrics.changedItems++
 		deleted := strings.TrimSpace(strings.TrimPrefix(line, "*deleting"))
@@ -336,6 +356,45 @@ func (c *rsyncMetricsCollector) consumeLine(value string) {
 		}
 		return
 	}
+}
+
+func parseRsyncProgress(line string) (execution.Progress, bool) {
+	match := rsyncProgressPattern.FindStringSubmatch(line)
+	if len(match) != 11 {
+		return execution.Progress{}, false
+	}
+	bytesTransferred, bytesOK := parseRsyncStat(match[1])
+	percent, percentErr := strconv.ParseInt(match[2], 10, 64)
+	rateValue, rateErr := strconv.ParseFloat(match[3], 64)
+	hours, hoursErr := strconv.ParseInt(match[5], 10, 64)
+	minutes, minutesErr := strconv.ParseInt(match[6], 10, 64)
+	seconds, secondsErr := strconv.ParseInt(match[7], 10, 64)
+	filesTransferred, filesOK := parseRsyncStat(match[8])
+	_, remainingOK := parseRsyncStat(match[9])
+	filesTotal, totalOK := parseRsyncStat(match[10])
+	if !bytesOK || percentErr != nil || percent < 0 || percent > 100 || rateErr != nil || rateValue < 0 || hoursErr != nil || minutesErr != nil || secondsErr != nil || !filesOK || !remainingOK || !totalOK {
+		return execution.Progress{}, false
+	}
+	multiplier := float64(1)
+	switch strings.ToUpper(match[4]) {
+	case "KB":
+		multiplier = 1_000
+	case "MB":
+		multiplier = 1_000_000
+	case "GB":
+		multiplier = 1_000_000_000
+	case "TB":
+		multiplier = 1_000_000_000_000
+	}
+	totalBytes := int64(0)
+	if percent > 0 {
+		totalBytes = bytesTransferred * 100 / percent
+	}
+	return execution.Progress{
+		Phase: "transferring", BytesTransferred: bytesTransferred, TotalBytes: totalBytes,
+		FilesTransferred: filesTransferred, FilesTotal: filesTotal,
+		RateBytesPerSecond: int64(rateValue * multiplier), ETASeconds: hours*3600 + minutes*60 + seconds,
+	}, true
 }
 
 func parseRsyncStat(value string) (int64, bool) {

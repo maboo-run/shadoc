@@ -81,7 +81,7 @@ func (s *Store) Metadata(ctx context.Context, key string) (string, error) {
 
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
-PRAGMA foreign_keys = ON;
+PRAGMA foreign_keys = OFF;
 PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
 
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS remote_hosts (
     host TEXT NOT NULL,
     port INTEGER NOT NULL,
     username TEXT NOT NULL,
-    private_key_secret_id TEXT NOT NULL REFERENCES secrets(id),
+    private_key_secret_id TEXT NOT NULL,
     host_fingerprint TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -128,26 +128,27 @@ CREATE TABLE IF NOT EXISTS repositories (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
 	engine TEXT NOT NULL DEFAULT 'restic',
-    kind TEXT NOT NULL DEFAULT 'sftp',
-    remote_host_id TEXT REFERENCES remote_hosts(id),
+	kind TEXT NOT NULL DEFAULT 'sftp',
+	local_target_json TEXT NOT NULL DEFAULT '',
+    remote_host_id TEXT,
 	path TEXT NOT NULL,
-	password_secret_id TEXT REFERENCES secrets(id),
+	password_secret_id TEXT,
 	backend_json TEXT NOT NULL DEFAULT '',
-	backend_secret_id TEXT REFERENCES secrets(id),
+	backend_secret_id TEXT,
 	status TEXT NOT NULL DEFAULT 'ready',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS repository_key_revocations (
-    repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT PRIMARY KEY,
     key_id TEXT NOT NULL,
-    secret_id TEXT NOT NULL REFERENCES secrets(id),
+    secret_id TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS repository_capacities (
-    repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT PRIMARY KEY,
     total_bytes INTEGER NOT NULL,
     available_bytes INTEGER NOT NULL,
     checked_at TEXT NOT NULL,
@@ -155,7 +156,7 @@ CREATE TABLE IF NOT EXISTS repository_capacities (
 );
 
 CREATE TABLE IF NOT EXISTS repository_capacity_policies (
-    repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 1,
     probe_interval_minutes INTEGER NOT NULL DEFAULT 360,
     minimum_available_bytes INTEGER NOT NULL DEFAULT 0,
@@ -172,7 +173,7 @@ CREATE TABLE IF NOT EXISTS repository_capacity_policies (
 
 CREATE TABLE IF NOT EXISTS repository_capacity_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT NOT NULL,
     total_bytes INTEGER NOT NULL,
     available_bytes INTEGER NOT NULL,
     checked_at TEXT NOT NULL,
@@ -193,7 +194,7 @@ CREATE TABLE IF NOT EXISTS database_connections (
     port INTEGER,
     socket_path TEXT,
     username TEXT NOT NULL,
-    password_secret_id TEXT NOT NULL REFERENCES secrets(id),
+    password_secret_id TEXT NOT NULL,
     tls_json TEXT NOT NULL DEFAULT '{}',
     tool_paths_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'draft',
@@ -211,7 +212,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     engine TEXT NOT NULL DEFAULT 'restic',
     kind TEXT NOT NULL,
     execution_target_json TEXT NOT NULL DEFAULT '{"kind":"local"}',
-    repository_id TEXT UNIQUE REFERENCES repositories(id),
+    repository_id TEXT UNIQUE,
     source_json TEXT NOT NULL,
     retention_json TEXT NOT NULL DEFAULT '{}',
     resources_json TEXT NOT NULL DEFAULT '{}',
@@ -225,7 +226,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
-	remote_host_id TEXT REFERENCES remote_hosts(id) ON DELETE SET NULL,
+	remote_host_id TEXT,
+	managed_installation INTEGER NOT NULL DEFAULT 0,
     certificate_serial TEXT NOT NULL UNIQUE,
 	certificate_not_after TEXT,
     capabilities_json TEXT NOT NULL DEFAULT '[]',
@@ -248,7 +250,7 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 CREATE TABLE IF NOT EXISTS agent_certificates (
 	serial TEXT PRIMARY KEY,
-	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	agent_id TEXT NOT NULL,
 	not_before TEXT,
 	not_after TEXT,
 	status TEXT NOT NULL,
@@ -260,12 +262,13 @@ CREATE INDEX IF NOT EXISTS agent_certificates_agent_status
 ON agent_certificates(agent_id,status,not_after);
 CREATE TABLE IF NOT EXISTS agent_filesystem_requests (
     id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
     definition_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     result_json TEXT NOT NULL DEFAULT '{}',
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    renewed_at TEXT,
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_filesystem_requests_claim ON agent_filesystem_requests(agent_id,status,expires_at,created_at);
@@ -273,12 +276,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_filesystem_requests_expiry ON agent_filesys
 
 CREATE TABLE IF NOT EXISTS agent_restore_requests (
     id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
     definition_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     result_json TEXT NOT NULL DEFAULT '{}',
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    renewed_at TEXT,
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_restore_requests_claim ON agent_restore_requests(agent_id,status,expires_at,created_at);
@@ -302,14 +306,16 @@ CREATE TABLE IF NOT EXISTS agent_service_settings (
 
 CREATE TABLE IF NOT EXISTS agent_leases (
     id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
     engine TEXT NOT NULL,
     definition_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     expires_at TEXT NOT NULL,
     acknowledged_at TEXT,
+    renewed_at TEXT,
     completed_at TEXT,
+    progress_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS agent_leases_agent_active ON agent_leases(agent_id, expires_at DESC);
@@ -329,16 +335,16 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 
 CREATE TABLE IF NOT EXISTS plan_tasks (
-    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
     position INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(plan_id, task_id)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id),
-    plan_id TEXT REFERENCES plans(id),
+    task_id TEXT NOT NULL,
+    plan_id TEXT,
     trigger TEXT NOT NULL,
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,
@@ -471,7 +477,7 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
 CREATE INDEX IF NOT EXISTS notification_deliveries_occurred_at
 ON notification_deliveries(occurred_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS repository_maintenance (
-    repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT PRIMARY KEY,
     schedule_json TEXT NOT NULL,
     timezone TEXT NOT NULL,
     retention_json TEXT NOT NULL,
@@ -498,7 +504,7 @@ CREATE INDEX IF NOT EXISTS schedule_occurrences_owner_time
 ON schedule_occurrences(owner_kind, owner_id, scheduled_at DESC);
 CREATE TABLE IF NOT EXISTS maintenance_previews (
     id TEXT PRIMARY KEY,
-    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT NOT NULL,
     retention_json TEXT NOT NULL,
     keep_count INTEGER NOT NULL DEFAULT 0,
     remove_count INTEGER NOT NULL DEFAULT 0,
@@ -510,7 +516,7 @@ CREATE INDEX IF NOT EXISTS maintenance_previews_repository_created
 ON maintenance_previews(repository_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS task_scope_previews (
     id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     summary_json TEXT NOT NULL DEFAULT '{}',
     requires_delete_confirmation INTEGER NOT NULL DEFAULT 0,
@@ -541,7 +547,7 @@ CREATE TABLE IF NOT EXISTS restore_confirmations (
     consumed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS snapshot_metadata (
-    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    repository_id TEXT NOT NULL,
     snapshot_id TEXT NOT NULL,
     metadata_version INTEGER NOT NULL,
     engine TEXT NOT NULL,
@@ -556,7 +562,7 @@ CREATE TABLE IF NOT EXISTS snapshot_metadata (
     PRIMARY KEY(repository_id, snapshot_id)
 );
 CREATE TABLE IF NOT EXISTS restore_verification_policies (
-    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id TEXT PRIMARY KEY,
     schedule_json TEXT NOT NULL,
     timezone TEXT NOT NULL,
     selection_path TEXT NOT NULL,
@@ -620,7 +626,7 @@ CREATE INDEX IF NOT EXISTS protection_drafts_status_updated
 ON protection_drafts(status, updated_at DESC);
 CREATE TABLE IF NOT EXISTS protection_draft_items (
     id TEXT PRIMARY KEY,
-    draft_id TEXT NOT NULL REFERENCES protection_drafts(id) ON DELETE CASCADE,
+    draft_id TEXT NOT NULL,
     position INTEGER NOT NULL,
     task_name TEXT NOT NULL,
     source_kind TEXT NOT NULL,
@@ -668,6 +674,9 @@ ON protection_draft_items(draft_id, position);
 	if err := s.migrateRepositoryKinds(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateRsyncRepositoryKindsToSSH(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureRepositoryBackendColumns(ctx); err != nil {
 		return err
 	}
@@ -675,6 +684,9 @@ ON protection_draft_items(draft_id, position);
 		return err
 	}
 	if err := s.migrateTaskExecutions(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureRepositoryLocalTargets(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureRepositoryRetentionAuthority(ctx); err != nil {
@@ -692,6 +704,15 @@ ON protection_draft_items(draft_id, position);
 	if err := s.ensureAgentLeaseResult(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureAgentLeaseProgress(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAgentRequestRenewals(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAgentManagedInstallation(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureAgentRemoteHosts(ctx); err != nil {
 		return err
 	}
@@ -702,17 +723,19 @@ ON protection_draft_items(draft_id, position);
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-CREATE UNIQUE INDEX IF NOT EXISTS repositories_sftp_location
-ON repositories(remote_host_id, path) WHERE kind = 'sftp';
+DROP INDEX IF EXISTS repositories_sftp_location;
+DROP INDEX IF EXISTS repositories_local_path;
+CREATE UNIQUE INDEX IF NOT EXISTS repositories_remote_location
+ON repositories(remote_host_id, path) WHERE kind IN ('sftp', 'ssh');
 CREATE UNIQUE INDEX IF NOT EXISTS repositories_local_path
-ON repositories(path) WHERE kind = 'local';
+ON repositories(local_target_json, path) WHERE kind = 'local';
 CREATE UNIQUE INDEX IF NOT EXISTS repositories_s3_location
 ON repositories(json_extract(backend_json,'$.endpoint'),json_extract(backend_json,'$.bucket'),path) WHERE kind = 's3';
 `)
 	if err != nil {
 		return fmt.Errorf("create repository location indexes: %w", err)
 	}
-	return nil
+	return s.ensureLogicalReferencesOnly(ctx)
 }
 
 func (s *Store) ensureAgentRuntimeMetadata(ctx context.Context) error {
@@ -758,7 +781,7 @@ func (s *Store) ensureAgentRuntimeMetadata(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS agent_certificates (
 	serial TEXT PRIMARY KEY,
-	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	agent_id TEXT NOT NULL,
 	not_before TEXT,
 	not_after TEXT,
 	status TEXT NOT NULL,
@@ -1014,6 +1037,47 @@ func (s *Store) ensureAgentLifecycle(ctx context.Context) error {
 	return nil
 }
 
+// ensureAgentManagedInstallation separates the Service-owned deployment
+// lifecycle from an Agent's optional physical-host association. A manually
+// enrolled Agent may be associated with a remote host for filesystem work but
+// is never eligible for Service-driven upgrade or uninstall.
+func (s *Store) ensureAgentManagedInstallation(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(agents)`)
+	if err != nil {
+		return err
+	}
+	present := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		present = present || name == "managed_installation"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !present {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN managed_installation INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add Agent managed installation state: %w", err)
+		}
+		// This is a one-time compatibility inference. Re-running it would turn a
+		// later manual re-enrollment of the same Agent ID back into a managed
+		// installation merely because an old deployment operation still exists.
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE agents
+			SET managed_installation=1
+			WHERE id IN (SELECT target FROM operations WHERE kind='agent_deploy' AND status='success' AND target<>'')
+		`); err != nil {
+			return fmt.Errorf("backfill managed Agent installations: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) ensureAgentRemoteHosts(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(agents)`)
 	if err != nil {
@@ -1034,7 +1098,7 @@ func (s *Store) ensureAgentRemoteHosts(ctx context.Context) error {
 		return err
 	}
 	if !present {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN remote_host_id TEXT REFERENCES remote_hosts(id) ON DELETE SET NULL`); err != nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN remote_host_id TEXT`); err != nil {
 			return fmt.Errorf("add Agent remote host binding: %w", err)
 		}
 	}
@@ -1065,17 +1129,19 @@ func (s *Store) ensureAgentRemoteHosts(ctx context.Context) error {
 		return err
 	}
 
-	existingRows, err := s.db.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,'') FROM agents`)
+	existingRows, err := s.db.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,''),managed_installation FROM agents`)
 	if err != nil {
 		return err
 	}
-	seenAgents, usedHosts := map[string]bool{}, map[string]bool{}
+	seenAgents, managedAgents, usedHosts := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for existingRows.Next() {
 		var agentID, hostID string
-		if err := existingRows.Scan(&agentID, &hostID); err != nil {
+		var managedInstallation int
+		if err := existingRows.Scan(&agentID, &hostID, &managedInstallation); err != nil {
 			_ = existingRows.Close()
 			return err
 		}
+		managedAgents[agentID] = managedInstallation != 0
 		if hostID != "" {
 			seenAgents[agentID], usedHosts[hostID] = true, true
 		}
@@ -1084,7 +1150,7 @@ func (s *Store) ensureAgentRemoteHosts(ctx context.Context) error {
 		return err
 	}
 	for _, item := range deployments {
-		if item.agentID == "" || seenAgents[item.agentID] {
+		if item.agentID == "" || seenAgents[item.agentID] || !managedAgents[item.agentID] {
 			continue
 		}
 		seenAgents[item.agentID] = true
@@ -1131,6 +1197,67 @@ func (s *Store) ensureAgentLeaseResult(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) ensureAgentLeaseProgress(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(agent_leases)`)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !present["renewed_at"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agent_leases ADD COLUMN renewed_at TEXT`); err != nil {
+			return err
+		}
+	}
+	if !present["progress_json"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agent_leases ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureAgentRequestRenewals(ctx context.Context) error {
+	for _, table := range []string{"agent_filesystem_requests", "agent_restore_requests"} {
+		rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		present := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			present = present || name == "renewed_at"
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if !present {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN renewed_at TEXT`); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrateTaskExecutions(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tasks)`)
 	if err != nil {
@@ -1158,7 +1285,6 @@ func (s *Store) migrateTaskExecutions(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		return err
 	}
-	defer s.db.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1171,7 +1297,7 @@ CREATE TABLE tasks_v3 (
     engine TEXT NOT NULL DEFAULT 'restic',
     kind TEXT NOT NULL,
     execution_target_json TEXT NOT NULL DEFAULT '{"kind":"local"}',
-    repository_id TEXT UNIQUE REFERENCES repositories(id),
+    repository_id TEXT UNIQUE,
     source_json TEXT NOT NULL,
     retention_json TEXT NOT NULL DEFAULT '{}',
     resources_json TEXT NOT NULL DEFAULT '{}',
@@ -1325,7 +1451,6 @@ func (s *Store) migrateRepositoryKinds(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		return err
 	}
-	defer s.db.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1337,9 +1462,9 @@ CREATE TABLE repositories_v2 (
     name TEXT NOT NULL UNIQUE,
 	engine TEXT NOT NULL DEFAULT 'restic',
     kind TEXT NOT NULL DEFAULT 'sftp',
-    remote_host_id TEXT REFERENCES remote_hosts(id),
+    remote_host_id TEXT,
     path TEXT NOT NULL,
-	password_secret_id TEXT REFERENCES secrets(id),
+	password_secret_id TEXT,
     status TEXT NOT NULL DEFAULT 'ready',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -1365,6 +1490,13 @@ CREATE TABLE repositories_v2 (
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit repository migration: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateRsyncRepositoryKindsToSSH(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE repositories SET kind='ssh' WHERE engine='rsync' AND kind='sftp'`); err != nil {
+		return fmt.Errorf("migrate rsync remote repository transport: %w", err)
 	}
 	return nil
 }

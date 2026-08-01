@@ -71,7 +71,8 @@ type RepositoryOption = {
   id: string;
   name: string;
 	engine: "restic" | "rsync";
-  kind: "local" | "sftp" | "s3";
+  kind: "local" | "sftp" | "ssh" | "s3";
+  localTarget: { kind: "local" | "agent"; agentId?: string };
   path: string;
   status: string;
 };
@@ -292,16 +293,31 @@ function AgentDirectoryInput({ api, agentId, name, label, initialValue, placehol
   </div>;
 }
 
+function SftpPathHelp({ locale }: { locale: Locale }) {
+  const t = (source: string) => translate(locale, source);
+  return <button
+    type="button"
+    className="help-tip"
+    aria-label={t("SFTP 路径填写说明")}
+    title={t("Restic 远程仓库必须填写 SFTP 用户看到的绝对路径；Agent 目录浏览显示的是远程主机本地文件系统路径，两者可能不同。")}
+  >?</button>;
+}
+
 export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh-CN", timeZone = "UTC" }: EditorProps) {
 	const t = (source: string) => translate(locale, source);
-	const [engine, setEngine] = useState<"restic" | "rsync">(initial?.engine === "rsync" ? "rsync" : "restic");
+	const initialEngine = initial?.engine === "rsync" ? "rsync" : "restic";
+	const [engine, setEngine] = useState<"restic" | "rsync">(initialEngine);
   const [connectionMode, setConnectionMode] = useState<"create" | "existing">("create");
-  const initialKind = initial?.kind === "s3" ? "s3" : initial?.kind === "sftp" || initial?.remoteHostId ? "sftp" : "local";
-  const [kind, setKind] = useState<"local" | "sftp" | "s3">(initialKind);
+  const initialKind = initial?.kind === "s3" ? "s3"
+    : initial?.kind === "ssh" || initialEngine === "rsync" && (initial?.kind === "sftp" || initial?.remoteHostId) ? "ssh"
+      : initial?.kind === "sftp" || initial?.remoteHostId ? "sftp" : "local";
+  const [kind, setKind] = useState<"local" | "sftp" | "ssh" | "s3">(initialKind);
+	const initialLocalTarget = (initial?.localTarget ?? {}) as Record<string, unknown>;
+	const [localTargetKind, setLocalTargetKind] = useState<"local" | "agent">(initialLocalTarget.kind === "agent" ? "agent" : "local");
   const [selectedRemoteHostId, setSelectedRemoteHostId] = useState(String(initial?.remoteHostId ?? ""));
   const [hosts, setHosts] = useState<Array<Record<string, unknown>>>([]);
   const [agents, setAgents] = useState<Array<Record<string, unknown>>>([]);
-  const [browseAgentId, setBrowseAgentId] = useState("");
+	const [localAgentId, setLocalAgentId] = useState(String(initialLocalTarget.agentId ?? ""));
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [passwordMode, setPasswordMode] = useState<"generated" | "custom">("generated");
@@ -332,16 +348,21 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
 		(!initial && (!s3AccessKey || !s3SecretKey || !s3CredentialsConfirmed))
 		|| (Boolean(initial) && s3CredentialsProvided && (!s3AccessKey || !s3SecretKey || !s3CredentialsConfirmed))
 	);
-	const canSelectRepositoryBrowseAgent = engine === "rsync" && kind === "local";
-	const repositoryBrowseAgent = kind === "sftp"
+	const remoteRepository = kind === "sftp" || kind === "ssh";
+	const repositoryType = kind === "local" ? localTargetKind === "agent" ? "agent-local" : "service-local" : kind;
+	const repositoryBrowseAgent = engine === "rsync" && kind === "ssh"
 		? agents.find((agent) => String(agent.remoteHostId ?? "") === selectedRemoteHostId)
-		: canSelectRepositoryBrowseAgent ? agents.find((agent) => String(agent.id ?? "") === browseAgentId) : undefined;
-	const repositoryBrowseAgentId = String(repositoryBrowseAgent?.id ?? "");
+		: kind === "local" && localTargetKind === "agent" ? agents.find((agent) => String(agent.id ?? "") === localAgentId) : undefined;
+	const repositoryBrowseAvailable = Boolean(repositoryBrowseAgent
+		&& repositoryBrowseAgent.status === "online"
+		&& repositoryBrowseAgent.taskEligible !== false
+		&& (repositoryBrowseAgent.capabilities as unknown[] | undefined)?.includes("filesystem-browse"));
+	const repositoryBrowseAgentId = repositoryBrowseAvailable ? String(repositoryBrowseAgent?.id ?? "") : "";
 
   useEffect(() => {
     let active = true;
     void Promise.all([api.listResource("remote-hosts"), api.listResource("agents")])
-      .then(([hostItems, agentItems]) => { if (active) { setHosts(hostItems); setAgents(agentItems.filter((item) => item.status === "online" && item.taskEligible !== false && (item.capabilities as unknown[] | undefined)?.includes("filesystem-browse"))); } })
+		.then(([hostItems, agentItems]) => { if (active) { setHosts(hostItems); setAgents(agentItems.filter((item) => item.status !== "revoked")); } })
       .catch(() => active && setError("无法读取远程主机"));
     return () => {
       active = false;
@@ -413,7 +434,8 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
             name: value("name"),
 			engine,
             kind,
-            remoteHostId: kind === "sftp" ? value("remoteHostId") : "",
+			localTarget: kind === "local" ? localTargetKind === "agent" ? { kind: "agent", agentId: value("localAgentId") } : { kind: "local" } : undefined,
+			remoteHostId: remoteRepository ? value("remoteHostId") : "",
             path: value("path"),
             password: initial ? value("password") : password,
 			passwordConfirmed: Boolean(initial) || passwordConfirmed,
@@ -434,7 +456,7 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
       >
         {error && <p className="form-error form-banner">{error}</p>}
         <section className="editor-section">
-          <div className="editor-section-heading"><h2>{t("仓库信息")}</h2><p>{t("本地仓库由当前服务账号读写；远程仓库通过已验证的 SSH 主机访问。")}</p></div>
+		  <div className="editor-section-heading"><h2>{t("仓库信息")}</h2><p>{t("本地路径必须明确归属 Service 或唯一 Agent；远程仓库通过已验证的 SSH 主机访问。")}</p></div>
           <div className="form-grid">
           <label>
             {t("名称")}
@@ -445,7 +467,12 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
 			<select value={engine} disabled={Boolean(initial?.id)} onChange={(event) => {
 			  const selected = event.target.value as "restic" | "rsync";
 			  setEngine(selected);
-			  if (selected === "rsync" && kind === "s3") setKind("local");
+			  if (selected === "rsync" && (kind === "local" || kind === "s3" || kind === "sftp")) {
+				setKind("ssh");
+				setLocalTargetKind("local");
+			  }
+			  else if (selected === "restic" && kind === "ssh") setKind("sftp");
+			  if (selected === "restic") setLocalTargetKind("local");
 			}}>
 			  <option value="restic">{t("Restic 备份仓库")}</option>
 			  <option value="rsync">{t("rsync 同步仓库")}</option>
@@ -471,13 +498,23 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
           </div>}
           <label>
             {t("仓库类型")}
-            <select value={kind} onChange={(event) => setKind(event.target.value as "local" | "sftp" | "s3")}>
-              <option value="local">{t("本地仓库")}</option>
-              <option value="sftp">{t("远程 SFTP 仓库")}</option>
-              {engine === "restic" && <option value="s3">{t("S3 兼容对象存储")}</option>}
-            </select>
-          </label>
-          {kind === "sftp" && (
+			<select value={repositoryType} onChange={(event) => {
+			  const selected = event.target.value;
+			  if (selected === "service-local" || selected === "agent-local") {
+				setKind("local");
+				setLocalTargetKind(selected === "agent-local" ? "agent" : "local");
+				return;
+			  }
+			  setKind(selected as "sftp" | "ssh" | "s3");
+			  setLocalTargetKind("local");
+			}}>
+			  {engine === "restic" && <option value="service-local">{t("Service 本地仓库")}</option>}
+			  {engine === "rsync" && <option value="agent-local">{t("Agent 本地同步目录")}</option>}
+			  {engine === "restic" ? <option value="sftp">{t("远程 SFTP 仓库")}</option> : <option value="ssh">{t("SSH 远程同步目录")}</option>}
+			  {engine === "restic" && <option value="s3">{t("S3 兼容对象存储")}</option>}
+			</select>
+		  </label>
+		  {remoteRepository && (
             <label className="full-field">
               {t("远程主机")}
               <select name="remoteHostId" value={selectedRemoteHostId} onChange={(event) => setSelectedRemoteHostId(event.target.value)} required>
@@ -491,14 +528,14 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
               {!hosts.length && <span className="field-hint warning-text">{t("请先创建并验证远程主机")}</span>}
             </label>
           )}
-          {canSelectRepositoryBrowseAgent && <label className="full-field">{t("目录浏览 Agent（可选）")}
-            <select aria-label={t("目录浏览 Agent（可选）")} value={browseAgentId} onChange={(event) => setBrowseAgentId(event.target.value)}>
-              <option value="">{t("不使用 Agent，手工输入路径")}</option>
-              {agents.map((agent) => <option key={String(agent.id)} value={String(agent.id)}>{String(agent.id)}</option>)}
-            </select>
-            <span className="field-hint">{t("选择 Agent 后可直接查看并创建目标目录；该选择不改变仓库与任务的绑定关系。")}</span>
-            {!agents.length && <span className="field-hint warning-text">{t("没有在线且支持目录浏览的 Agent；仍可手工输入路径。")}</span>}
-          </label>}
+		  {kind === "local" && localTargetKind === "agent" && <label className="full-field">{t("本地路径所属 Agent")}
+			<select name="localAgentId" aria-label={t("本地路径所属 Agent")} value={localAgentId} onChange={(event) => setLocalAgentId(event.target.value)} required>
+			  <option value="" disabled>{t("请选择唯一 Agent")}</option>
+			  {agents.map((agent) => <option key={String(agent.id)} value={String(agent.id)}>{String(agent.id)}</option>)}
+			</select>
+			<span className="field-hint">{t("该 Agent 是本地路径的唯一归属；仓库只能由同一个 Agent 的任务使用。")}</span>
+			{!agents.length && <span className="field-hint warning-text">{t("没有可绑定的 Agent")}</span>}
+		  </label>}
           {kind === "s3" ? <fieldset className="full-field">
             <legend>{t("S3 后端设置")}</legend>
             <div className="operation-feedback" role="note">
@@ -516,12 +553,16 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
               {initial && <p className="field-hint full-field">{t("凭据已加密保存；两项都留空可保留现有凭据，填写则会整体轮换。")}</p>}
               {(!initial || s3CredentialsProvided) && <label className="checkbox-field full-field"><input aria-label={t("确认 S3 凭据用途")} type="checkbox" checked={s3CredentialsConfirmed} disabled={!s3AccessKey || !s3SecretKey} onChange={(event) => setS3CredentialsConfirmed(event.target.checked)} />{t("我确认这些凭据只用于访问上述存储桶")}</label>}
             </div>
-          </fieldset> : kind === "sftp" ? <>
-            <AgentDirectoryInput api={api} agentId={repositoryBrowseAgentId} name="path" label={t("远端绝对路径")} initialValue={String(initial?.path ?? "")} placeholder="/volume1/backups/photos" pathStyle={agentPathStyle(repositoryBrowseAgent)} locale={locale} />
-            {selectedRemoteHostId && !repositoryBrowseAgentId && <p className="field-hint warning-text full-field">{t("所选远程主机没有在线且支持目录浏览的已绑定 Agent；仍可手工输入路径。")}</p>}
-          </> : browseAgentId && canSelectRepositoryBrowseAgent ? <AgentDirectoryInput api={api} agentId={browseAgentId} name="path" label={t("Agent 本地绝对路径")} initialValue={String(initial?.path ?? "")} placeholder="/srv/archive or D:\\Backup" pathStyle={agentPathStyle(repositoryBrowseAgent)} locale={locale} /> : <label className="full-field">
-            {t(kind === "local" ? "本机绝对路径" : "远端绝对路径")}
+		  </fieldset> : kind === "ssh" ? <>
+			<AgentDirectoryInput api={api} agentId={repositoryBrowseAgentId} name="path" label={t("远端绝对路径")} initialValue={String(initial?.path ?? "")} placeholder="/volume1/backups/photos" pathStyle={agentPathStyle(repositoryBrowseAgent)} locale={locale} />
+			{selectedRemoteHostId && !repositoryBrowseAgentId && <p className="field-hint warning-text full-field">{t("所选远程主机没有在线且支持目录浏览的已绑定 Agent；仍可手工输入路径。")}</p>}
+		</> : kind === "sftp" ? <label className="full-field">
+			<span className="field-label-with-help">{t("远端绝对路径")}<SftpPathHelp locale={locale} /></span>
+			<input name="path" defaultValue={String(initial?.path ?? "")} placeholder="/volume1/backups/photos" required />
+		</label> : repositoryBrowseAgentId && localTargetKind === "agent" ? <AgentDirectoryInput api={api} agentId={repositoryBrowseAgentId} name="path" label={t("Agent 本地绝对路径")} initialValue={String(initial?.path ?? "")} placeholder="/srv/archive or D:\\Backup" pathStyle={agentPathStyle(repositoryBrowseAgent)} locale={locale} /> : <label className="full-field">
+			{t(localTargetKind === "agent" ? "Agent 本地绝对路径" : "本机绝对路径")}
             <input name="path" defaultValue={String(initial?.path ?? "")} placeholder={kind === "local" ? "/Volumes/Backup/photos" : "/volume1/backups/photos"} required />
+			{localTargetKind === "agent" && localAgentId && !repositoryBrowseAvailable && <span className="field-hint warning-text">{t("所选 Agent 当前无法浏览目录；仍可手工输入其本地绝对路径。")}</span>}
           </label>}
 		  {engine === "restic" && (initial ? (
             <label className="full-field">
@@ -669,7 +710,7 @@ export function RepositoryEditor({ api, initial, onClose, onSubmit, locale = "zh
 		</section>}
         <footer className="editor-actions">
           <button className="secondary-button" type="button" onClick={onClose}>{t("取消")}</button>
-		  <button className="primary-button" type="submit" disabled={(kind === "sftp" && !hosts.length) || repositoryPasswordInvalid || s3Invalid}>{t(existingConnection ? "验证并连接" : "保存仓库")}</button>
+		  <button className="primary-button" type="submit" disabled={(remoteRepository && !hosts.length) || repositoryPasswordInvalid || s3Invalid}>{t(existingConnection ? "验证并连接" : "保存仓库")}</button>
         </footer>
       </form>
       <Toast message={message} locale={locale} onClose={() => setMessage("")} />
@@ -844,7 +885,10 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, onOpe
             id: String(item.id),
             name: String(item.name),
             engine: item.engine === "rsync" ? "rsync" : "restic",
-            kind: item.kind === "local" ? "local" : "sftp",
+			kind: item.kind === "local" || item.kind === "ssh" ? item.kind : "sftp",
+			localTarget: item.kind === "local" && (item.localTarget as Record<string, unknown> | undefined)?.kind === "agent"
+			  ? { kind: "agent", agentId: String((item.localTarget as Record<string, unknown>).agentId ?? "") }
+			  : { kind: "local" },
             path: String(item.path),
             status: String(item.status),
           }))
@@ -885,8 +929,13 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, onOpe
   }, [api, initial?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const legacyRsync = Boolean(initial?.id && initial?.engine === "rsync" && !initial?.repositoryId);
-  const resticRepositories = repositories.filter((repository) => repository.engine === "restic");
-  const rsyncRepositories = repositories.filter((repository) => repository.engine === "rsync" && (targetKind === "agent" || repository.kind === "sftp"));
+	const repositoryMatchesExecutionTarget = (repository: RepositoryOption) => repository.kind !== "local"
+		? true
+		: targetKind === "agent"
+			? repository.localTarget.kind === "agent" && repository.localTarget.agentId === selectedAgentID
+			: repository.localTarget.kind === "local";
+	const resticRepositories = repositories.filter((repository) => repository.engine === "restic" && repositoryMatchesExecutionTarget(repository));
+	const rsyncRepositories = repositories.filter((repository) => repository.engine === "rsync" && (repository.kind === "ssh" || targetKind === "agent" && repositoryMatchesExecutionTarget(repository)));
   const selectedAgent = agents.find((agent) => String(agent.id ?? "") === selectedAgentID);
   const selectedAgentEligible = !selectedAgent || agentEligibleForEngine(selectedAgent, engine);
   const scopeTask = engine === "rsync" || (engine === "restic" && kind === "directory");
@@ -1188,7 +1237,7 @@ export function TaskEditor({ api, initial, onClose, onDraftSaved, onSaved, onOpe
           <label className="full-field">{t("备份仓库")}
             <select name="repositoryId" value={selectedRepositoryID} disabled={loading} onChange={(event) => { setSelectedRepositoryID(event.target.value); invalidateScope(); }} required>
               <option value="" disabled>{t(loading ? "正在读取仓库…" : resticRepositories.length ? "请选择已初始化仓库" : "无可选仓库")}</option>
-              {resticRepositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.name} · {t(repository.kind === "local" ? "本地" : "远程")} · {repository.path}</option>)}
+			  {resticRepositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.name} · {t(repository.kind === "local" ? repository.localTarget.kind === "agent" ? "Agent 本地" : "Service 本地" : "远程")} · {repository.path}</option>)}
             </select>
             {!loading && !resticRepositories.length && <span className="field-hint warning-text">{t("无可选仓库")}</span>}
           </label>

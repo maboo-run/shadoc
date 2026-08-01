@@ -28,6 +28,8 @@ export type RepositoryCapacityPolicy = {
   lastError?: string;
   updatedAt: string;
   stale?: boolean;
+  capacitySupported?: boolean;
+  capacityUnsupportedReason?: string;
 };
 
 type CapacitySample = Capacity & {
@@ -84,6 +86,8 @@ export function RepositoryCapacityPanel({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const repositoryCapacitySupported = repository.capacitySupported !== false && policy?.capacitySupported !== false;
+  const repositoryCapacityUnsupportedReason = String(repository.capacityUnsupportedReason ?? policy?.capacityUnsupportedReason ?? t("远程 rsync 仓库未关联 Agent；SSH 同步仍可正常使用。"));
 
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
@@ -136,22 +140,28 @@ export function RepositoryCapacityPanel({
       {loading && <p role="status">{t("正在读取容量健康状态…")}</p>}
       {error && <p className="error-message" role="alert">{error}</p>}
       {!loading && policy && form && <>
-        <div className="capacity-health-summary">
-          <CapacitySummary capacity={capacity} policy={policy} locale={locale} timeZone={timeZone} />
-          <div className="capacity-health-actions">
-            <button
-              className="primary-button"
-              type="button"
-              disabled={manualProbe.active || repository.status !== "ready"}
-              onClick={() => {
-                handledOperation.current = "";
-                void manualProbe.start(`/api/repositories/${encodeURIComponent(repositoryId)}/capacity`, {});
-              }}
-            >{t(manualProbe.active ? "正在检测容量…" : "立即检测容量")}</button>
-            <small>{t("手动检测会创建可追踪的持久化操作；后台检测不依赖此页面保持打开。")}</small>
+        {!repositoryCapacitySupported && <div className="operation-feedback" role="status">
+          <strong>{t("容量检测暂不可用")}</strong>
+          <p>{t(repositoryCapacityUnsupportedReason)}</p>
+        </div>}
+        {repositoryCapacitySupported && <>
+          <div className="capacity-health-summary">
+            <CapacitySummary capacity={capacity} policy={policy} locale={locale} timeZone={timeZone} />
+            <div className="capacity-health-actions">
+              <button
+                className="primary-button"
+                type="button"
+                disabled={manualProbe.active || repository.status !== "ready"}
+                onClick={() => {
+                  handledOperation.current = "";
+                  void manualProbe.start(`/api/repositories/${encodeURIComponent(repositoryId)}/capacity`, {});
+                }}
+              >{t(manualProbe.active ? "正在检测容量…" : "立即检测容量")}</button>
+              <small>{t("手动检测会创建可追踪的持久化操作；后台检测不依赖此页面保持打开。")}</small>
+            </div>
           </div>
-        </div>
-        <OperationFeedback operation={manualProbe} locale={locale} />
+          <OperationFeedback operation={manualProbe} locale={locale} />
+        </>}
 
         <form className="capacity-policy-form" noValidate onSubmit={(event) => {
           event.preventDefault();

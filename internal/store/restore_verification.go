@@ -44,9 +44,14 @@ func (s *Store) SaveRestoreVerificationPolicy(ctx context.Context, policy domain
 	if err := policy.Validate(); err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var engine, kind, targetJSON string
 	var taskEnabled int
-	if err := s.db.QueryRowContext(ctx, `SELECT engine,kind,execution_target_json,enabled FROM tasks WHERE id=?`, policy.TaskID).Scan(&engine, &kind, &targetJSON, &taskEnabled); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT engine,kind,execution_target_json,enabled FROM tasks WHERE id=?`, policy.TaskID).Scan(&engine, &kind, &targetJSON, &taskEnabled); err != nil {
 		return constraintError(err)
 	}
 	var target execution.Target
@@ -63,7 +68,7 @@ func (s *Store) SaveRestoreVerificationPolicy(ctx context.Context, policy domain
 	anchor := policy.ScheduleAnchorAt
 	var previousSchedule, previousTimezone, previousAnchor string
 	var previousEnabled int
-	err = s.db.QueryRowContext(ctx, `SELECT schedule_json,timezone,enabled,schedule_anchor_at FROM restore_verification_policies WHERE task_id=?`, policy.TaskID).Scan(&previousSchedule, &previousTimezone, &previousEnabled, &previousAnchor)
+	err = tx.QueryRowContext(ctx, `SELECT schedule_json,timezone,enabled,schedule_anchor_at FROM restore_verification_policies WHERE task_id=?`, policy.TaskID).Scan(&previousSchedule, &previousTimezone, &previousEnabled, &previousAnchor)
 	if errors.Is(err, sql.ErrNoRows) {
 		anchor = policy.UpdatedAt
 	} else if err != nil {
@@ -80,7 +85,7 @@ func (s *Store) SaveRestoreVerificationPolicy(ctx context.Context, policy domain
 	if anchor.IsZero() || policy.UpdatedAt.IsZero() {
 		return errors.New("restore verification policy requires an update time")
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO restore_verification_policies(
 			task_id,schedule_json,timezone,selection_path,maximum_bytes,maximum_success_age_hours,
 			enabled,catch_up_window_minutes,schedule_anchor_at,updated_at
@@ -91,7 +96,10 @@ func (s *Store) SaveRestoreVerificationPolicy(ctx context.Context, policy domain
 			enabled=excluded.enabled,catch_up_window_minutes=excluded.catch_up_window_minutes,
 			schedule_anchor_at=excluded.schedule_anchor_at,updated_at=excluded.updated_at
 	`, policy.TaskID, string(scheduleJSON), policy.Timezone, policy.SelectionPath, policy.MaximumBytes, policy.MaximumSuccessAgeHours, boolInt(policy.Enabled), policy.CatchUpWindowMinutes, formatTime(anchor), formatTime(policy.UpdatedAt))
-	return constraintError(err)
+	if err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RestoreVerificationPolicy(ctx context.Context, taskID string) (domain.RestoreVerificationPolicy, error) {
@@ -175,13 +183,24 @@ func (s *Store) CreateRestoreVerification(ctx context.Context, record RestoreVer
 	if record.CleanupStatus == "" {
 		record.CleanupStatus = "pending"
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=? AND repository_id=?`, record.TaskID, record.RepositoryID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO restore_verifications(
 			id,task_id,repository_id,snapshot_id,selection_path,trigger,status,started_at,finished_at,
 			file_count,byte_count,manifest_sha256,cleanup_status,error_summary
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, record.ID, record.TaskID, record.RepositoryID, record.SnapshotID, record.SelectionPath, record.Trigger, record.Status, formatTime(record.StartedAt), nil, 0, 0, "", record.CleanupStatus, "")
-	return constraintError(err)
+	if err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) FinishRestoreVerification(ctx context.Context, id string, finish RestoreVerificationFinish) error {

@@ -191,6 +191,9 @@ func TestOpenMigratesLegacySucceededRunAndOccurrenceStatuses(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 15, 4, 0, 0, 0, time.UTC)
 	taskID, _ := createScheduleFixture(t, s, now)
+	if err := s.CreatePlan(ctx, domain.Plan{ID: "legacy-plan", Name: "legacy plan", Schedule: domain.Schedule{Kind: domain.DailySchedule, TimeOfDay: "03:00"}, Timezone: "UTC", MaxParallel: 1, TaskIDs: []string{taskID}, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.StartRun(ctx, RunRecord{ID: "legacy-run", TaskID: taskID, Trigger: "manual", Status: "running", StartedAt: now}); err != nil {
 		t.Fatal(err)
 	}

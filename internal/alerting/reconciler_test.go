@@ -375,8 +375,21 @@ func createFinishedOccurrence(t *testing.T, database *store.Store, id, ownerKind
 	if status == "missed" {
 		mode = "missed"
 	}
+	targetIDs := []string{ownerID}
+	if ownerKind == "plan" {
+		plans, err := database.ListPlans(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, plan := range plans {
+			if plan.ID == ownerID {
+				targetIDs = append([]string(nil), plan.TaskIDs...)
+				break
+			}
+		}
+	}
 	finished := at.Add(time.Minute)
-	created, err := database.CreateScheduleOccurrence(context.Background(), store.ScheduleOccurrence{ID: id, OwnerKind: ownerKind, OwnerID: ownerID, ScheduledAt: at, ObservedAt: at, Mode: mode, Status: status, TargetIDs: []string{ownerID}, FinishedAt: &finished})
+	created, err := database.CreateScheduleOccurrence(context.Background(), store.ScheduleOccurrence{ID: id, OwnerKind: ownerKind, OwnerID: ownerID, ScheduledAt: at, ObservedAt: at, Mode: mode, Status: status, TargetIDs: targetIDs, FinishedAt: &finished})
 	if err != nil || !created {
 		t.Fatalf("create occurrence %s=%v err=%v", id, created, err)
 	}

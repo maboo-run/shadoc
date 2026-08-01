@@ -95,7 +95,7 @@ func TestAgentDrainBlocksNewWorkAndCountsAlreadyRunningAssignments(t *testing.T)
 	}
 }
 
-func TestAgentLeaseCompletionIsAcceptedExactlyOnce(t *testing.T) {
+func TestAgentLeaseCompletionIsIdempotentForTheSameResult(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -118,8 +118,147 @@ func TestAgentLeaseCompletionIsAcceptedExactlyOnce(t *testing.T) {
 	if err != nil || completed.Status != "partial" {
 		t.Fatalf("completed=%+v err=%v", completed, err)
 	}
-	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "partial", json.RawMessage(`{"status":"partial"}`), now); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("second completion error = %v", err)
+	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "partial", json.RawMessage(`{"status":"partial"}`), now.Add(time.Second)); err != nil {
+		t.Fatalf("identical completion retry: %v", err)
+	}
+	if err := s.CompleteAgentLease(ctx, "lease-1", "agent-1", "succeeded", json.RawMessage(`{"status":"succeeded"}`), now.Add(2*time.Second)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("conflicting completion error = %v", err)
+	}
+}
+
+func TestAgentLeaseProgressRenewsOnlyTheRunningAssignment(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	if err := s.SaveAgent(ctx, AgentRecord{ID: "agent-1", CertificateSerial: "1", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO tasks(id,name,engine,kind,execution_target_json,repository_id,source_json,retention_json,resources_json,exclusions_json,enabled,created_at,updated_at) VALUES('task-progress','task','rsync','rsync','{"kind":"agent","agentId":"agent-1"}',NULL,'{}','{}','{}','[]',1,?,?)`, formatTime(now), formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAgentLease(ctx, AgentLease{ID: "lease-progress", AgentID: "agent-1", TaskID: "task-progress", Engine: "rsync", Definition: json.RawMessage(`{}`), ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimAgentLease(ctx, "agent-1", now); err != nil {
+		t.Fatal(err)
+	}
+	progress := json.RawMessage(`{"phase":"transferring","bytesTransferred":4096,"totalBytes":8192,"percent":50}`)
+	renewedAt, expiresAt := now.Add(30*time.Second), now.Add(90*time.Second)
+	if err := s.UpdateAgentLeaseProgress(ctx, "lease-progress", "agent-1", progress, renewedAt, expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := s.AgentLeaseStatus(ctx, "lease-progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.RenewedAt == nil || !lease.RenewedAt.Equal(renewedAt) || !lease.ExpiresAt.Equal(expiresAt) || string(lease.Progress) != string(progress) {
+		t.Fatalf("renewed lease=%+v", lease)
+	}
+	active, err := s.ActiveAgentLeaseForTask(ctx, "task-progress")
+	if err != nil || active.ID != "lease-progress" || string(active.Progress) != string(progress) {
+		t.Fatalf("active task lease=%+v err=%v", active, err)
+	}
+	if err := s.UpdateAgentLeaseProgress(ctx, "lease-progress", "agent-other", progress, renewedAt, expiresAt); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("wrong Agent renewed assignment: %v", err)
+	}
+	if err := s.CompleteAgentLease(ctx, "lease-progress", "agent-1", "succeeded", json.RawMessage(`{"status":"succeeded"}`), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAgentLeaseProgress(ctx, "lease-progress", "agent-1", progress, now.Add(2*time.Minute), now.Add(3*time.Minute)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("completed assignment renewed: %v", err)
+	}
+}
+
+func TestOpenAddsRenewableProgressToLegacyAgentLeases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-agent-lease.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE agent_leases (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  engine TEXT NOT NULL,
+  definition_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  expires_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  completed_at TEXT,
+  result_json TEXT NOT NULL DEFAULT '{}'
+);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer storage.Close()
+	rows, err := storage.db.Query(`PRAGMA table_info(agent_leases)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if !columns["renewed_at"] || !columns["progress_json"] {
+		t.Fatalf("migrated columns=%v", columns)
+	}
+}
+
+func TestOpenAddsRenewalsToLegacyAgentRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-agent-requests.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE agent_filesystem_requests (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, definition_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', result_json TEXT NOT NULL DEFAULT '{}', expires_at TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT);
+CREATE TABLE agent_restore_requests (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, definition_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', result_json TEXT NOT NULL DEFAULT '{}', expires_at TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer storage.Close()
+	for _, table := range []string{"agent_filesystem_requests", "agent_restore_requests"} {
+		rows, err := storage.db.Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			found = found || name == "renewed_at"
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			t.Fatalf("%s missing renewed_at", table)
+		}
 	}
 }
 
@@ -138,8 +277,16 @@ func TestAgentFilesystemRequestLifecycle(t *testing.T) {
 	if err != nil || claimed.ID != request.ID || claimed.Status != "running" {
 		t.Fatalf("claimed=%+v err=%v", claimed, err)
 	}
+	renewedAt, renewedExpiry := now.Add(10*time.Second), now.Add(2*time.Minute)
+	if err := s.RenewAgentFilesystemRequest(ctx, request.ID, "agent-1", renewedAt, renewedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	renewed, err := s.AgentFilesystemRequestStatus(ctx, request.ID)
+	if err != nil || renewed.RenewedAt == nil || !renewed.RenewedAt.Equal(renewedAt) || !renewed.ExpiresAt.Equal(renewedExpiry) {
+		t.Fatalf("renewed filesystem request=%+v err=%v", renewed, err)
+	}
 	result := json.RawMessage(`{"status":"succeeded","summary":{"path":"/srv","entries":[]}}`)
-	if err := s.CompleteAgentFilesystemRequest(ctx, request.ID, "agent-1", "succeeded", result, now); err != nil {
+	if err := s.CompleteAgentFilesystemRequest(ctx, request.ID, "agent-1", "succeeded", result, now.Add(20*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := s.AgentFilesystemRequestStatus(ctx, request.ID)
@@ -178,8 +325,16 @@ func TestAgentRestoreRequestLifecycle(t *testing.T) {
 	if err != nil || claimed.Status != "running" {
 		t.Fatalf("claimed=%+v err=%v", claimed, err)
 	}
+	renewedAt, renewedExpiry := now.Add(10*time.Second), now.Add(2*time.Minute)
+	if err := s.RenewAgentRestoreRequest(ctx, request.ID, request.AgentID, renewedAt, renewedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	renewed, err := s.AgentRestoreRequestStatus(ctx, request.ID)
+	if err != nil || renewed.RenewedAt == nil || !renewed.RenewedAt.Equal(renewedAt) || !renewed.ExpiresAt.Equal(renewedExpiry) {
+		t.Fatalf("renewed restore request=%+v err=%v", renewed, err)
+	}
 	result := json.RawMessage(`{"version":1,"assignmentId":"restore-1","agentId":"agent-restore","status":"succeeded"}`)
-	if err := s.CompleteAgentRestoreRequest(ctx, request.ID, request.AgentID, "succeeded", result, now); err != nil {
+	if err := s.CompleteAgentRestoreRequest(ctx, request.ID, request.AgentID, "succeeded", result, now.Add(20*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := s.AgentRestoreRequestStatus(ctx, request.ID)
@@ -243,6 +398,79 @@ func TestAgentRemoteHostBindingReplacesThePriorAgentForTheHost(t *testing.T) {
 	}
 	if first.Valid || second.String != "host-1" {
 		t.Fatalf("bindings agent-1=%v agent-2=%v", first, second)
+	}
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agents[1].ManagedInstallation {
+		t.Fatal("manual remote-host association was incorrectly marked as a managed installation")
+	}
+}
+
+func TestManagedAgentRemoteHostBindingMarksOnlyDeployedAgentAsManaged(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.SaveSecret(ctx, "key-1", "ssh-private-key", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateRemoteHost(ctx, domain.RemoteHost{ID: "host-1", Name: "Host 1", Host: "host-1", Port: 22, Username: "backup", CreatedAt: now, UpdatedAt: now}, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgent(ctx, AgentRecord{ID: "agent-1", CertificateSerial: "serial-1", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindManagedAgentRemoteHost(ctx, "agent-1", "host-1"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].RemoteHostID != "host-1" || !agents[0].ManagedInstallation {
+		t.Fatalf("agent=%+v", agents)
+	}
+}
+
+func TestEnrollmentResetsManagedHostOwnershipUntilServiceDeploysAgain(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	if err := s.SaveSecret(ctx, "key-1", "ssh-private-key", []byte("cipher"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateRemoteHost(ctx, domain.RemoteHost{ID: "host-1", Name: "Host 1", Host: "host-1", Port: 22, Username: "backup", CreatedAt: now, UpdatedAt: now}, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAgent(ctx, AgentRecord{ID: "agent-1", CertificateSerial: "serial-1", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindManagedAgentRemoteHost(ctx, "agent-1", "host-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteAgentUninstall(ctx, "agent-1", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollAgent(ctx, AgentRecord{ID: "agent-1", CertificateSerial: "serial-2", CreatedAt: now.Add(2 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := s.ListAgents(ctx)
+	if err != nil || len(agents) != 1 {
+		t.Fatalf("agents=%+v err=%v", agents, err)
+	}
+	if agents[0].RemoteHostID != "" || agents[0].ManagedInstallation {
+		t.Fatalf("manual reenrollment retained managed host authority: %+v", agents[0])
+	}
+	if err := s.ensureAgentManagedInstallation(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureAgentRemoteHosts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = s.ListAgents(ctx)
+	if err != nil || len(agents) != 1 || agents[0].RemoteHostID != "" || agents[0].ManagedInstallation {
+		t.Fatalf("reopen migration restored stale managed authority: agents=%+v err=%v", agents, err)
 	}
 }
 
@@ -340,6 +568,13 @@ INSERT INTO operations VALUES ('deploy-1','agent_deploy','admin','','','','agent
 	}
 	if hostID.String != "host-1" {
 		t.Fatalf("backfilled remote host=%v", hostID)
+	}
+	var managed bool
+	if err := s.db.QueryRow(`SELECT managed_installation FROM agents WHERE id='agent-1'`).Scan(&managed); err != nil {
+		t.Fatal(err)
+	}
+	if !managed {
+		t.Fatal("historically deployed Agent was not marked as managed")
 	}
 	var stoppedAt, uninstalledAt sql.NullString
 	if err := s.db.QueryRow(`SELECT stopped_at,uninstalled_at FROM agents WHERE id='agent-1'`).Scan(&stoppedAt, &uninstalledAt); err != nil {

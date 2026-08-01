@@ -37,14 +37,63 @@ func TestAgentsExposeTheirBoundRemoteHost(t *testing.T) {
 		t.Fatalf("list agents status=%d body=%s", response.Code, response.Body.String())
 	}
 	var agents []struct {
-		ID           string `json:"id"`
-		RemoteHostID string `json:"remoteHostId"`
+		ID                  string `json:"id"`
+		RemoteHostID        string `json:"remoteHostId"`
+		ManagedInstallation bool   `json:"managedInstallation"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &agents); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents) != 1 || agents[0].ID != "agent-1" || agents[0].RemoteHostID != "host-1" {
+	if len(agents) != 1 || agents[0].ID != "agent-1" || agents[0].RemoteHostID != "host-1" || agents[0].ManagedInstallation {
 		t.Fatalf("agents=%+v", agents)
+	}
+}
+
+func TestManualAgentAssociationKeepsDeploymentLifecycleSeparate(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	resources := srv.store.(*store.Store)
+	now := time.Now().UTC()
+	for _, host := range []domain.RemoteHost{
+		{ID: "host-manual", Name: "Manual host", Host: "manual.example", Port: 22, Username: "backup", CreatedAt: now, UpdatedAt: now},
+		{ID: "host-managed", Name: "Managed host", Host: "managed.example", Port: 22, Username: "backup", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := resources.SaveSecret(t.Context(), "key-"+host.ID, "ssh-private-key", []byte("cipher"), now); err != nil {
+			t.Fatal(err)
+		}
+		if err := resources.CreateRemoteHost(t.Context(), host, "key-"+host.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, agent := range []store.AgentRecord{
+		{ID: "manual-agent", CertificateSerial: "manual-serial", Status: "online", LastHeartbeatAt: &now, CreatedAt: now},
+		{ID: "managed-agent", CertificateSerial: "managed-serial", Status: "online", LastHeartbeatAt: &now, CreatedAt: now},
+	} {
+		if err := resources.SaveAgent(t.Context(), agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := resources.BindManagedAgentRemoteHost(t.Context(), "managed-agent", "host-managed"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestJSON(t, srv, http.MethodPut, "/api/agents/manual-agent/remote-host", map[string]string{"remoteHostId": "host-manual"}, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("association status=%d body=%s", response.Code, response.Body.String())
+	}
+	agents, err := resources.ListAgents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]store.AgentRecord{}
+	for _, agent := range agents {
+		byID[agent.ID] = agent
+	}
+	if agent := byID["manual-agent"]; agent.RemoteHostID != "host-manual" || agent.ManagedInstallation {
+		t.Fatalf("manual Agent association=%+v", agent)
+	}
+	if response := requestJSON(t, srv, http.MethodPut, "/api/agents/manual-agent/remote-host", map[string]string{"remoteHostId": "host-managed"}, cookie); response.Code != http.StatusConflict {
+		t.Fatalf("managed host takeover status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -97,7 +146,10 @@ func TestAgentFilesystemBrowseAndCreateDirectory(t *testing.T) {
 	cookie := sessionCookie(t, setup)
 	cookie.Raw = setup.Header().Get("X-CSRF-Token")
 	resources := srv.store.(*store.Store)
-	now := time.Now().UTC()
+	// A heartbeat inside the shared two-minute window must be usable by both
+	// the Agent card and this filesystem operation. Previously this endpoint
+	// used a separate one-minute cut-off and disagreed with the UI.
+	now := time.Now().UTC().Add(-90 * time.Second)
 	if err := resources.SaveAgent(t.Context(), store.AgentRecord{ID: "agent-1", CertificateSerial: "1", Capabilities: []string{"filesystem-browse", "filesystem-create-directory", "path-style:posix"}, Status: "online", LastHeartbeatAt: &now, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}

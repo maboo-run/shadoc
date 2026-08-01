@@ -16,6 +16,25 @@ func TestAssignmentRejectsExpiredOrAgentMismatchedWork(t *testing.T) {
 	}
 }
 
+func TestAssignmentProgressAcceptsBoundedStructuredMetrics(t *testing.T) {
+	progress := AssignmentProgress{
+		Version: Version, AssignmentID: "lease-1", AgentID: "agent-1", Sequence: 3, Phase: "transferring",
+		BytesTransferred: 4096, TotalBytes: 8192, FilesTransferred: 4, FilesTotal: 8, RateBytesPerSecond: 1024, ETASeconds: 4,
+	}
+	if err := progress.ValidateFor("agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	progress.RateBytesPerSecond = -1
+	if err := progress.ValidateFor("agent-1"); err == nil {
+		t.Fatal("negative progress metric accepted")
+	}
+	progress.RateBytesPerSecond = 1
+	progress.Phase = "arbitrary"
+	if err := progress.ValidateFor("agent-1"); err == nil {
+		t.Fatal("unbounded progress phase accepted")
+	}
+}
+
 func TestHeartbeatRequiresBoundedStructuredRuntimeMetadata(t *testing.T) {
 	valid := Heartbeat{
 		Version: Version, AgentID: "agent-a", Capabilities: []string{"restic", "filesystem-browse"},

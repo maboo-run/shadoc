@@ -63,6 +63,13 @@ import (
 var applicationVersion = "0.1.0-dev"
 
 func main() {
+	if handled, err := handleVersionCommand(os.Args[1:], os.Stdout, applicationVersion); handled {
+		if err != nil {
+			slog.Error("Shadoc version command", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := runManagedUpdateCommand(); handled {
 		if err != nil {
 			slog.Error("managed application update", "error", err)
@@ -200,12 +207,7 @@ func runLifecycleCommand() (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	var cfg config.Config
-	if scope == systemServiceScope {
-		cfg, err = config.LoadSystem(os.Getenv, runtime.GOOS)
-	} else {
-		cfg, err = config.Load(os.Getenv)
-	}
+	cfg, err := lifecycleConfigForScope(scope, os.Args[1], runtime.GOOS, os.Getenv, serviceinstall.ExistingSystemServiceListen)
 	if err != nil {
 		return true, err
 	}
@@ -246,6 +248,44 @@ func runLifecycleCommand() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	return handleLifecycleCommand(ctx, os.Args[1:], os.Stdin, os.Stdout, lifecycle, current)
+}
+
+type existingSystemServiceListen func() (string, bool, error)
+
+// lifecycleConfigForScope preserves an existing verified root system listener
+// during install/update when no operator explicitly supplies SHADOC_LISTEN.
+// A systemd unit owns the effective listener, so silently falling back to the
+// default loopback address would make a working LAN deployment disappear on
+// the next binary replacement.
+func lifecycleConfigForScope(scope serviceScope, command, goos string, getenv func(string) string, existing existingSystemServiceListen) (config.Config, error) {
+	if scope != systemServiceScope {
+		return config.Load(getenv)
+	}
+	cfg, err := config.LoadSystem(getenv, goos)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if (command != "install-app" && command != "update-app") || configuredListen(getenv) != "" {
+		return cfg, nil
+	}
+	if existing == nil {
+		return config.Config{}, errors.New("system service listener reader is unavailable")
+	}
+	listen, found, err := existing()
+	if err != nil {
+		return config.Config{}, fmt.Errorf("read existing system service listener: %w", err)
+	}
+	if found {
+		cfg.Listen = listen
+	}
+	return cfg, nil
+}
+
+func configuredListen(getenv func(string) string) string {
+	if value := getenv("SHADOC_LISTEN"); value != "" {
+		return value
+	}
+	return getenv("RESTIC_CONTROL_LISTEN")
 }
 
 func serviceArgumentsForScope(scope serviceScope, listen, dataDir string) []string {

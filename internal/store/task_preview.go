@@ -30,10 +30,21 @@ func (s *Store) CreateTaskScopePreview(ctx context.Context, preview TaskScopePre
 	if err != nil {
 		return err
 	}
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM task_scope_previews WHERE expires_at<?`, formatTime(preview.CreatedAt.Add(-24*time.Hour)))
-	_, err = s.db.ExecContext(ctx, `INSERT INTO task_scope_previews(id,task_id,fingerprint,summary_json,requires_delete_confirmation,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM tasks WHERE id=?`, preview.TaskID); err != nil {
+		return err
+	}
+	_, _ = tx.ExecContext(ctx, `DELETE FROM task_scope_previews WHERE expires_at<?`, formatTime(preview.CreatedAt.Add(-24*time.Hour)))
+	_, err = tx.ExecContext(ctx, `INSERT INTO task_scope_previews(id,task_id,fingerprint,summary_json,requires_delete_confirmation,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
 		preview.ID, preview.TaskID, preview.Fingerprint, string(summary), boolInt(preview.RequiresDeleteConfirmation), formatTime(preview.CreatedAt), formatTime(preview.ExpiresAt))
-	return constraintError(err)
+	if err != nil {
+		return constraintError(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) TaskScopePreview(ctx context.Context, id string) (TaskScopePreview, error) {

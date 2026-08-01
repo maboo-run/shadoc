@@ -110,7 +110,7 @@ func TestServiceClearsTransientAuthorityAndRuntimeObservations(t *testing.T) {
 		Repositories: []store.ControlPlaneRepository{{Repository: repository, PasswordSecretID: "repository-secret"}},
 		RemoteHosts:  []store.ControlPlaneRemoteHost{}, DatabaseConnections: []store.ControlPlaneDatabaseConnection{}, Tasks: []domain.Task{task},
 		Plans: []domain.Plan{}, MaintenancePolicies: []domain.MaintenancePolicy{}, RestoreVerificationPolicies: []domain.RestoreVerificationPolicy{restoreVerification}, ScheduleWatermarks: []store.ControlPlaneScheduleWatermark{},
-		Agents: []store.AgentRecord{{ID: "agent-a", CertificateSerial: "serial-a", Status: "online", LastHeartbeatAt: &now, CreatedAt: now}}, Audits: []store.AuditRecord{},
+		Agents: []store.AgentRecord{{ID: "agent-a", ManagedInstallation: true, CertificateSerial: "serial-a", Status: "online", LastHeartbeatAt: &now, CreatedAt: now}}, Audits: []store.AuditRecord{},
 	}
 	reader := &secretReaderStub{values: map[string][]byte{"repository-secret": []byte("repository-password")}}
 	ca := validAgentCA(t, now)
@@ -130,7 +130,7 @@ func TestServiceClearsTransientAuthorityAndRuntimeObservations(t *testing.T) {
 	if len(opened.Manifest.RestoreVerificationPolicies) != 1 || opened.Manifest.RestoreVerificationPolicies[0].TaskID != task.ID {
 		t.Fatalf("restore verification policy missing: %+v", opened.Manifest.RestoreVerificationPolicies)
 	}
-	if len(opened.Manifest.Agents) != 1 || opened.Manifest.Agents[0].Status != "online" {
+	if len(opened.Manifest.Agents) != 1 || !opened.Manifest.Agents[0].ManagedInstallation || opened.Manifest.Agents[0].Status != "online" {
 		t.Fatalf("Agent identity missing: %+v", opened.Manifest.Agents)
 	}
 	manifestJSON, _ := json.Marshal(opened.Manifest)

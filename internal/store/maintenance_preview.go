@@ -23,9 +23,19 @@ type MaintenancePreview struct {
 
 func (s *Store) CreateMaintenancePreview(ctx context.Context, preview MaintenancePreview) error {
 	retention, _ := json.Marshal(preview.Retention)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO maintenance_previews(id,repository_id,retention_json,keep_count,remove_count,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
-		preview.ID, preview.RepositoryID, string(retention), preview.KeepCount, preview.RemoveCount, formatTime(preview.CreatedAt), formatTime(preview.ExpiresAt))
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireLogicalReference(ctx, tx, `SELECT 1 FROM repositories WHERE id=?`, preview.RepositoryID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO maintenance_previews(id,repository_id,retention_json,keep_count,remove_count,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`,
+		preview.ID, preview.RepositoryID, string(retention), preview.KeepCount, preview.RemoveCount, formatTime(preview.CreatedAt), formatTime(preview.ExpiresAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) MaintenancePreview(ctx context.Context, id string) (MaintenancePreview, error) {

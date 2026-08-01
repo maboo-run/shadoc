@@ -135,6 +135,7 @@ export type AppAPI = {
   saveRepositoryCapacityPolicy(id: string, payload: Record<string, unknown>): Promise<unknown>;
   saveRestoreVerificationPolicy(taskId: string, payload: Record<string, unknown>): Promise<unknown>;
   deleteRestoreVerificationPolicy(taskId: string): Promise<void>;
+  bindAgentRemoteHost(agentId: string, remoteHostId: string): Promise<unknown>;
   action(path: string, payload?: Record<string, unknown>): Promise<unknown>;
 };
 
@@ -801,6 +802,8 @@ function AgentPage({
   const [enrollment, setEnrollment] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState("");
   const [actionTarget, setActionTarget] = useState<{ agent: Record<string, unknown>; mode: "uninstall" | "revoke" } | null>(null);
+  const [agentHostBindingTarget, setAgentHostBindingTarget] = useState<Record<string, unknown> | null>(null);
+  const [bindingAgentHost, setBindingAgentHost] = useState(false);
   const [agentDeletePreview, setAgentDeletePreview] = useState<Record<string, unknown> | null>(null);
   const [deletingAgent, setDeletingAgent] = useState(false);
   const [upgradeTarget, setUpgradeTarget] = useState<Record<string, unknown> | null>(null);
@@ -1012,6 +1015,19 @@ function AgentPage({
       setRevoking(false);
     }
   }
+  async function confirmAgentHostBinding(agent: Record<string, unknown>, remoteHostID: string) {
+    setBindingAgentHost(true);
+    try {
+      await api.bindAgentRemoteHost(String(agent.id), remoteHostID);
+      setAgentHostBindingTarget(null);
+      setMessage(t("Agent 已关联远程主机；该 Agent 仍为手动安装"));
+      await reload();
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : t("无法关联 Agent 与远程主机"));
+    } finally {
+      setBindingAgentHost(false);
+    }
+  }
   async function beginAgentDelete(agent: Record<string, unknown>) {
     setMessage("");
     const id = encodeURIComponent(String(agent.id));
@@ -1133,7 +1149,7 @@ function AgentPage({
       timeZone={timeZone}
       currentServiceURL={String(agentService?.serviceUrl ?? "")}
       latestResticVersion={latestResticVersion}
-      busy={revoking || deletingAgent || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active || heartbeatProbeStarting || heartbeatProbe.active}
+      busy={bindingAgentHost || revoking || deletingAgent || deployment.active || uninstall.active || upgrade.active || resticInstall.active || toolProbe.active || heartbeatProbeStarting || heartbeatProbe.active}
       upgradeOperation={upgradeOperationAgentID ? { agentId: upgradeOperationAgentID, operation: upgrade } : undefined}
       toolProbeOperation={toolProbeOperationAgentID ? { agentId: toolProbeOperationAgentID, operation: toolProbe } : undefined}
       heartbeatOperation={heartbeatOperationAgentID ? { agentId: heartbeatOperationAgentID, operation: heartbeatProbe, starting: heartbeatProbeStarting } : undefined}
@@ -1150,16 +1166,53 @@ function AgentPage({
       onInstallRestic={setResticTarget}
       onReprobeTools={setToolProbeTarget}
       onProbeHeartbeat={(agent) => void probeAgentHeartbeat(agent)}
+      onBindRemoteHost={setAgentHostBindingTarget}
       onRedeploy={openDeployment}
       onRemove={(agent, mode) => setActionTarget({ agent, mode })}
       onDelete={(agent) => void beginAgentDelete(agent)}
     />
+    {agentHostBindingTarget && <AgentHostBindingDialog agent={agentHostBindingTarget} agents={data} remoteHosts={remoteHosts} active={bindingAgentHost} locale={locale} onClose={() => setAgentHostBindingTarget(null)} onConfirm={(remoteHostID) => void confirmAgentHostBinding(agentHostBindingTarget, remoteHostID)} />}
     {actionTarget && <AgentActionDialog agent={actionTarget.agent} managed={actionTarget.mode === "uninstall"} active={revoking || uninstall.active} locale={locale} onClose={() => setActionTarget(null)} onConfirm={() => void confirmAgentAction(actionTarget)} />}
     {agentDeletePreview && <AgentDeleteDialog preview={agentDeletePreview} deleting={deletingAgent} locale={locale} onClose={() => setAgentDeletePreview(null)} onConfirm={() => void confirmAgentDelete()} />}
     {upgradeTarget && <AgentUpgradeDialog agent={upgradeTarget} active={upgrade.active} locale={locale} onClose={() => setUpgradeTarget(null)} onConfirm={() => void confirmAgentUpgrade(upgradeTarget)} />}
     {resticTarget && <AgentResticInstallDialog agent={resticTarget} targetVersion={latestResticVersion ?? ""} active={resticInstall.active} locale={locale} onClose={() => setResticTarget(null)} onConfirm={() => void confirmAgentResticInstall(resticTarget)} />}
     {toolProbeTarget && <AgentToolProbeDialog agent={toolProbeTarget} active={toolProbe.active} locale={locale} onClose={() => setToolProbeTarget(null)} onConfirm={() => void confirmAgentToolProbe(toolProbeTarget)} />}
   </>;
+}
+
+function AgentHostBindingDialog({ agent, agents, remoteHosts, active, locale, onClose, onConfirm }: { agent: Record<string, unknown>; agents: Array<Record<string, unknown>>; remoteHosts: Array<Record<string, unknown>>; active: boolean; locale: Locale; onClose(): void; onConfirm(remoteHostID: string): void }) {
+  const t = (source: string) => translate(locale, source);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  const currentHostID = String(agent.remoteHostId ?? "");
+  useModalFocus(dialogRef, () => { if (!active) onClose(); });
+  return <ModalPortal>
+    <form ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="agent-host-binding-title" onSubmit={(event) => {
+      event.preventDefault();
+      const remoteHostID = String(new FormData(event.currentTarget).get("remoteHostId") ?? "");
+      if (remoteHostID) onConfirm(remoteHostID);
+    }}>
+      <header><div><h2 id="agent-host-binding-title">{t("关联 Agent 与远程主机")}</h2><p>{t("仅当该 Agent 确实运行在所选主机上时才可关联。关联仅用于 rsync 的目录浏览和容量检测，不会将手动安装转换为托管安装，也不会授予远程升级或卸载权限。")}</p></div></header>
+      <div className="form-grid">
+        <label className="full-field">{t("远程主机")}
+          <select name="remoteHostId" required defaultValue={currentHostID} disabled={active}>
+            <option value="" disabled>{t("请选择远程主机")}</option>
+            {remoteHosts.map((host) => {
+              const hostID = String(host.id ?? "");
+              const occupant = agents.find((candidate) => String(candidate.id ?? "") !== String(agent.id ?? "") && String(candidate.remoteHostId ?? "") === hostID);
+              const occupiedByManagedAgent = occupant?.managedInstallation === true;
+              const label = `${String(host.name ?? hostID)} · ${String(host.username ?? "")}@${String(host.host ?? "")}`;
+              return <option key={hostID} value={hostID} disabled={occupiedByManagedAgent}>{occupiedByManagedAgent ? `${label} (${t("已关联托管 Agent")})` : label}</option>;
+            })}
+          </select>
+        </label>
+        <p className="field-hint full-field">{t("同一远程主机只能关联一个 Agent。选择已关联手动 Agent 的主机会转移该关联；已关联托管 Agent 的主机不可在此修改。")}</p>
+      </div>
+      <footer>
+        <button className="secondary-button" type="button" disabled={active} onClick={onClose}>{t("取消")}</button>
+        <button className="primary-button" type="submit" disabled={active}>{t(active ? "正在关联…" : "确认关联")}</button>
+      </footer>
+    </form>
+  </ModalPortal>;
 }
 
 function AgentToolProbeDialog({ agent, active, locale, onClose, onConfirm }: { agent: Record<string, unknown>; active: boolean; locale: Locale; onClose(): void; onConfirm(): void }) {
@@ -1205,14 +1258,15 @@ function AgentResticInstallDialog({ agent, targetVersion, active, locale, onClos
 function AgentUpgradeDialog({ agent, active, locale, onClose, onConfirm }: { agent: Record<string, unknown>; active: boolean; locale: Locale; onClose(): void; onConfirm(): void }) {
   const t = (source: string) => translate(locale, source);
   const dialogRef = useRef<HTMLFormElement>(null);
+  const reinstall = agent.upgradeAvailable !== true;
   useModalFocus(dialogRef, () => { if (!active) onClose(); });
   return <ModalPortal>
     <form ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="agent-upgrade-title" onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
-      <header><div><h2 id="agent-upgrade-title">{t("确认升级 Agent")}</h2><p>{t("升级会短暂停止该节点领取新任务，并验证新版本心跳后才提交。")}</p></div></header>
+      <header><div><h2 id="agent-upgrade-title">{t(reinstall ? "确认重新安装 Agent" : "确认升级 Agent")}</h2><p>{t(reinstall ? "重新安装会暂存并校验当前版本，排空任务后原子替换 Agent。" : "升级会短暂停止该节点领取新任务，并验证新版本心跳后才提交。")}</p></div></header>
       <div className="dialog-body">
         <dl className="agent-upgrade-summary">
           <div><dt>Agent ID</dt><dd><code>{String(agent.id)}</code></dd></div>
-          <div><dt>{t("版本变化")}</dt><dd><code>{String(agent.buildVersion || t("未知版本"))}</code> → <code>{String(agent.targetVersion)}</code></dd></div>
+          <div><dt>{t(reinstall ? "目标版本" : "版本变化")}</dt><dd>{reinstall ? <code>{String(agent.targetVersion)}</code> : <><code>{String(agent.buildVersion || t("未知版本"))}</code> → <code>{String(agent.targetVersion)}</code></>}</dd></div>
         </dl>
         <div className="confirmation-panel"><strong>{t("升级期间的保护措施")}</strong><ul>
           <li>{t("先阻止新任务并等待当前任务结束，不会中断正在写入的备份。")}</li>
@@ -1220,7 +1274,7 @@ function AgentUpgradeDialog({ agent, active, locale, onClose, onConfirm }: { age
           <li>{t("目标版本或协议心跳未通过时自动恢复旧程序；取消操作也会触发恢复。")}</li>
         </ul></div>
       </div>
-      <footer><button className="secondary-button" type="button" disabled={active} onClick={onClose}>{t("取消")}</button><button className="primary-button" type="submit" disabled={active}>{t("开始托管升级")}</button></footer>
+      <footer><button className="secondary-button" type="button" disabled={active} onClick={onClose}>{t("取消")}</button><button className="primary-button" type="submit" disabled={active}>{t(reinstall ? "开始重新安装" : "开始托管升级")}</button></footer>
     </form>
   </ModalPortal>;
 }
@@ -1327,7 +1381,9 @@ function ManagementPage({
   timeZone: string;
 }) {
   const t = (source: string) => translate(locale, source);
-  const [dialog, setDialog] = useState(false);
+  const [dialogOwner, setDialogOwner] = useState("");
+  const dialog = dialogOwner === name;
+  const setDialog = (open: boolean) => setDialogOwner(open ? name : "");
   const [message, setMessage] = useState("");
   const [editing, setEditing] = useState<Record<string, unknown> | null>(null);
   const [rotateRepository, setRotateRepository] = useState("");
@@ -1346,10 +1402,26 @@ function ManagementPage({
   const handledTaskRun = useRef("");
   const [runningTaskId, setRunningTaskId] = useState("");
   const runningTaskGuard = useRef("");
+  const persistedTaskRunItem = name === "备份任务"
+    ? data.find((item) => {
+      const operation = item.activeOperation as Record<string, unknown> | undefined;
+      return operation && ["queued", "running"].includes(String(operation.status ?? ""));
+    })
+    : undefined;
+  const persistedTaskRun = persistedTaskRunItem?.activeOperation as Record<string, unknown> | undefined;
+  const persistedTaskRunId = String(persistedTaskRun?.id ?? "");
+  const persistedTaskId = persistedTaskRunId ? String(persistedTaskRunItem?.id ?? "") : "";
+  const activeTaskId = runningTaskId || persistedTaskId;
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
   useModalFocus(generatedSSHAccessRef, () => setGeneratedSSHAccess(null), Boolean(generatedSSHAccess));
-  useEffect(() => setMessage(""), [name]);
+  useEffect(() => {
+    setMessage("");
+    if (dialogOwner && dialogOwner !== name) {
+      setDialogOwner("");
+      setEditing(null);
+    }
+  }, [dialogOwner, name]);
   useEffect(() => {
     const operation = initialization.operation;
     if (!operation || !initializingRepositoryId || !["success", "partial", "failed", "cancelled", "cleanup_required"].includes(operation.status)) return;
@@ -1400,14 +1472,28 @@ function ManagementPage({
     setRepositoryConnectionMode("");
   }, [repositoryConnection.error, repositoryConnectionMode]);
   useEffect(() => {
+    if (!persistedTaskRunId || taskRun.operation?.id === persistedTaskRunId) return;
+    handledTaskRun.current = "";
+    runningTaskGuard.current = persistedTaskId;
+    setRunningTaskId(persistedTaskId);
+    taskRun.adopt({
+      operationId: persistedTaskRunId,
+      kind: String(persistedTaskRun?.kind ?? ""),
+      status: String(persistedTaskRun?.status ?? "running"),
+      stage: String(persistedTaskRun?.stage ?? "running"),
+    });
+  }, [persistedTaskId, persistedTaskRun?.kind, persistedTaskRun?.stage, persistedTaskRun?.status, persistedTaskRunId, taskRun.operation?.id]);
+  useEffect(() => {
     const operation = taskRun.operation;
     if (!operation || !runningTaskId || !["success", "partial", "failed", "cancelled", "cleanup_required"].includes(operation.status)) return;
     const handledKey = `${operation.id}:${operation.status}`;
     if (handledTaskRun.current === handledKey) return;
     handledTaskRun.current = handledKey;
     setMessage(operation.status === "success"
-      ? translate(locale, "备份任务运行完成")
-      : operation.errorSummary || translate(locale, operation.status === "cancelled" ? "操作已取消" : "备份任务运行失败"));
+      ? translate(locale, "执行完成")
+      : operation.status === "partial"
+        ? translate(locale, "备份任务部分成功")
+        : operation.errorSummary || translate(locale, operation.status === "cancelled" ? "操作已取消" : "备份任务运行失败"));
     setRunningTaskId("");
     runningTaskGuard.current = "";
     void reloadRef.current();
@@ -1532,10 +1618,10 @@ function ManagementPage({
   }
   function runTask(id: string) {
 	if (runningTaskGuard.current || taskRun.active) return;
-	runningTaskGuard.current = id;
+    runningTaskGuard.current = id;
     handledTaskRun.current = "";
     setRunningTaskId(id);
-    setMessage(t("备份任务已开始"));
+    setMessage(t("正在执行中"));
     void taskRun.start(`/api/tasks/${encodeURIComponent(id)}/run`, {});
   }
   async function confirmDelete() {
@@ -1577,6 +1663,7 @@ function ManagementPage({
       </header>
       <Toast message={message} locale={locale} onClose={() => setMessage("")} />
       {name === "备份仓库" && <OperationFeedback operation={repositoryConnection} locale={locale} hideTerminal />}
+      {name === "备份任务" && <OperationFeedback operation={taskRun} locale={locale} compact persistTerminal autoDismissSuccess dismissibleTerminal />}
       <section className="content-section">
         <div className="table-frame">
           <table>
@@ -1618,7 +1705,8 @@ function ManagementPage({
                         <RepositoryCapacityCell
                           value={item.capacity}
                           enabled={item.status === "ready"}
-                          unsupported={item.kind === "s3"}
+                          unsupported={item.kind === "s3" || item.capacitySupported === false}
+                          unsupportedReason={item.kind === "s3" ? t("对象存储容量不适用") : String(item.capacityUnsupportedReason ?? t("远程 rsync 仓库未关联 Agent；SSH 同步仍可正常使用。"))}
                           repositoryId={String(item.id ?? "")}
                           api={api}
                           locale={locale}
@@ -1654,8 +1742,8 @@ function ManagementPage({
                       onInitialize={() => initializeRepository(String(item.id ?? ""))}
                       repositoryConnectionBusy={repositoryConnection.active}
                       onVerifyExisting={() => void verifyExistingRepository(String(item.id ?? ""))}
-                      taskRunBusy={taskRun.active || Boolean(runningTaskId)}
-                      taskRunActive={String(item.id ?? "") === runningTaskId}
+                      taskRunBusy={taskRun.active || Boolean(activeTaskId)}
+                      taskRunActive={String(item.id ?? "") === activeTaskId}
                       onRun={() => runTask(String(item.id ?? ""))}
                       onOpenTaskHealth={() => void onNavigate("备份任务", `?task=${encodeURIComponent(String(item.id ?? ""))}&view=health`)}
                       onOpenTaskScope={() => void onNavigate("备份任务", `?task=${encodeURIComponent(String(item.id ?? ""))}&view=scope`)}
@@ -1675,7 +1763,7 @@ function ManagementPage({
           </table>
         </div>
       </section>
-      {dialog && name !== "备份仓库" && (
+      {dialog && name !== "备份仓库" && name !== "备份任务" && (
         <ResourceDialog
           name={name}
           initial={editing}
@@ -2507,6 +2595,7 @@ function display(value: unknown, locale: Locale = "zh-CN", timeZone?: string) {
   if (value == null || value === "") return "—";
   if (value === "local") return t("本地");
   if (value === "sftp") return t("远程 SFTP");
+  if (value === "ssh") return t("远程 SSH");
   if (value === "s3") return t("S3 对象存储");
   if (value === "draft") return t("草稿（不可启用）");
   if (value === "ready") return t("已验证");
@@ -2535,8 +2624,12 @@ function resourceValue(name: string, key: string, item: Record<string, unknown>,
     return ({ restic: "Restic", rsync: "rsync", mysql: "MySQL", postgresql: "PostgreSQL" } as Record<string, string>)[String(value)] ?? t("未知类型");
   }
   if (key === "kind") {
+	if (name === "备份仓库" && value === "local") {
+	  const localTarget = item.localTarget as Record<string, unknown> | undefined;
+	  return t(localTarget?.kind === "agent" ? "Agent 本地目录" : "Service 本地目录");
+	}
     const labels: Record<string, string> = name === "备份仓库"
-      ? { local: "本地目录", sftp: "远程 SFTP", s3: "S3 对象存储" }
+      ? { local: "本地目录", sftp: "远程 SFTP", ssh: "远程 SSH", s3: "S3 对象存储" }
       : { directory: "目录备份", database: "数据库备份", rsync: "rsync 增量同步" };
     return t(labels[String(value)] ?? "未知类型");
   }
@@ -2574,6 +2667,7 @@ function RepositoryCapacityCell({
   value,
   enabled,
   unsupported,
+  unsupportedReason,
   repositoryId,
   api,
   locale,
@@ -2582,6 +2676,7 @@ function RepositoryCapacityCell({
   value: unknown;
   enabled: boolean;
   unsupported: boolean;
+  unsupportedReason: string;
   repositoryId: string;
   api: AppAPI;
   locale: Locale;
@@ -2611,7 +2706,7 @@ function RepositoryCapacityCell({
     }}
   ><span aria-hidden="true">↻</span></button>;
   if (unsupported) {
-    return <div className="capacity-cell capacity-cell-compact"><span>{t("对象存储容量不适用")}</span>{refresh}</div>;
+    return <div className="capacity-cell capacity-cell-compact"><span>{unsupportedReason}</span>{refresh}</div>;
   }
   if (!enabled) {
     return <div className="capacity-cell capacity-cell-compact"><span>—</span>{refresh}</div>;
@@ -2773,7 +2868,7 @@ function RowActions({
           <button className="text-button" type="button" onClick={onOpenTaskHealth}>{t("详情")}</button>
           <button className="text-button" type="button" onClick={onOpenTaskScope}>{t("保护范围")}</button>
           <button className="text-button" type="button" disabled={taskRunBusy || item.enabled !== true} title={item.enabled === true ? undefined : t("任务未启用，不能立即运行")} onClick={onRun}>
-            {t(taskRunActive ? "运行中…" : "立即运行")}
+            {t(taskRunActive ? item.engine === "rsync" ? "正在同步" : "正在备份" : "立即运行")}
           </button>
         </>
       )}
@@ -2796,7 +2891,7 @@ function deleteImpact(name: string) {
     远程主机: "依赖此主机的 SFTP 仓库必须先迁移或删除。",
     备份仓库: "依赖此仓库的任务、维护策略、快照浏览和恢复入口将受到影响。",
     数据库实例: "依赖此连接的数据库备份任务必须先迁移或删除。",
-    备份任务: "引用此任务的备份计划必须先调整或删除。",
+    备份任务: "停用备份任务后即可删除；删除时会一并清除该任务的运行记录、日志、预览及计划关联，空计划也会删除。",
     备份计划: "删除后该计划不会再调度任务，但已有运行记录会保留。",
   } as Record<string, string>)[name] ?? "请确认该资源不再被其他配置引用。";
 }
@@ -2817,11 +2912,12 @@ function DeleteResourceDialog({
   onConfirm(): void;
 }) {
   const t = (source: string) => translate(locale, source);
+  const deletable = preview.deletable === true;
   const dialogRef = useRef<HTMLFormElement>(null);
   useModalFocus(dialogRef, () => { if (!deleting) onClose(); });
   return (
     <ModalPortal>
-      <form ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-resource-title" onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
+      <form ref={dialogRef} className="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-resource-title" onSubmit={(event) => { event.preventDefault(); if (deletable) onConfirm(); }}>
         <header>
           <div>
             <h2 id="delete-resource-title">{locale === "en-US" ? `Confirm deletion: ${t(name)}` : `确认删除${name}`}</h2>
@@ -2836,11 +2932,12 @@ function DeleteResourceDialog({
               <ul>{(preview.dependencies as Array<Record<string, unknown>>).map((dependency) => <li key={String(dependency.type)}>{locale === "en-US" ? `${String(dependency.type)}: ${String(dependency.count)} (${Array.isArray(dependency.names) ? dependency.names.join(", ") : ""})` : `${String(dependency.type)}：${String(dependency.count)} 个（${Array.isArray(dependency.names) ? dependency.names.join("、") : ""}）`}</li>)}</ul>
             </div>
           ) : <p>{t("当前没有阻止删除的资源依赖。")}</p>}
+          {!deletable && <p className="warning-text">{t(String(preview.blockedReason || "资源当前不能删除"))}</p>}
           <p className="warning-text">{t("只删除管理端配置，不会删除远端仓库内容、源目录或外部数据库。存在依赖时服务端会拒绝删除。")}</p>
         </div>
         <footer>
           <button className="secondary-button" type="button" disabled={deleting} onClick={onClose}>{t("取消删除")}</button>
-          <button className="danger-button" type="submit" disabled={deleting}>{t(deleting ? "正在删除…" : "确认删除")}</button>
+          <button className="danger-button" type="submit" disabled={deleting || !deletable}>{t(deleting ? "正在删除…" : "确认删除")}</button>
         </footer>
       </form>
     </ModalPortal>

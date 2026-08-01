@@ -118,6 +118,42 @@ describe("long operation feedback", () => {
     expect(await screen.findByText("正在逐项创建独立保护资源")).toBeVisible();
   });
 
+  it("shows live rsync transfer progress from a renewed Agent assignment", () => {
+    const operation = {
+      operation: {
+        id: "op-sync", kind: "sync", status: "running", stage: "syncing",
+        detail: { progress: { phase: "transferring", bytesTransferred: 4096, totalBytes: 8192, filesTransferred: 4, filesTotal: 8, rateBytesPerSecond: 1024, etaSeconds: 4 } },
+      },
+      active: true,
+      error: "",
+    } as unknown as OperationController;
+    render(<OperationFeedback operation={operation} compact cancellable={false} />);
+
+    expect(screen.getByRole("progressbar", { name: "同步进度" })).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText("4.0 KiB / 8.0 KiB")).toBeVisible();
+    expect(screen.getByText("4 / 8 个文件")).toBeVisible();
+    expect(screen.getByText("1.0 KiB/s")).toBeVisible();
+    expect(screen.getByText("预计剩余 4 秒")).toBeVisible();
+  });
+
+  it("marks rsync progress as stalled after Agent renewals stop", () => {
+    const operation = {
+      operation: {
+        id: "op-stalled", kind: "sync", status: "running", stage: "syncing",
+        detail: {
+          progressState: "stalled",
+          progress: { phase: "transferring", bytesTransferred: 4096, totalBytes: 8192, filesTransferred: 4, filesTotal: 8, rateBytesPerSecond: 1024, etaSeconds: 4 },
+        },
+      },
+      active: true,
+      error: "",
+    } as unknown as OperationController;
+    render(<OperationFeedback operation={operation} compact cancellable={false} />);
+
+    expect(screen.getByText("Agent 通信已中断，正在等待恢复")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "同步进度" })).toBeVisible();
+  });
+
   it("shows accepted work as running and only reports completion after polling", async () => {
     let reads = 0;
     const action = vi.fn(async (path: string) => {

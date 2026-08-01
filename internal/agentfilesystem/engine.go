@@ -15,11 +15,17 @@ import (
 
 const Kind execution.EngineKind = "agent-filesystem"
 
+// CapacityCapability identifies Agents that understand the filesystem
+// capacity operation. It is distinct from repository-capacity, which is the
+// older SFTP capacity engine and is still used for Restic remote repositories.
+const CapacityCapability = "filesystem-capacity"
+
 type Operation string
 
 const (
 	Browse                Operation = "browse"
 	CreateDirectory       Operation = "create-directory"
+	Capacity              Operation = "capacity"
 	PreviewScope          Operation = "preview-scope"
 	ValidateRestoreTarget Operation = "validate-restore-target"
 )
@@ -107,6 +113,17 @@ func (e *Engine) Run(ctx context.Context, assignment execution.Assignment) (exec
 			return execution.Outcome{Status: "failed"}, fmt.Errorf("create directory: %w", err)
 		}
 		return execution.Outcome{Status: "succeeded", Summary: map[string]any{"path": definition.Path, "created": true}}, nil
+	case Capacity:
+		if err := e.ensureResolvedAllowed(definition.Path, false); err != nil {
+			return execution.Outcome{Status: "failed"}, err
+		}
+		capacity, err := probeCapacity(definition.Path)
+		if err != nil {
+			return execution.Outcome{Status: "failed"}, err
+		}
+		return execution.Outcome{Status: "succeeded", Summary: map[string]any{
+			"path": definition.Path, "totalBytes": capacity.TotalBytes, "availableBytes": capacity.AvailableBytes,
+		}}, nil
 	case PreviewScope:
 		if err := e.ensureResolvedAllowed(definition.Path, false); err != nil {
 			return execution.Outcome{Status: "failed"}, err
@@ -193,7 +210,7 @@ func (e *Engine) ensureResolvedAllowed(value string, allowMissing bool) error {
 
 func (e *Engine) decode(raw json.RawMessage) (Definition, error) {
 	var definition Definition
-	if !json.Valid(raw) || json.Unmarshal(raw, &definition) != nil || (definition.Operation != Browse && definition.Operation != CreateDirectory && definition.Operation != PreviewScope && definition.Operation != ValidateRestoreTarget) || strings.TrimSpace(definition.Path) == "" || strings.ContainsAny(definition.Path, "\x00\r\n") {
+	if !json.Valid(raw) || json.Unmarshal(raw, &definition) != nil || (definition.Operation != Browse && definition.Operation != CreateDirectory && definition.Operation != Capacity && definition.Operation != PreviewScope && definition.Operation != ValidateRestoreTarget) || strings.TrimSpace(definition.Path) == "" || strings.ContainsAny(definition.Path, "\x00\r\n") {
 		return definition, errors.New("valid filesystem definition is required")
 	}
 	if definition.Operation != PreviewScope && (len(definition.Exclusions) != 0 || definition.Limit != 0 || definition.IncludeEntries) {

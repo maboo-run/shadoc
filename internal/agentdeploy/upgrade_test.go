@@ -18,7 +18,7 @@ func TestUpgradeDrainsWorkStagesFixedArtifactAndWaitsForTargetVersionHeartbeat(t
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:       domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "source.example ssh-ed25519 AAAA"},
-		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
+		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
 		activeWork: []int{1, 0},
 	}
 	remote := &upgradeRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
@@ -50,7 +50,7 @@ func TestSameVersionUpgradeRepairsManagedResticCapability(t *testing.T) {
 	storage := &upgradeStore{
 		host: domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
 		agent: store.AgentRecord{
-			ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1,
+			ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1,
 			OS: "linux", Arch: "amd64", Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second)),
 		},
 	}
@@ -78,7 +78,7 @@ func TestSameVersionRepairRollsBackWithoutManagedResticCapabilityHeartbeat(t *te
 	storage := &upgradeStore{
 		host: domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
 		agent: store.AgentRecord{
-			ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1,
+			ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1,
 			OS: "linux", Arch: "amd64", Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second)),
 		},
 	}
@@ -103,7 +103,7 @@ func TestUpgradeHeartbeatFailureRollsBackAndResumesOldAgentPath(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
 	}
 	remote := &upgradeRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
 	service := NewUpgradeService(storage, deploymentSecrets{}, staticArtifacts{}, upgradeDialer{remote: remote}, func() time.Time { return now })
@@ -121,7 +121,7 @@ func TestUpgradeRejectsStagedAgentArtifactVersionBeforeActivation(t *testing.T) 
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "0.0.0-SNAPSHOT-389df1b", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "0.0.0-SNAPSHOT-389df1b", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
 	}
 	remote := &upgradeRemote{
 		platform:      Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
@@ -143,7 +143,7 @@ func TestUpgradeStageFailureCleansPartialArtifactAndResumesAssignments(t *testin
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
 	}
 	remote := &upgradeRemote{
 		platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
@@ -166,7 +166,7 @@ func TestUpgradeCancellationDuringFinalizeRestoresPreviousAgent(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.3.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
 	}
 	remote := &upgradeRemote{
 		platform:    Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
@@ -193,7 +193,7 @@ func TestReprobeToolsDrainsAgentRestartsServiceAndWaitsForFreshHeartbeat(t *test
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:       domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
+		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
 		activeWork: []int{1, 0},
 	}
 	remote := &upgradeRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
@@ -227,7 +227,7 @@ func TestProbeHeartbeatDrainsAgentRestartsServiceAndWaitsForFreshHeartbeat(t *te
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:       domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
+		agent:      store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now.Add(-time.Second))},
 		activeWork: []int{1, 0},
 	}
 	remote := &upgradeRemote{platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"}}
@@ -259,7 +259,7 @@ func TestProbeHeartbeatResumesAssignmentsWhenRestartFails(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	storage := &upgradeStore{
 		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "host-a", ManagedInstallation: true, BuildVersion: "v1.4.0", ProtocolMin: 1, ProtocolMax: 1, Status: "online", LastHeartbeatAt: timePointer(now)},
 	}
 	remote := &upgradeRemote{
 		platform: Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/backup"},
@@ -277,7 +277,7 @@ func TestProbeHeartbeatResumesAssignmentsWhenRestartFails(t *testing.T) {
 
 func TestProbeHeartbeatExplainsMissingManagedRemoteHost(t *testing.T) {
 	storage := &upgradeStore{
-		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "deleted-host", Status: "offline"},
+		agent: store.AgentRecord{ID: "agent-a", RemoteHostID: "deleted-host", ManagedInstallation: true, Status: "offline"},
 	}
 	service := NewUpgradeService(storage, deploymentSecrets{}, nil, upgradeDialer{remote: &upgradeRemote{}}, time.Now)
 
@@ -287,6 +287,18 @@ func TestProbeHeartbeatExplainsMissingManagedRemoteHost(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "关联的远程主机已被删除") {
 		t.Fatalf("unexpected diagnostic: %v", err)
+	}
+}
+
+func TestManagedOperationsRejectManualAgentEvenWhenItIsAssociatedWithAHost(t *testing.T) {
+	now := time.Now().UTC()
+	storage := &upgradeStore{
+		host:  domain.RemoteHost{ID: "host-a", Host: "source.example", Port: 22, Username: "backup", HostFingerprint: "known"},
+		agent: store.AgentRecord{ID: "manual-agent", RemoteHostID: "host-a", Status: "online", LastHeartbeatAt: timePointer(now)},
+	}
+	service := NewUpgradeService(storage, deploymentSecrets{}, nil, upgradeDialer{remote: &upgradeRemote{}}, func() time.Time { return now })
+	if _, err := service.ProbeHeartbeat(t.Context(), "manual-agent", nil); err == nil || !strings.Contains(err.Error(), "not managed through a remote host") {
+		t.Fatalf("manual Agent association accepted for managed operation: %v", err)
 	}
 }
 
