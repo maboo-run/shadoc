@@ -25,7 +25,7 @@ type RemovalStorage interface {
 type RemovalRemote interface {
 	Probe(context.Context) (Platform, error)
 	Stop(context.Context, Platform) error
-	Remove(context.Context, Platform) error
+	Remove(context.Context, Platform, string) error
 	Close() error
 }
 
@@ -147,7 +147,7 @@ func (s *RemovalService) Uninstall(ctx context.Context, agentID string, report S
 	if report != nil {
 		report("removing_agent")
 	}
-	if err := remote.Remove(ctx, platform); err != nil {
+	if err := remote.Remove(ctx, platform, agent.AgentDataDir); err != nil {
 		return result, fmt.Errorf("remove Agent service: %w", err)
 	}
 	if report != nil {

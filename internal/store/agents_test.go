@@ -39,6 +39,25 @@ func TestAgentLeaseCanBeClaimedExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestManagedAgentDataDirectoryPersistsAndCanBeUpdated(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	if err := s.SaveAgent(t.Context(), AgentRecord{ID: "agent-data", CertificateSerial: "serial-data", ManagedInstallation: true, AgentDataDir: "/volume1/docker/shadoc-agent", Status: "online", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := s.ListAgents(t.Context())
+	if err != nil || len(agents) != 1 || agents[0].AgentDataDir != "/volume1/docker/shadoc-agent" {
+		t.Fatalf("agents=%+v err=%v", agents, err)
+	}
+	if err := s.SetManagedAgentDataDir(t.Context(), "agent-data", "/ssd/shadoc-agent"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = s.ListAgents(t.Context())
+	if err != nil || agents[0].AgentDataDir != "/ssd/shadoc-agent" {
+		t.Fatalf("updated agents=%+v err=%v", agents, err)
+	}
+}
+
 func TestAgentDrainBlocksNewWorkAndCountsAlreadyRunningAssignments(t *testing.T) {
 	storage := openTestStore(t)
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)

@@ -143,6 +143,7 @@ func TestProductionBinaryInRealBrowser(t *testing.T) {
 	runBrowser(t, ctx,
 		chromedp.WaitReady(fmt.Sprintf(`//label[contains(normalize-space(.),"仓库")]//option[@value=%q]`, repositoryID), chromedp.BySearch),
 		setSelectByLabel("仓库", repositoryID),
+		clickButton("读取快照"),
 		chromedp.WaitReady(`//label[contains(normalize-space(.),"目录快照")]//option[@value!=""]`, chromedp.BySearch),
 	)
 	t.Log("browser restore snapshots loaded")

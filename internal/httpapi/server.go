@@ -4560,48 +4560,7 @@ func (s *Server) listRepositories(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "无法读取容量监控策略")
 		return
 	}
-	tasks, _ := resources.ListTasks(r.Context())
 	agents, _ := resources.ListAgents(r.Context())
-	runs, _ := resources.ListRuns(r.Context(), 1000)
-	plans, _ := resources.ListPlans(r.Context())
-	taskRepository := map[string]string{}
-	for _, task := range tasks {
-		taskRepository[task.ID] = task.RepositoryID
-	}
-	for _, run := range runs {
-		repositoryID := taskRepository[run.TaskID]
-		for index := range items {
-			if items[index].ID == repositoryID && items[index].LastRun == nil {
-				items[index].LastRun = &domain.RepositoryRun{Status: run.Status, StartedAt: run.StartedAt, Summary: run.Summary}
-			}
-		}
-	}
-	for _, plan := range plans {
-		if !plan.Enabled {
-			continue
-		}
-		anchor := plan.ScheduleAnchorAt
-		if anchor.IsZero() {
-			anchor = plan.CreatedAt
-		}
-		cursor := anchor
-		if occurrence, occurrenceErr := resources.LatestScheduleOccurrence(r.Context(), "plan", plan.ID, anchor); occurrenceErr == nil {
-			cursor = occurrence.ScheduledAt
-		}
-		when, nextErr := schedule.NextAnchored(plan.Schedule, plan.Timezone, anchor, cursor)
-		if nextErr != nil {
-			continue
-		}
-		for _, taskID := range plan.TaskIDs {
-			repositoryID := taskRepository[taskID]
-			for index := range items {
-				formatted := when.Format(time.RFC3339)
-				if items[index].ID == repositoryID && (items[index].NextRun == "" || formatted < items[index].NextRun) {
-					items[index].NextRun = formatted
-				}
-			}
-		}
-	}
 	policyByRepository := make(map[string]domain.RepositoryCapacityPolicy, len(policies))
 	for _, policy := range policies {
 		policyByRepository[policy.RepositoryID] = policy
@@ -5332,6 +5291,43 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "无法读取任务")
 		return
 	}
+	healthByTask, err := resources.TaskRunHealth(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取任务运行状态")
+		return
+	}
+	plans, err := resources.ListPlans(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取任务计划")
+		return
+	}
+	nextRunByTask := make(map[string]string)
+	for _, plan := range plans {
+		if !plan.Enabled {
+			continue
+		}
+		anchor := plan.ScheduleAnchorAt
+		if anchor.IsZero() {
+			anchor = plan.CreatedAt
+		}
+		cursor := anchor
+		if occurrence, occurrenceErr := resources.LatestScheduleOccurrence(r.Context(), "plan", plan.ID, anchor); occurrenceErr == nil {
+			cursor = occurrence.ScheduledAt
+		} else if !errors.Is(occurrenceErr, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "无法读取任务计划")
+			return
+		}
+		when, nextErr := schedule.NextAnchored(plan.Schedule, plan.Timezone, anchor, cursor)
+		if nextErr != nil {
+			continue
+		}
+		formatted := when.Format(time.RFC3339)
+		for _, taskID := range plan.TaskIDs {
+			if previous, exists := nextRunByTask[taskID]; !exists || formatted < previous {
+				nextRunByTask[taskID] = formatted
+			}
+		}
+	}
 	type activeTaskOperation struct {
 		ID     string `json:"id"`
 		Kind   string `json:"kind"`
@@ -5340,7 +5336,9 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	type taskView struct {
 		domain.Task
-		ActiveOperation *activeTaskOperation `json:"activeOperation,omitempty"`
+		LastRun         *domain.RepositoryRun `json:"lastRun,omitempty"`
+		NextRun         string                `json:"nextRun,omitempty"`
+		ActiveOperation *activeTaskOperation  `json:"activeOperation,omitempty"`
 	}
 	active := make(map[string]activeTaskOperation)
 	for _, status := range []string{"running", "queued"} {
@@ -5361,7 +5359,10 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]taskView, 0, len(items))
 	for _, item := range items {
-		view := taskView{Task: item}
+		view := taskView{Task: item, NextRun: nextRunByTask[item.ID]}
+		if health, ok := healthByTask[item.ID]; ok && health.Latest != nil {
+			view.LastRun = &domain.RepositoryRun{Status: health.Latest.Status, StartedAt: health.Latest.StartedAt, Summary: health.Latest.Summary}
+		}
 		if operation, ok := active[item.ID]; ok {
 			view.ActiveOperation = &operation
 		}
@@ -5387,6 +5388,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ID                  string     `json:"id"`
 		RemoteHostID        string     `json:"remoteHostId,omitempty"`
 		ManagedInstallation bool       `json:"managedInstallation"`
+		AgentDataDir        string     `json:"agentDataDir,omitempty"`
 		CertificateSerial   string     `json:"certificateSerial"`
 		CertificateNotAfter *time.Time `json:"certificateNotAfter,omitempty"`
 		CertificateStatus   string     `json:"certificateStatus"`
@@ -5458,7 +5460,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		upgradeAvailable := agent.BuildVersion != "" && s.applicationVersion != "" &&
 			(agent.BuildVersion != s.applicationVersion || managedResticRepairAvailable)
 		items = append(items, agentView{
-			ID: agent.ID, RemoteHostID: agent.RemoteHostID, ManagedInstallation: agent.ManagedInstallation, CertificateSerial: agent.CertificateSerial,
+			ID: agent.ID, RemoteHostID: agent.RemoteHostID, ManagedInstallation: agent.ManagedInstallation, AgentDataDir: agent.AgentDataDir, CertificateSerial: agent.CertificateSerial,
 			CertificateNotAfter: agent.CertificateNotAfter, CertificateStatus: certificateStatus,
 			Capabilities: agent.Capabilities, BuildVersion: agent.BuildVersion, ProtocolMin: agent.ProtocolMin, ProtocolMax: agent.ProtocolMax,
 			ProtocolCompatible: protocolCompatible, CompatibilityStatus: compatibilityStatus,
@@ -5693,6 +5695,7 @@ func (s *Server) deployAgent(w http.ResponseWriter, r *http.Request) {
 		HostID     string `json:"hostId"`
 		AgentID    string `json:"agentId"`
 		ServiceURL string `json:"serviceUrl"`
+		DataDir    string `json:"dataDir"`
 	}
 	if decodeJSON(r, &input) != nil {
 		writeError(w, http.StatusBadRequest, "请求格式无效")
@@ -5701,11 +5704,12 @@ func (s *Server) deployAgent(w http.ResponseWriter, r *http.Request) {
 	input.HostID = strings.TrimSpace(input.HostID)
 	input.AgentID = strings.TrimSpace(input.AgentID)
 	input.ServiceURL = strings.TrimSpace(input.ServiceURL)
+	input.DataDir = strings.TrimSpace(input.DataDir)
 	if input.HostID == "" || input.AgentID == "" || input.ServiceURL == "" {
 		writeError(w, http.StatusUnprocessableEntity, "远程主机、Agent ID 和 Service 地址不能为空")
 		return
 	}
-	request := agentdeploy.DeployRequest{HostID: input.HostID, AgentID: input.AgentID, ServiceURL: input.ServiceURL}
+	request := agentdeploy.DeployRequest{HostID: input.HostID, AgentID: input.AgentID, ServiceURL: input.ServiceURL, DataDir: input.DataDir}
 	record, reused, err := s.operations.StartUnique("agent-management:"+input.AgentID, operationruntime.StartRequest{
 		Kind: "agent_deploy", Actor: username, Target: input.AgentID, Detail: map[string]any{"hostId": input.HostID},
 	}, func(ctx context.Context, reporter operationruntime.Reporter) error {

@@ -238,7 +238,6 @@ describe("restic-control administration", () => {
         id: "repo-a", name: "照片仓库", kind: "sftp", path: "/backup/photos", status: "ready",
         capacity: { totalBytes: 1099511627776, usedBytes: 659706976666, availableBytes: 439804651110, checkedAt: "2026-07-15T06:00:00Z", sourceAgentId: "agent-a" },
         capacityPolicy: { enabled: true, nextProbeAt: "2026-07-15T12:00:00Z", stale: false, lastError: "" },
-        lastRun: { status: "success", startedAt: "2026-07-12T10:02:30.508331Z", summary: { dataAdded: 5_872_025 } },
       }];
     });
     const action = vi.fn(async (path: string) => {
@@ -263,8 +262,6 @@ describe("restic-control administration", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "备份仓库" }));
     expect(await screen.findByText("409.6 GiB 可用 / 共 1 TiB")).toBeVisible();
-    expect(screen.getByText(/2026.*7.*12.*18:02:30 · 5\.6 MiB/)).toBeVisible();
-    expect(screen.queryByText(/2026-07-12T10:02:30\.508331Z/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Agent agent-a/)).not.toBeInTheDocument();
     expect(action).not.toHaveBeenCalledWith("/api/repositories/repo-a/capacity", {});
     const tableFrame = screen.getByText("照片仓库").closest(".table-frame") as HTMLElement;
@@ -368,10 +365,11 @@ describe("restic-control administration", () => {
     const dialog = screen.getByRole("dialog", { name: "远程部署 Agent" });
     await user.type(within(dialog).getByLabelText("Agent ID"), "backup-node");
     expect(within(dialog).getByLabelText("Service HTTPS 地址")).toHaveValue("https://control.internal:9443");
+    await user.type(within(dialog).getByLabelText("Agent 数据目录"), "/volume1/docker/shadoc-agent");
     await user.click(within(dialog).getByRole("button", { name: "开始部署" }));
 
     expect(action).toHaveBeenCalledWith("/api/agents/deploy", {
-      hostId: "host-a", agentId: "backup-node", serviceUrl: "https://control.internal:9443",
+      hostId: "host-a", agentId: "backup-node", serviceUrl: "https://control.internal:9443", dataDir: "/volume1/docker/shadoc-agent",
     });
     const completion = await screen.findByText("Agent 部署成功");
     expect(completion.closest(".toast")).toBeVisible();
@@ -780,7 +778,7 @@ describe("restic-control administration", () => {
       ...fakeAPI,
       action,
       listResource: async (resource) => {
-        if (resource === "agents") return [{ id: "mini-debian", remoteHostId: "host-1", managedInstallation: true, status: "revoked", runtimeStatus: "stopped", uninstalledAt: "2026-07-14T14:47:38Z" }];
+        if (resource === "agents") return [{ id: "mini-debian", remoteHostId: "host-1", agentDataDir: "/volume1/docker/shadoc-agent", managedInstallation: true, status: "revoked", runtimeStatus: "stopped", uninstalledAt: "2026-07-14T14:47:38Z" }];
         if (resource === "remote-hosts") return [{ id: "host-1", name: "迷你主机", host: "192.168.0.104", port: 22, username: "tmen" }];
         return [];
       },
@@ -794,10 +792,11 @@ describe("restic-control administration", () => {
     expect(within(dialog).getByLabelText("远程主机")).toHaveValue("host-1");
     expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("mini-debian");
     expect(within(dialog).getByLabelText("Agent ID")).toHaveAttribute("readonly");
+    expect(within(dialog).getByLabelText("Agent 数据目录")).toHaveValue("/volume1/docker/shadoc-agent");
     await user.click(within(dialog).getByRole("button", { name: "开始重新部署" }));
 
     expect(action).toHaveBeenCalledWith("/api/agents/deploy", {
-      hostId: "host-1", agentId: "mini-debian", serviceUrl: "https://control.internal:9443",
+      hostId: "host-1", agentId: "mini-debian", serviceUrl: "https://control.internal:9443", dataDir: "/volume1/docker/shadoc-agent",
     });
     const completion = await screen.findByText("Agent 已重新部署");
     expect(completion.closest(".toast")).toBeVisible();
@@ -1941,15 +1940,18 @@ describe("restic-control administration", () => {
 	expect(screen.queryByRole("button", { name: /从快照恢复/ })).not.toBeInTheDocument();
 	expect(await screen.findByRole("option", { name: /照片仓库/ })).toBeVisible();
 	expect(screen.queryByRole("option", { name: /同步目标/ })).not.toBeInTheDocument();
-	expect(action).toHaveBeenCalledWith("/api/repositories/repo-1/snapshots");
+	expect(screen.getByRole("button", { name: "读取快照" })).toBeVisible();
+	expect(action).not.toHaveBeenCalledWith("/api/repositories/repo-1/snapshots");
 	expect(action).not.toHaveBeenCalledWith("/api/repositories/sync-repo/snapshots");
 	expect(screen.queryByText("已自动识别为目录备份")).not.toBeInTheDocument();
 	expect(screen.queryByLabelText("数据库快照")).not.toBeInTheDocument();
 	expect(screen.queryByRole("columnheader", { name: "路径" })).not.toBeInTheDocument();
 	expect(screen.queryByRole("columnheader", { name: "元数据标签" })).not.toBeInTheDocument();
+	expect(screen.queryByLabelText("仓库 ID")).not.toBeInTheDocument();
+	await user.click(screen.getByRole("button", { name: "读取快照" }));
+	await waitFor(() => expect(action).toHaveBeenCalledWith("/api/repositories/repo-1/snapshots"));
 	expect(screen.getByRole("radio", { name: "远程 Agent" })).toBeDisabled();
 	expect(screen.getByText("当前备份仓库位于控制服务本机，远程 Agent 无法直接访问；请选择 SFTP 或 S3 仓库。")).toBeVisible();
-	expect(screen.queryByLabelText("仓库 ID")).not.toBeInTheDocument();
 	await user.selectOptions(await screen.findByLabelText("目录快照"), "dir-snap");
 	expect(screen.getByLabelText("目录快照")).toHaveTextContent(/dir-snap · 2026.*7.*12.*09:00/);
 	expect(screen.getByLabelText("目录快照")).not.toHaveTextContent("2026-07-12T01:00:00Z");
@@ -1997,13 +1999,14 @@ describe("restic-control administration", () => {
     await screen.findByRole("heading", { name: "仪表盘" });
     await user.click(screen.getByRole("button", { name: "快照与恢复" }));
     const repository = await screen.findByLabelText("备份仓库");
+    await user.click(screen.getByRole("button", { name: "读取快照" }));
     expect(await screen.findByRole("status", { name: "正在读取…" })).toBeVisible();
-    resolveFirstSnapshots([{ id: "first", time: "2026-07-12T01:00:00Z", paths: ["/srv/photos"], tags: ["rc:source=directory"] }]);
-    await screen.findByRole("option", { name: /first/ });
-
     await user.selectOptions(repository, "repo-2");
+    expect(screen.queryByRole("status", { name: "正在读取…" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "读取快照" }));
     await waitFor(() => expect(action).toHaveBeenCalledWith("/api/repositories/repo-2/snapshots"));
     expect(screen.getByRole("status", { name: "正在读取…" })).toBeVisible();
+    resolveFirstSnapshots([{ id: "first", time: "2026-07-12T01:00:00Z", paths: ["/srv/photos"], tags: ["rc:source=directory"] }]);
     resolveSecondSnapshots([{ id: "second", time: "2026-07-13T01:00:00Z", paths: ["/srv/archive"], tags: ["rc:source=directory"] }]);
     expect(await screen.findByRole("option", { name: /second/ })).toBeVisible();
     expect(screen.queryByRole("status", { name: "正在读取…" })).not.toBeInTheDocument();
@@ -2020,6 +2023,7 @@ describe("restic-control administration", () => {
 	render(<App api={{ ...fakeAPI, action, listResource: async (resource) => resource === "repositories" ? [{ id: "repo-1", name: "数据库仓库", kind: "local", path: "/backup/db", status: "ready" }] : [] }} />);
 	await screen.findByRole("heading", { name: "仪表盘" });
 	await user.click(screen.getByRole("button", { name: "快照与恢复" }));
+	await user.click(screen.getByRole("button", { name: "读取快照" }));
 	expect(await screen.findByLabelText("数据库快照")).toBeVisible();
 	expect(screen.queryByText("已自动识别为数据库备份")).not.toBeInTheDocument();
 	expect(screen.queryByLabelText("目录快照")).not.toBeInTheDocument();
@@ -2050,6 +2054,7 @@ describe("restic-control administration", () => {
     render(<App api={{ ...fakeAPI, action, listResource: async (resource) => resource === "repositories" ? [{ id: "repo-1", name: "数据库仓库", kind: "local", path: "/backup/db", status: "ready" }] : [] }} />);
     await screen.findByRole("heading", { name: "仪表盘" });
     await user.click(screen.getByRole("button", { name: "快照与恢复" }));
+	await user.click(screen.getByRole("button", { name: "读取快照" }));
     await user.selectOptions(await screen.findByLabelText("数据库快照"), "db-snap");
     await user.click(screen.getByRole("radio", { name: "恢复为 dump 文件" }));
     await user.type(screen.getByLabelText("dump 文件输出目录"), "/tmp/restdump");
@@ -2081,6 +2086,7 @@ describe("restic-control administration", () => {
 	} }} />);
 	await screen.findByRole("heading", { name: "仪表盘" });
 	await user.click(screen.getByRole("button", { name: "快照与恢复" }));
+	await user.click(screen.getByRole("button", { name: "读取快照" }));
 	await user.selectOptions(await screen.findByLabelText("目录快照"), "dir-snap");
 	await user.click(screen.getByRole("radio", { name: "远程 Agent" }));
 	await user.click(await screen.findByRole("button", { name: /restore/ }));
@@ -2106,6 +2112,7 @@ describe("restic-control administration", () => {
 	} }} />);
 	await screen.findByRole("heading", { name: "仪表盘" });
 	await user.click(screen.getByRole("button", { name: "快照与恢复" }));
+	await user.click(screen.getByRole("button", { name: "读取快照" }));
 	const remoteAgent = await screen.findByRole("radio", { name: "远程 Agent" });
 	await waitFor(() => expect(remoteAgent).toBeEnabled());
 	await user.click(remoteAgent);

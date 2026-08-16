@@ -244,11 +244,11 @@ func upgradeCommand(osName, linux, darwin, windows string) (string, error) {
 	}
 }
 
-func (r *Remote) PrepareReenrollment(ctx context.Context, platform Platform) error {
+func (r *Remote) PrepareReenrollment(ctx context.Context, platform Platform, dataDir string) error {
 	if r == nil || r.runner == nil {
 		return errors.New("SSH command runner is required")
 	}
-	command, err := upgradeCommand(platform.OS, linuxPrepareReenrollmentCommand, darwinPrepareReenrollmentCommand, windowsPrepareReenrollmentCommand)
+	command, err := lifecycleCommand(platform, dataDir, linuxPrepareReenrollmentCommand, darwinPrepareReenrollmentCommand, windowsPrepareReenrollmentCommand)
 	if err != nil {
 		return err
 	}
@@ -258,7 +258,7 @@ func (r *Remote) PrepareReenrollment(ctx context.Context, platform Platform) err
 	return nil
 }
 
-func (r *Remote) Activate(ctx context.Context, platform Platform) error {
+func (r *Remote) Activate(ctx context.Context, platform Platform, dataDir string) error {
 	command, cleanup := "", ""
 	switch platform.OS {
 	case "linux":
@@ -270,6 +270,15 @@ func (r *Remote) Activate(ctx context.Context, platform Platform) error {
 	default:
 		return fmt.Errorf("unsupported Agent platform %q", platform.OS)
 	}
+	var err error
+	command, err = lifecycleCommand(platform, dataDir, command, command, command)
+	if err != nil {
+		return err
+	}
+	cleanup, err = lifecycleCommand(platform, dataDir, cleanup, cleanup, cleanup)
+	if err != nil {
+		return err
+	}
 	if _, err := r.runner.Run(ctx, command, nil); err != nil {
 		_, _ = r.runner.Run(context.WithoutCancel(ctx), cleanup, nil)
 		return fmt.Errorf("activate Agent service: %w", err)
@@ -277,8 +286,8 @@ func (r *Remote) Activate(ctx context.Context, platform Platform) error {
 	return nil
 }
 
-func (r *Remote) Finalize(ctx context.Context, platform Platform) error {
-	command, err := upgradeCommand(platform.OS, linuxFinalizeCommand, darwinFinalizeCommand, windowsFinalizeCommand)
+func (r *Remote) Finalize(ctx context.Context, platform Platform, dataDir string) error {
+	command, err := lifecycleCommand(platform, dataDir, linuxFinalizeCommand, darwinFinalizeCommand, windowsFinalizeCommand)
 	if err != nil {
 		return err
 	}
@@ -288,14 +297,12 @@ func (r *Remote) Finalize(ctx context.Context, platform Platform) error {
 	return nil
 }
 
-func (r *Remote) Cleanup(ctx context.Context, platform Platform) error {
-	command := linuxCleanupCommand
-	if platform.OS == "darwin" {
-		command = darwinCleanupCommand
-	} else if platform.OS == "windows" {
-		command = windowsCleanupCommand
+func (r *Remote) Cleanup(ctx context.Context, platform Platform, dataDir string) error {
+	command, err := lifecycleCommand(platform, dataDir, linuxCleanupCommand, darwinCleanupCommand, windowsCleanupCommand)
+	if err != nil {
+		return err
 	}
-	_, err := r.runner.Run(ctx, command, nil)
+	_, err = r.runner.Run(ctx, command, nil)
 	return err
 }
 
@@ -314,7 +321,7 @@ func (r *Remote) Stop(ctx context.Context, platform Platform) error {
 	return nil
 }
 
-func (r *Remote) Remove(ctx context.Context, platform Platform) error {
+func (r *Remote) Remove(ctx context.Context, platform Platform, dataDir string) error {
 	command := linuxRemoveCommand
 	if platform.OS == "darwin" {
 		command = darwinRemoveCommand
@@ -323,10 +330,66 @@ func (r *Remote) Remove(ctx context.Context, platform Platform) error {
 	} else if platform.OS != "linux" {
 		return fmt.Errorf("unsupported Agent platform %q", platform.OS)
 	}
+	if strings.TrimSpace(dataDir) != "" {
+		resolved, err := resolveDataDir(platform, dataDir)
+		if err != nil {
+			return err
+		}
+		if platform.OS == "windows" {
+			command = windowsRemoveCommandForDataDir(resolved)
+		} else {
+			command = removeCommandForDataDir(command, resolved)
+		}
+	}
 	if _, err := r.runner.Run(ctx, command, nil); err != nil {
 		return fmt.Errorf("remove Agent: %w", err)
 	}
 	return nil
+}
+
+// lifecycleCommand substitutes the configured Agent data directory into the
+// fixed, audited lifecycle commands. The command templates remain fixed; the
+// only user-controlled value is validated as an absolute path before it is
+// inserted.
+func lifecycleCommand(platform Platform, dataDir, linux, darwin, windows string) (string, error) {
+	command, err := upgradeCommand(platform.OS, linux, darwin, windows)
+	if err != nil || strings.TrimSpace(dataDir) == "" {
+		return command, err
+	}
+	resolved, err := resolveDataDir(platform, dataDir)
+	if err != nil {
+		return "", err
+	}
+	if platform.OS == "windows" {
+		return windowsCommandForDataDir(command, resolved), nil
+	}
+	return strings.ReplaceAll(command, "$HOME/.local/share/shadoc-agent", resolved), nil
+}
+
+func removeCommandForDataDir(command, dataDir string) string {
+	// Only remove files created by the Agent. Do not recursively delete a user
+	// selected directory, because it may also contain unrelated Docker data.
+	owned := `"` + dataDir + `/agent.crt" "` + dataDir + `/agent.key" "` + dataDir + `/ca.crt" "` + dataDir + `/.credential-migration" "` + dataDir + `/.force-enrollment"`
+	command = strings.Replace(command, `rm -rf "$HOME/.local/share/shadoc-agent" "$HOME/.local/share/restic-control-agent"`, `rm -f `+owned+`; rmdir "`+dataDir+`" 2>/dev/null || true`, 1)
+	return strings.ReplaceAll(command, "$HOME/.local/share/shadoc-agent", dataDir)
+}
+
+func windowsCommandForDataDir(command, dataDir string) string {
+	quoted := "'" + powershellEscape(dataDir) + "'"
+	command = strings.ReplaceAll(command, `$data=Join-Path $env:ProgramData 'shadoc-agent\data';`, `$data=`+quoted+`;`)
+	command = strings.ReplaceAll(command, `$new=Join-Path $env:ProgramData 'shadoc-agent\data';`, `$new=`+quoted+`;`)
+	command = strings.ReplaceAll(command, `$new=Join-Path $env:ProgramData 'shadoc-agent\data'`, `$new=`+quoted)
+	for _, name := range []string{".credential-migration", ".force-enrollment"} {
+		old := `(Join-Path $env:ProgramData 'shadoc-agent\data\` + name + `')`
+		replacement := `(Join-Path ` + quoted + ` '` + name + `')`
+		command = strings.ReplaceAll(command, old, replacement)
+	}
+	return command
+}
+
+func windowsRemoveCommandForDataDir(dataDir string) string {
+	quoted := "'" + powershellEscape(dataDir) + "'"
+	return `powershell.exe -NoProfile -NonInteractive -Command "$data=` + quoted + `;Stop-Service shadoc-agent -ErrorAction SilentlyContinue;sc.exe delete shadoc-agent|Out-Null;Remove-Item (Join-Path $data 'agent.crt'),(Join-Path $data 'agent.key'),(Join-Path $data 'ca.crt'),(Join-Path $data '.credential-migration'),(Join-Path $data '.force-enrollment') -Force -ErrorAction SilentlyContinue;Remove-Item (Join-Path $env:ProgramData 'shadoc-agent\shadoc-agent.exe'),(Join-Path $env:ProgramData 'shadoc-agent\install-service.ps1'),(Join-Path $env:ProgramData 'shadoc-agent\enrollment.token'),(Join-Path $env:ProgramData 'shadoc-agent\ca.crt') -Force -ErrorAction SilentlyContinue;if(Get-Service restic-control-agent -ErrorAction SilentlyContinue){Set-Service restic-control-agent -StartupType Automatic;Start-Service restic-control-agent}"`
 }
 
 func normalizeOS(value string) string {

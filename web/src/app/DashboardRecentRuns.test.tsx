@@ -10,6 +10,22 @@ const tasks: DashboardTask[] = [
 ];
 
 describe("DashboardRecentRuns", () => {
+  it("orders tasks by their latest execution time instead of task name", () => {
+    render(<DashboardRecentRuns
+      tasks={[
+        { id: "older", name: "aardvark", kind: "directory", status: "success", repository: "repo-1", lastRun: "2026-07-26T02:12:46Z", nextRun: "-" },
+        { id: "newer", name: "zebra", kind: "directory", status: "success", repository: "repo-2", lastRun: "2026-08-03T21:30:00Z", nextRun: "-" },
+      ]}
+      locale="zh-CN"
+      timeZone="Asia/Shanghai"
+      onViewAll={() => undefined}
+    />);
+
+    const rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("zebra");
+    expect(rows[2]).toHaveTextContent("aardvark");
+  });
+
   it("renders at most 5 recent tasks with name, status, and time", () => {
     render(<DashboardRecentRuns tasks={tasks} locale="zh-CN" timeZone="UTC" onViewAll={() => undefined} />);
     expect(screen.getByText("web-data")).toBeInTheDocument();

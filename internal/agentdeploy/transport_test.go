@@ -34,7 +34,7 @@ func TestSSHTransportUsesFixedCommandsAndStreamsSecretsOnlyOnStdin(t *testing.T)
 func TestSSHTransportRollsBackFilesWhenActivationFails(t *testing.T) {
 	runner := &recordingRunner{probe: "Linux\naarch64\nsystemd\n/home/backup\n", activateErr: errors.New("systemctl failed")}
 	remote := NewRemote(runner)
-	if err := remote.Activate(context.Background(), Platform{OS: "linux", Arch: "arm64"}); err == nil {
+	if err := remote.Activate(context.Background(), Platform{OS: "linux", Arch: "arm64"}, ""); err == nil {
 		t.Fatal("activation failure was ignored")
 	}
 	if len(runner.calls) != 2 || runner.calls[1].command != linuxCleanupCommand {
@@ -49,7 +49,7 @@ func TestSSHTransportStopsAgentBeforeRemovingItsFiles(t *testing.T) {
 	if err := remote.Stop(context.Background(), platform); err != nil {
 		t.Fatal(err)
 	}
-	if err := remote.Remove(context.Background(), platform); err != nil {
+	if err := remote.Remove(context.Background(), platform, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 || runner.calls[0].command != linuxStopCommand || runner.calls[1].command != linuxRemoveCommand {
@@ -57,6 +57,40 @@ func TestSSHTransportStopsAgentBeforeRemovingItsFiles(t *testing.T) {
 	}
 	if strings.Contains(runner.calls[0].command, "rm -") || !strings.Contains(runner.calls[1].command, ".local/share/shadoc-agent") {
 		t.Fatalf("stop/remove commands are not safely separated: %+v", runner.calls)
+	}
+}
+
+func TestSSHTransportUsesConfiguredDataDirectoryForLinuxLifecycle(t *testing.T) {
+	runner := &recordingRunner{}
+	remote := NewRemote(runner)
+	platform := Platform{OS: "linux", Arch: "arm64", Service: "systemd", Home: "/home/example"}
+	dataDir := "/volume1/docker/shadoc-agent"
+	if err := remote.PrepareReenrollment(context.Background(), platform, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Activate(context.Background(), platform, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Finalize(context.Background(), platform, dataDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if !strings.Contains(call.command, dataDir) || strings.Contains(call.command, "$HOME/.local/share/shadoc-agent") {
+			t.Fatalf("lifecycle command did not use configured directory: %s", call.command)
+		}
+	}
+}
+
+func TestSSHTransportDoesNotRecursivelyDeleteConfiguredDataDirectory(t *testing.T) {
+	runner := &recordingRunner{}
+	remote := NewRemote(runner)
+	platform := Platform{OS: "linux", Arch: "amd64", Service: "systemd", Home: "/home/example"}
+	if err := remote.Remove(context.Background(), platform, "/volume1/docker/shadoc-agent"); err != nil {
+		t.Fatal(err)
+	}
+	command := runner.calls[0].command
+	if !strings.Contains(command, "/volume1/docker/shadoc-agent/agent.crt") || strings.Contains(command, "rm -rf") {
+		t.Fatalf("unsafe custom removal command: %s", command)
 	}
 }
 
@@ -121,12 +155,12 @@ func TestSSHTransportPreparesRevokedAgentForFreshEnrollment(t *testing.T) {
 			runner := &recordingRunner{}
 			remote := NewRemote(runner)
 			preparer, ok := any(remote).(interface {
-				PrepareReenrollment(context.Context, Platform) error
+				PrepareReenrollment(context.Context, Platform, string) error
 			})
 			if !ok {
 				t.Fatal("SSH transport does not support preparing a fresh Agent enrollment")
 			}
-			if err := preparer.PrepareReenrollment(t.Context(), platform); err != nil {
+			if err := preparer.PrepareReenrollment(t.Context(), platform, ""); err != nil {
 				t.Fatal(err)
 			}
 			if len(runner.calls) != 1 {
@@ -272,10 +306,10 @@ func TestSSHTransportFallsBackToWindowsAndUsesServiceCommands(t *testing.T) {
 	if err := remote.Upload(context.Background(), WindowsServiceFile, []byte("service script")); err != nil {
 		t.Fatal(err)
 	}
-	if err := remote.Activate(context.Background(), platform); err != nil {
+	if err := remote.Activate(context.Background(), platform, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := remote.Finalize(context.Background(), platform); err != nil {
+	if err := remote.Finalize(context.Background(), platform, ""); err != nil {
 		t.Fatal(err)
 	}
 	if runner.calls[len(runner.calls)-2].command != windowsActivateCommand || runner.calls[len(runner.calls)-1].command != windowsFinalizeCommand {

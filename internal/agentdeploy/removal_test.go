@@ -177,7 +177,7 @@ func (r *removalRemote) Stop(context.Context, Platform) error {
 	*r.events = append(*r.events, "stop")
 	return r.stopErr
 }
-func (r *removalRemote) Remove(context.Context, Platform) error {
+func (r *removalRemote) Remove(context.Context, Platform, string) error {
 	*r.events = append(*r.events, "remove")
 	return r.removeErr
 }

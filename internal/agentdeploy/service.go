@@ -132,6 +132,7 @@ type DeploymentStorage interface {
 	RemoteHostPrivateKeySecretID(context.Context, string) (string, error)
 	ListAgents(context.Context) ([]store.AgentRecord, error)
 	BindManagedAgentRemoteHost(context.Context, string, string) error
+	SetManagedAgentDataDir(context.Context, string, string) error
 }
 
 type DeploymentSecrets interface {
@@ -145,10 +146,10 @@ type EnrollmentControl interface {
 type DeploymentRemote interface {
 	Probe(context.Context) (Platform, error)
 	Upload(context.Context, RemoteFile, []byte) error
-	PrepareReenrollment(context.Context, Platform) error
-	Activate(context.Context, Platform) error
-	Finalize(context.Context, Platform) error
-	Cleanup(context.Context, Platform) error
+	PrepareReenrollment(context.Context, Platform, string) error
+	Activate(context.Context, Platform, string) error
+	Finalize(context.Context, Platform, string) error
+	Cleanup(context.Context, Platform, string) error
 	Close() error
 }
 type DeploymentDialer interface {
@@ -186,7 +187,7 @@ type sshDeploymentRemote struct {
 
 func (r *sshDeploymentRemote) Close() error { return r.connection.Close() }
 
-type DeployRequest struct{ HostID, AgentID, ServiceURL string }
+type DeployRequest struct{ HostID, AgentID, ServiceURL, DataDir string }
 type DeployResult struct{ AgentID, HostID, Platform, ArtifactSHA256 string }
 type StageReporter func(string)
 
@@ -257,6 +258,7 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 	if err != nil {
 		return result, err
 	}
+	configuredDataDir := strings.TrimSpace(request.DataDir)
 	artifact, err := s.artifacts.Resolve(platform)
 	if err != nil {
 		return result, err
@@ -274,11 +276,18 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 		if agent.ID != request.AgentID {
 			continue
 		}
+		if configuredDataDir == "" && agent.AgentDataDir != "" {
+			configuredDataDir = agent.AgentDataDir
+		}
 		replaceIdentity = agent.RevokedAt != nil || agent.UninstalledAt != nil || agent.Status == "revoked"
 		if !replaceIdentity {
 			return result, errors.New("活动 Agent 已存在；请使用托管升级或重新安装")
 		}
 		break
+	}
+	request.DataDir, err = resolveDataDir(platform, configuredDataDir)
+	if err != nil {
+		return result, err
 	}
 	token, err := s.control.CreateEnrollmentToken(ctx, 15*time.Minute)
 	if err != nil {
@@ -287,7 +296,7 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			_ = remote.Cleanup(context.WithoutCancel(ctx), platform)
+			_ = remote.Cleanup(context.WithoutCancel(ctx), platform, request.DataDir)
 		}
 	}()
 	if report != nil {
@@ -328,11 +337,11 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 		report("activating")
 	}
 	if replaceIdentity {
-		if err := remote.PrepareReenrollment(ctx, platform); err != nil {
+		if err := remote.PrepareReenrollment(ctx, platform, request.DataDir); err != nil {
 			return result, err
 		}
 	}
-	if err := remote.Activate(ctx, platform); err != nil {
+	if err := remote.Activate(ctx, platform, request.DataDir); err != nil {
 		return result, err
 	}
 	if report != nil {
@@ -353,10 +362,13 @@ func (s *Service) Deploy(ctx context.Context, request DeployRequest, report Stag
 				if err := s.store.BindManagedAgentRemoteHost(context.WithoutCancel(ctx), request.AgentID, request.HostID); err != nil {
 					return result, fmt.Errorf("bind Agent to remote host: %w", err)
 				}
+				if err := s.store.SetManagedAgentDataDir(context.WithoutCancel(ctx), request.AgentID, request.DataDir); err != nil {
+					return result, fmt.Errorf("persist Agent data directory: %w", err)
+				}
 				if report != nil {
 					report("finalizing")
 				}
-				if err := remote.Finalize(context.WithoutCancel(ctx), platform); err != nil {
+				if err := remote.Finalize(context.WithoutCancel(ctx), platform, request.DataDir); err != nil {
 					return result, fmt.Errorf("finalize Agent service migration: %w", err)
 				}
 				succeeded = true
@@ -398,14 +410,19 @@ func deploymentServiceDefinition(platform Platform, request DeployRequest) ([]by
 	if !agentIDPattern.MatchString(request.AgentID) || strings.ContainsAny(request.ServiceURL, "\r\n\x00\"'") {
 		return nil, errors.New("unsafe Agent service definition value")
 	}
+	dataDir, err := resolveDataDir(platform, request.DataDir)
+	if err != nil {
+		return nil, err
+	}
 	if platform.OS == "linux" {
 		serviceURL := strings.ReplaceAll(request.ServiceURL, "%", "%%")
+		dataDir = strings.ReplaceAll(dataDir, "%", "%%")
 		unit := `[Unit]
 Description=Shadoc source Agent
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/shadoc-agent --service "` + serviceURL + `" --id "` + request.AgentID + `" --data-dir %h/.local/share/shadoc-agent --ca-file %h/.config/shadoc-agent/ca.crt --enrollment-token-file %h/.config/shadoc-agent/enrollment.token
+ExecStart=%h/.local/bin/shadoc-agent --service "` + serviceURL + `" --id "` + request.AgentID + `" --data-dir "` + systemdEscape(dataDir) + `" --ca-file %h/.config/shadoc-agent/ca.crt --enrollment-token-file %h/.config/shadoc-agent/enrollment.token
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -420,14 +437,15 @@ WantedBy=default.target
 		home := html.EscapeString(platform.Home)
 		serviceURL := html.EscapeString(request.ServiceURL)
 		agentID := html.EscapeString(request.AgentID)
-		plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>io.shadoc-agent</string><key>ProgramArguments</key><array><string>` + home + `/.local/bin/shadoc-agent</string><string>--service</string><string>` + serviceURL + `</string><string>--id</string><string>` + agentID + `</string><string>--data-dir</string><string>` + home + `/.local/share/shadoc-agent</string><string>--ca-file</string><string>` + home + `/.config/shadoc-agent/ca.crt</string><string>--enrollment-token-file</string><string>` + home + `/.config/shadoc-agent/enrollment.token</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict></dict></plist>`
+		dataDirXML := html.EscapeString(dataDir)
+		plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>io.shadoc-agent</string><key>ProgramArguments</key><array><string>` + home + `/.local/bin/shadoc-agent</string><string>--service</string><string>` + serviceURL + `</string><string>--id</string><string>` + agentID + `</string><string>--data-dir</string><string>` + dataDirXML + `</string><string>--ca-file</string><string>` + home + `/.config/shadoc-agent/ca.crt</string><string>--enrollment-token-file</string><string>` + home + `/.config/shadoc-agent/enrollment.token</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict></dict></plist>`
 		return []byte(plist), nil
 	}
 	if platform.OS == "windows" {
 		script := `$ErrorActionPreference='Stop'
 $root=Join-Path $env:ProgramData 'shadoc-agent'
 $binary=Join-Path $root 'shadoc-agent.exe'
-$arguments='--service "` + request.ServiceURL + `" --id "` + request.AgentID + `" --data-dir "'+$root+'\data" --ca-file "'+$root+'\ca.crt" --enrollment-token-file "'+$root+'\enrollment.token"'
+		$arguments='--service "` + request.ServiceURL + `" --id "` + request.AgentID + `" --data-dir "` + powershellEscape(dataDir) + `" --ca-file "'+$root+'\ca.crt" --enrollment-token-file "'+$root+'\enrollment.token"'
 $command='"'+$binary+'" '+$arguments
 if (Get-Service shadoc-agent -ErrorAction SilentlyContinue) {
   Stop-Service shadoc-agent -Force -ErrorAction SilentlyContinue
@@ -442,4 +460,42 @@ if ($LASTEXITCODE -ne 0) { throw 'unable to start Windows service' }
 		return []byte(script), nil
 	}
 	return nil, errors.New("unsupported Agent service platform")
+}
+
+func resolveDataDir(platform Platform, configured string) (string, error) {
+	value := strings.TrimSpace(configured)
+	if value == "" {
+		if platform.OS == "windows" {
+			if len(platform.Home) < 2 || platform.Home[1] != ':' {
+				return "", errors.New("Windows Agent home drive is required for the default data directory")
+			}
+			value = platform.Home[:2] + `\ProgramData\shadoc-agent\data`
+		} else {
+			value = filepath.Join(platform.Home, ".local", "share", "shadoc-agent")
+		}
+	}
+	if strings.ContainsAny(value, "\x00\r\n\"'") {
+		return "", errors.New("Agent data directory contains unsafe characters")
+	}
+	if platform.OS == "windows" {
+		if len(value) < 3 || value[1] != ':' || (value[2] != '\\' && value[2] != '/') {
+			return "", errors.New("Agent data directory must be an absolute Windows path")
+		}
+		return filepath.Clean(value), nil
+	}
+	if strings.ContainsAny(value, "\\\\$`") {
+		return "", errors.New("Agent data directory contains unsafe shell characters")
+	}
+	if !filepath.IsAbs(value) || filepath.Clean(value) == string(filepath.Separator) {
+		return "", errors.New("Agent data directory must be a non-root absolute path")
+	}
+	return filepath.Clean(value), nil
+}
+
+func systemdEscape(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `"`, `\"`)
+}
+
+func powershellEscape(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }

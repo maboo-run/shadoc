@@ -12,7 +12,12 @@ type DashboardRecentRunsProps = {
 
 export function DashboardRecentRuns({ tasks, locale, timeZone, onViewAll }: DashboardRecentRunsProps) {
   const t = (source: string) => translate(locale, source);
-  const recent = tasks.slice(0, 5);
+  const recent = [...tasks].sort((left, right) => {
+    const leftTime = runTimestamp(left.lastRun);
+    const rightTime = runTimestamp(right.lastRun);
+    if (leftTime === rightTime) return left.id.localeCompare(right.id);
+    return rightTime - leftTime;
+  }).slice(0, 5);
 
   return (
     <section className="dashboard-panel recent-runs-panel" aria-label={t("最近运行")}>
@@ -43,4 +48,9 @@ export function DashboardRecentRuns({ tasks, locale, timeZone, onViewAll }: Dash
       )}
     </section>
   );
+}
+
+function runTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
 }

@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
 	remote_host_id TEXT,
 	managed_installation INTEGER NOT NULL DEFAULT 0,
+	agent_data_dir TEXT NOT NULL DEFAULT '',
     certificate_serial TEXT NOT NULL UNIQUE,
 	certificate_not_after TEXT,
     capabilities_json TEXT NOT NULL DEFAULT '[]',
@@ -713,6 +714,9 @@ ON protection_draft_items(draft_id, position);
 	if err := s.ensureAgentManagedInstallation(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureAgentDataDir(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureAgentRemoteHosts(ctx); err != nil {
 		return err
 	}
@@ -1073,6 +1077,33 @@ func (s *Store) ensureAgentManagedInstallation(ctx context.Context) error {
 			WHERE id IN (SELECT target FROM operations WHERE kind='agent_deploy' AND status='success' AND target<>'')
 		`); err != nil {
 			return fmt.Errorf("backfill managed Agent installations: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureAgentDataDir(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(agents)`)
+	if err != nil {
+		return err
+	}
+	present := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		present = present || name == "agent_data_dir"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !present {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN agent_data_dir TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add Agent data directory: %w", err)
 		}
 	}
 	return nil
