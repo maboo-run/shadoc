@@ -32,7 +32,7 @@ func TestAgentDeployReturnsTrackedOperationWithoutPersistingConnectionDetails(t 
 	cookie := setupSession(t, srv)
 
 	response := requestJSON(t, srv, http.MethodPost, "/api/agents/deploy", map[string]any{
-		"hostId": "host-1", "agentId": "backup-node", "serviceUrl": "https://control.internal:9443",
+		"hostId": "host-1", "agentId": "backup-node", "serviceUrl": "https://control.internal:9443", "dataDir": "/volume1/docker/shadoc-agent",
 	}, cookie)
 	var accepted struct {
 		OperationID string `json:"operationId"`
@@ -50,6 +50,9 @@ func TestAgentDeployReturnsTrackedOperationWithoutPersistingConnectionDetails(t 
 	}
 	if deployer.request.ServiceURL != "https://control.internal:9443" {
 		t.Fatalf("deployment request=%+v", deployer.request)
+	}
+	if deployer.request.DataDir != "/volume1/docker/shadoc-agent" {
+		t.Fatalf("deployment data directory=%q", deployer.request.DataDir)
 	}
 }
 

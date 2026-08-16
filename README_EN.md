@@ -100,6 +100,12 @@ Migration verifies the managed program offline, copies the data, installs the ro
 
 Each Restic task owns one repository. Do not put unrelated data sources in the same task repository.
 
+### Data directory for remotely deployed Agents
+
+When deploying an Agent over SSH from the **Agent Nodes** page, you can provide an absolute path on the Agent host as its data directory. This directory stores Agent credentials and runtime state; leave it blank to use the platform default. On a NAS that spins down mechanical disks, prefer an always-available SSD path such as `/volume1/docker/shadoc-agent`. Shadoc writes the value to the Agent service's `--data-dir` argument and preserves it across redeployment, uninstallation, and control-plane recovery.
+
+This directory is only for the Agent's own data. It does not change any backup task source path, which must still match the intended protection scope.
+
 ## Service Management
 
 The installer prints the path to the managed user-service program. Common commands:

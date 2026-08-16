@@ -4,6 +4,18 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-16
+
+### Added
+
+- 远程部署受管 Agent 时可选择安全的绝对数据目录；该设置会写入服务定义，并在重新部署、卸载清理和控制面恢复中保持一致。
+- 备份仓库与备份任务列表支持按名称或 ID 搜索，并可按引擎和资源类型筛选。
+
+### Changed
+
+- 恢复页面改为在管理员选定仓库后显式读取快照，切换仓库时会丢弃旧请求结果，避免自动扫描和过期快照选择。
+- 最近运行状态与下次执行时间改由备份任务展示；仪表盘近期运行按真实执行时间排序。
+
 ## [0.1.5] - 2026-08-01
 
 ### Fixed
@@ -73,7 +85,8 @@ Shadoc 的重要用户可见变化记录在此文件中。格式参考 [Keep a C
 - 官方 GitHub 仓库身份统一为 `maboo-run/shadoc`。
 - README 调整为面向管理员的安装和使用手册。
 
-[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/maboo-run/shadoc/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.7
 [0.1.5]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.5
 [0.1.4]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.4
 [0.1.2]: https://github.com/maboo-run/shadoc/releases/tag/v0.1.2

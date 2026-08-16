@@ -382,7 +382,7 @@ func importRequest(manifest Manifest, secretIDs map[string]string, previewID, bu
 		request.ScheduleWatermarks = append(request.ScheduleWatermarks, store.ControlPlaneScheduleWatermark{OwnerKind: item.OwnerKind, OwnerID: item.OwnerID, ScheduledAt: item.ScheduledAt, ObservedAt: item.ObservedAt, Mode: item.Mode, Status: item.Status})
 	}
 	for _, item := range manifest.Agents {
-		request.Agents = append(request.Agents, store.AgentRecord{ID: item.ID, RemoteHostID: item.RemoteHostID, ManagedInstallation: item.ManagedInstallation, CertificateSerial: item.CertificateSerial, CertificateNotAfter: item.CertificateNotAfter, Capabilities: append([]string(nil), item.Capabilities...), Status: item.Status, CreatedAt: item.CreatedAt, RevokedAt: item.RevokedAt})
+		request.Agents = append(request.Agents, store.AgentRecord{ID: item.ID, RemoteHostID: item.RemoteHostID, ManagedInstallation: item.ManagedInstallation, AgentDataDir: item.AgentDataDir, CertificateSerial: item.CertificateSerial, CertificateNotAfter: item.CertificateNotAfter, Capabilities: append([]string(nil), item.Capabilities...), Status: item.Status, CreatedAt: item.CreatedAt, RevokedAt: item.RevokedAt})
 	}
 	if manifest.AgentServiceSettings != nil {
 		request.AgentServiceSettings = &store.AgentServiceSettings{Enabled: manifest.AgentServiceSettings.Enabled, ListenHost: manifest.AgentServiceSettings.ListenHost, Port: manifest.AgentServiceSettings.Port, AdvertisedHost: manifest.AgentServiceSettings.AdvertisedHost, TLSNames: append([]string(nil), manifest.AgentServiceSettings.TLSNames...)}

@@ -205,6 +205,59 @@ func TestTaskListReportsTheActiveManualRunUntilWorkFinishes(t *testing.T) {
 	waitForOperation(t, srv, cookie, accepted.OperationID, "success")
 }
 
+func TestTaskListOwnsRunHealthAndNextSchedule(t *testing.T) {
+	srv := newResourceTestServer(t)
+	cookie := setupSession(t, srv)
+	resources := createReadyMaintenanceRepository(t, srv, "repo-task-health")
+	anchor := time.Now().UTC().Truncate(time.Second)
+	task := domain.Task{ID: "task-health-view", Name: "health view", Kind: domain.DirectoryTask, RepositoryID: "repo-task-health", Directory: &domain.DirectorySource{Path: "/srv/source"}, Enabled: true, CreatedAt: anchor, UpdatedAt: anchor}
+	if err := resources.CreateTask(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+	plan := domain.Plan{ID: "plan-health-view", Name: "hourly", Schedule: domain.Schedule{Kind: domain.IntervalSchedule, IntervalHours: 2}, Timezone: "UTC", TaskIDs: []string{task.ID}, Enabled: true, ScheduleAnchorAt: anchor, CreatedAt: anchor, UpdatedAt: anchor}
+	if err := resources.CreatePlan(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	runStarted := anchor.Add(time.Minute)
+	if err := resources.StartRun(t.Context(), store.RunRecord{ID: "run-health-view", TaskID: task.ID, Trigger: "manual", Status: "running", StartedAt: runStarted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.FinishRun(t.Context(), "run-health-view", "failed", runStarted.Add(time.Minute), 1, "", map[string]any{"error": "safe"}, "safe"); err != nil {
+		t.Fatal(err)
+	}
+
+	taskResponse := requestJSON(t, srv, http.MethodGet, "/api/tasks", nil, cookie)
+	var tasks []struct {
+		ID      string `json:"id"`
+		LastRun *struct {
+			Status    string    `json:"status"`
+			StartedAt time.Time `json:"startedAt"`
+		} `json:"lastRun"`
+		NextRun string `json:"nextRun"`
+	}
+	if err := json.Unmarshal(taskResponse.Body.Bytes(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if taskResponse.Code != http.StatusOK || len(tasks) != 1 || tasks[0].ID != task.ID || tasks[0].LastRun == nil || tasks[0].LastRun.Status != "failed" || !tasks[0].LastRun.StartedAt.Equal(runStarted) || tasks[0].NextRun != anchor.Add(2*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("tasks=%+v status=%d body=%s", tasks, taskResponse.Code, taskResponse.Body.String())
+	}
+
+	repositoryResponse := requestJSON(t, srv, http.MethodGet, "/api/repositories", nil, cookie)
+	var repositories []map[string]any
+	if err := json.Unmarshal(repositoryResponse.Body.Bytes(), &repositories); err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 {
+		t.Fatalf("repositories=%v", repositories)
+	}
+	if _, exists := repositories[0]["lastRun"]; exists {
+		t.Fatalf("repository still exposes task run health: %v", repositories[0])
+	}
+	if _, exists := repositories[0]["nextRun"]; exists {
+		t.Fatalf("repository still exposes task schedule: %v", repositories[0])
+	}
+}
+
 func TestActiveTaskOperationIncludesRenewedAgentProgressAndStallState(t *testing.T) {
 	srv := newResourceTestServer(t)
 	cookie := setupSession(t, srv)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { generateRepositoryPassword, RepositoryEditor, TaskEditor } from "./ResourceEditors";
 import { OperationFeedback, useOperation, type AcceptedOperation } from "./OperationFeedback";
@@ -821,6 +821,7 @@ function AgentPage({
   const [remoteHostsLoaded, setRemoteHostsLoaded] = useState(false);
   const [deploymentHost, setDeploymentHost] = useState("");
   const [deploymentAgentID, setDeploymentAgentID] = useState("");
+  const [deploymentDataDir, setDeploymentDataDir] = useState("");
   const [redeploying, setRedeploying] = useState(false);
   const [agentService, setAgentService] = useState<AgentServiceStatus | null>(null);
   const [deploymentURL, setDeploymentURL] = useState("");
@@ -991,6 +992,7 @@ function AgentPage({
     const boundHost = remoteHosts.find((host) => String(host.id ?? "") === String(agent?.remoteHostId ?? ""));
     setRedeploying(isRedeploy);
     setDeploymentAgentID(String(agent?.id ?? ""));
+    setDeploymentDataDir(String(agent?.agentDataDir ?? ""));
     setDeploymentHost(String(boundHost?.id ?? remoteHosts[0]?.id ?? ""));
     setDeployDialog(true);
   }
@@ -1112,6 +1114,7 @@ function AgentPage({
           hostId: String(form.get("hostId") ?? ""),
           agentId: String(form.get("agentId") ?? ""),
           serviceUrl: String(form.get("serviceUrl") ?? ""),
+          dataDir: String(form.get("dataDir") ?? "").trim(),
         }).then(() => setDeployDialog(false));
       }}>
         <header><div><h2 id="agent-deploy-title">{t(redeploying ? "重新部署 Agent" : "远程部署 Agent")}</h2><p>{t("通过已验证并固定主机密钥的 SSH 连接安装用户级服务，成功注册后才算部署完成。")}</p></div></header>
@@ -1125,6 +1128,8 @@ function AgentPage({
           {!remoteHosts.length && <p className="field-hint full-field">{t("尚无可用远程主机，请先创建并完成 SSH 主机密钥验证。")}</p>}
           <label>Agent ID<input name="agentId" required readOnly={redeploying} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" value={deploymentAgentID} onChange={(event) => setDeploymentAgentID(event.target.value)} placeholder={t("例如 backup-node")} /></label>
           <label>{t("Service HTTPS 地址")}<input name="serviceUrl" type="url" required readOnly value={deploymentURL} placeholder="https://control.example:9443" /></label>
+          <label className="full-field">{t("Agent 数据目录")}<input name="dataDir" value={deploymentDataDir} onChange={(event) => setDeploymentDataDir(event.target.value)} placeholder="/volume1/docker/shadoc-agent" /></label>
+          <p className="field-hint full-field">{t("填写 Agent 宿主机上的绝对路径；留空使用默认目录。建议放在不会休眠的 SSD。")}</p>
           <p className="field-hint full-field">{t("该地址必须能从目标服务器访问，并与 Agent Service TLS 证书名称一致。部署不会请求 root 权限。")}</p>
         </div>
         <footer>
@@ -1390,6 +1395,9 @@ function ManagementPage({
   const [generatedSSHAccess, setGeneratedSSHAccess] = useState<{ publicKey: string; name: string; username: string; host: string } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Record<string, unknown> | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [resourceSearch, setResourceSearch] = useState("");
+  const [engineFilter, setEngineFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("");
   const generatedSSHAccessRef = useRef<HTMLElement>(null);
   const initialization = useOperation(api);
   const repositoryConnection = useOperation(api);
@@ -1417,11 +1425,24 @@ function ManagementPage({
   useModalFocus(generatedSSHAccessRef, () => setGeneratedSSHAccess(null), Boolean(generatedSSHAccess));
   useEffect(() => {
     setMessage("");
+    setResourceSearch("");
+    setEngineFilter("");
+    setKindFilter("");
     if (dialogOwner && dialogOwner !== name) {
       setDialogOwner("");
       setEditing(null);
     }
   }, [dialogOwner, name]);
+  const filteredData = useMemo(() => {
+    if (name !== "备份仓库" && name !== "备份任务") return data;
+    const search = resourceSearch.trim().toLocaleLowerCase();
+    return data.filter((item) => {
+      const matchesSearch = !search || [item.name, item.id].some((value) => String(value ?? "").toLocaleLowerCase().includes(search));
+      const matchesEngine = !engineFilter || String(item.engine ?? "") === engineFilter;
+      const matchesKind = !kindFilter || String(item.kind ?? "") === kindFilter;
+      return matchesSearch && matchesEngine && matchesKind;
+    });
+  }, [data, engineFilter, kindFilter, name, resourceSearch]);
   useEffect(() => {
     const operation = initialization.operation;
     if (!operation || !initializingRepositoryId || !["success", "partial", "failed", "cancelled", "cleanup_required"].includes(operation.status)) return;
@@ -1665,6 +1686,28 @@ function ManagementPage({
       {name === "备份仓库" && <OperationFeedback operation={repositoryConnection} locale={locale} hideTerminal />}
       {name === "备份任务" && <OperationFeedback operation={taskRun} locale={locale} compact persistTerminal autoDismissSuccess dismissibleTerminal />}
       <section className="content-section">
+        {(name === "备份仓库" || name === "备份任务") && <div className="resource-list-toolbar" role="search" aria-label={t("备份资源筛选")}>
+          <label>{t("按名称或 ID 搜索")}<input value={resourceSearch} onChange={(event) => setResourceSearch(event.target.value)} placeholder={t("输入名称或 ID")} /></label>
+          <label>{t("引擎筛选")}<select aria-label={t("引擎筛选")} value={engineFilter} onChange={(event) => setEngineFilter(event.target.value)}>
+            <option value="">{t("全部引擎")}</option>
+            <option value="restic">Restic</option>
+            <option value="rsync">rsync</option>
+          </select></label>
+          <label>{t("类型筛选")}<select aria-label={t("类型筛选")} value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
+            <option value="">{t("全部类型")}</option>
+            {name === "备份仓库" ? <>
+              <option value="local">{t("本地目录")}</option>
+              <option value="sftp">{t("远程 SFTP")}</option>
+              <option value="ssh">{t("远程 SSH")}</option>
+              <option value="s3">S3</option>
+            </> : <>
+              <option value="directory">{t("目录备份")}</option>
+              <option value="database">{t("数据库备份")}</option>
+              <option value="rsync">rsync</option>
+            </>}
+          </select></label>
+          {(resourceSearch || engineFilter || kindFilter) && <button className="text-button" type="button" onClick={() => { setResourceSearch(""); setEngineFilter(""); setKindFilter(""); }}>{t("清除筛选")}</button>}
+        </div>}
         <div className="table-frame">
           <table>
             <thead>
@@ -1676,7 +1719,7 @@ function ManagementPage({
               </tr>
             </thead>
             <tbody>
-              {data.map((item, index) => (
+              {filteredData.map((item, index) => (
                 <tr key={String(item.id ?? index)}>
                   {columns(name).map((column) => (
                     <td
@@ -1712,10 +1755,10 @@ function ManagementPage({
                           locale={locale}
                           onUpdated={reload}
                         />
+                      ) : column.key === "status" && name === "备份仓库" && String(item.id ?? "") === initializingRepositoryId && initializationPhase !== "idle" ? (
+                        <>{resourceValue(name, column.key, item, locale, timeZone)} <RepositoryOperationState phase={initializationPhase} locale={locale} /></>
                       ) : column.key === "lastRun" ? (
-                        name === "备份仓库" && String(item.id ?? "") === initializingRepositoryId && initializationPhase !== "idle"
-                          ? <RepositoryOperationState phase={initializationPhase} locale={locale} />
-                          : repositoryRunDisplay(item.lastRun, locale, timeZone)
+                        repositoryRunDisplay(item.lastRun, locale, timeZone)
                       ) : (
                         resourceValue(name, column.key, item, locale, timeZone)
                       )}
@@ -1752,10 +1795,10 @@ function ManagementPage({
                   </td>
                 </tr>
               ))}
-              {!data.length && (
+              {!filteredData.length && (
                 <tr>
                   <td className="empty-row" colSpan={columns(name).length + 1}>
-                    {t("尚无记录")}
+                    {data.length ? t("没有符合筛选条件的记录") : t("尚无记录")}
                   </td>
                 </tr>
               )}
@@ -2110,6 +2153,7 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
   const [agents, setAgents] = useState<Array<Record<string, unknown>>>([]);
   const [snapshotContentsCache, setSnapshotContentsCache] = useState<Record<string, SnapshotContentsPage>>({});
   const [snapshots, setSnapshots] = useState<Array<Record<string, unknown>>>([]);
+  const [snapshotLoaded, setSnapshotLoaded] = useState(false);
   const [repo, setRepo] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -2145,6 +2189,7 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
   const operation = useOperation(api);
   const handledRestore = useRef("");
   const agentRequestVersion = useRef(0);
+  const snapshotRequestVersion = useRef(0);
   const invalidate = () => { setConfirmation(null); setConfirmationKind(""); setPassword(""); setPreparedDatabaseConnection(""); };
   useEffect(() => {
     let active = true;
@@ -2188,20 +2233,8 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
     };
   }, [api, view]);
   useEffect(() => {
-    setSnapshots([]); setDirSnapshot(""); setDbSnapshot(""); setDatabaseRestoreMode("database"); setDumpFileDirectory(""); setSelectedIncludes([]); invalidate();
-    if (!repo) return;
-    let active = true;
-    setLoading(true); setError("");
-    void api.action(`/api/repositories/${repo}/snapshots`).then((value) => {
-      if (!active) return;
-      const items = value as Array<Record<string, unknown>>;
-      const detected = snapshotIsDatabase(items[0]) ? "database" : "directory";
-      setSnapshots(items);
-      setRestoreKind(detected);
-      setTargetKind("local");
-      setDirTarget("");
-    }).catch(() => active && setError("快照读取失败")).finally(() => active && setLoading(false));
-    return () => { active = false; };
+    snapshotRequestVersion.current += 1;
+    setLoading(false); setError(""); setSnapshots([]); setSnapshotLoaded(false); setDirSnapshot(""); setDbSnapshot(""); setRestoreKind("directory"); setDatabaseRestoreMode("database"); setDumpFileDirectory(""); setSelectedIncludes([]); invalidate();
   }, [api, repo]);
   useEffect(() => {
     const record = operation.operation;
@@ -2218,6 +2251,25 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
   }, [operation.error]);
   const databaseSnapshots = snapshots.filter((item) => JSON.stringify(item.tags ?? []).includes("rc:source=database"));
   const directorySnapshots = snapshots.filter((item) => !databaseSnapshots.includes(item));
+  const loadSnapshots = async () => {
+    if (!repo || loading) return;
+    const requestVersion = ++snapshotRequestVersion.current;
+    setLoading(true); setError(""); setSnapshotLoaded(false); setSnapshots([]); setDirSnapshot(""); setDbSnapshot(""); setSelectedIncludes([]); invalidate();
+    try {
+      const value = await api.action(`/api/repositories/${encodeURIComponent(repo)}/snapshots`);
+      if (snapshotRequestVersion.current !== requestVersion) return;
+      const items = value as Array<Record<string, unknown>>;
+      setSnapshots(items);
+      setSnapshotLoaded(true);
+      setRestoreKind(snapshotIsDatabase(items[0]) ? "database" : "directory");
+      setTargetKind("local");
+      setDirTarget("");
+    } catch {
+      if (snapshotRequestVersion.current === requestVersion) setError("快照读取失败");
+    } finally {
+      if (snapshotRequestVersion.current === requestVersion) setLoading(false);
+    }
+  };
   const authorizeAndStart = async (kind: "directory" | "database" | "dump-file", payload: Record<string, unknown>) => {
     if (!confirmation?.confirmationId || confirmationKind !== kind) return;
     try {
@@ -2267,21 +2319,25 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
               {repositories.map((item) => <option key={String(item.id)} value={String(item.id)}>{String(item.name)} · {t(item.kind === "local" ? "本地" : "远程")} · {String(item.path)}</option>)}
             </select>
           </label>
-          {!loading && restoreKind === "directory" && <label className="full-field">
+          <div className="full-field snapshot-load-controls">
+            <button className="secondary-button" type="button" disabled={!repo || loading} onClick={() => void loadSnapshots()}>{t(loading ? "正在读取…" : snapshotLoaded ? "重新读取快照" : "读取快照")}</button>
+            {!snapshotLoaded && !loading && <span className="field-hint">{t("选定仓库后，确认并点击读取快照。")}</span>}
+          </div>
+          {snapshotLoaded && !loading && restoreKind === "directory" && <label className="full-field">
             {t("目录快照")}
             <select value={dirSnapshot} onChange={(event) => { setDirSnapshot(event.target.value); setSelectedIncludes([]); invalidate(); }} required>
               <option value="">{t("请选择目录快照")}</option>
               {directorySnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time, locale, timeZone)}</option>)}
             </select>
           </label>}
-          {!loading && restoreKind === "database" && <label className="full-field">
+          {snapshotLoaded && !loading && restoreKind === "database" && <label className="full-field">
             {t("数据库快照")}
             <select value={dbSnapshot} onChange={(event) => { setDbSnapshot(event.target.value); invalidate(); }} required>
               <option value="">{t("请选择数据库快照")}</option>
               {databaseSnapshots.map((item) => <option key={String(item.id)} value={String(item.id)}>{snapshotOptionLabel(item.id, item.time, locale, timeZone)}</option>)}
             </select>
           </label>}
-          {!loading && restoreKind === "directory" && dirSnapshot && <div className="full-field snapshot-tools">
+          {snapshotLoaded && !loading && restoreKind === "directory" && dirSnapshot && <div className="full-field snapshot-tools">
             <button className="secondary-button" type="button" onClick={() => setView("browse")}>{t("浏览并选择快照内容")}</button>
             <button className="secondary-button" type="button" onClick={() => setView("diff")}>{t("查看快照差异")}</button>
             <span>{selectedIncludes.length ? locale === "en-US" ? `${selectedIncludes.length} items selected` : `已选择 ${selectedIncludes.length} 项` : t("未选择项目，将恢复整个目录")}</span>
@@ -2292,7 +2348,7 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
         <span className="restore-loading-spinner" aria-hidden="true" />
         <span>{t("正在读取…")}</span>
       </section>}
-      {!loading && restoreKind === "directory" && <section className="restore-step-card restore-target-step">
+      {snapshotLoaded && !loading && restoreKind === "directory" && <section className="restore-step-card restore-target-step">
         <div className="restore-step-heading"><span aria-hidden="true">2</span><div><h2>{t("恢复目录到新位置")}</h2><p>{t("恢复只会写入你选择的新位置。")}</p></div></div>
         <form
           className="form-grid restore-workflow-form"
@@ -2319,7 +2375,7 @@ function RestorePage({ api, locale, timeZone }: { api: AppAPI; locale: Locale; t
           {confirmationKind === "directory" && <RestoreConfirmation confirmation={confirmation} password={password} setPassword={setPassword} label={t("确认并开始目录恢复")} locale={locale} timeZone={timeZone} onClose={() => { setConfirmation(null); setConfirmationKind(""); setPassword(""); }} onConfirm={() => void authorizeAndStart("directory", directoryPayload)} />}
         </form>
       </section>}
-      {!loading && restoreKind === "database" && <section className="restore-step-card restore-target-step">
+      {snapshotLoaded && !loading && restoreKind === "database" && <section className="restore-step-card restore-target-step">
         <div className="restore-step-heading"><span aria-hidden="true">2</span><div><h2>{t("恢复数据库快照")}</h2><p>{t("选择直接导入数据库，或生成完整 dump 文件。")}</p></div></div>
         <form
           className="form-grid restore-workflow-form"
@@ -2545,8 +2601,6 @@ function columns(name: string) {
       { key: "path", label: "仓库路径" },
       { key: "status", label: "状态" },
       { key: "capacity", label: "存储容量" },
-      { key: "lastRun", label: "最近运行" },
-      { key: "nextRun", label: "下次执行" },
     ],
     数据库实例: [
       { key: "id", label: "ID" },
@@ -2565,6 +2619,8 @@ function columns(name: string) {
       { key: "executionTarget", label: "执行位置" },
       { key: "repositoryId", label: "仓库" },
       { key: "enabled", label: "启用" },
+      { key: "lastRun", label: "最近运行" },
+      { key: "nextRun", label: "下次执行" },
     ],
     备份计划: [
       { key: "name", label: "名称" },

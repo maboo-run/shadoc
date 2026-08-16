@@ -419,7 +419,7 @@ func snapshotScheduleWatermarks(ctx context.Context, tx *sql.Tx) ([]ControlPlane
 }
 
 func snapshotAgents(ctx context.Context, tx *sql.Tx) ([]AgentRecord, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),certificate_serial,certificate_not_after,capabilities_json,status,created_at,revoked_at FROM agents ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),COALESCE(agent_data_dir,''),certificate_serial,certificate_not_after,capabilities_json,status,created_at,revoked_at FROM agents ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +430,7 @@ func snapshotAgents(ctx context.Context, tx *sql.Tx) ([]AgentRecord, error) {
 		var capabilities, created string
 		var managedInstallation int
 		var certificateNotAfter, revoked sql.NullString
-		if err := rows.Scan(&item.ID, &item.RemoteHostID, &managedInstallation, &item.CertificateSerial, &certificateNotAfter, &capabilities, &item.Status, &created, &revoked); err != nil {
+		if err := rows.Scan(&item.ID, &item.RemoteHostID, &managedInstallation, &item.AgentDataDir, &item.CertificateSerial, &certificateNotAfter, &capabilities, &item.Status, &created, &revoked); err != nil {
 			return nil, err
 		}
 		item.ManagedInstallation = managedInstallation != 0

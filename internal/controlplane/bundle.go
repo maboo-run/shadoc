@@ -78,6 +78,7 @@ type AgentIdentity struct {
 	ID                  string     `json:"id"`
 	RemoteHostID        string     `json:"remoteHostId,omitempty"`
 	ManagedInstallation bool       `json:"managedInstallation"`
+	AgentDataDir        string     `json:"agentDataDir,omitempty"`
 	CertificateSerial   string     `json:"certificateSerial"`
 	CertificateNotAfter *time.Time `json:"certificateNotAfter,omitempty"`
 	Capabilities        []string   `json:"capabilities"`

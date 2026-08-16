@@ -13,6 +13,7 @@ type AgentRecord struct {
 	ID                  string
 	RemoteHostID        string
 	ManagedInstallation bool
+	AgentDataDir        string
 	CertificateSerial   string
 	CertificateNotAfter *time.Time
 	Capabilities        []string
@@ -331,20 +332,21 @@ func (s *Store) SaveAgent(ctx context.Context, agent AgentRecord) error {
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO agents(
-			id,remote_host_id,managed_installation,certificate_serial,certificate_not_after,capabilities_json,
+			id,remote_host_id,managed_installation,agent_data_dir,certificate_serial,certificate_not_after,capabilities_json,
 			build_version,protocol_min,protocol_max,platform_os,platform_arch,restic_version,rsync_version,service_url,renewal_status,
 			status,last_heartbeat_at,created_at,revoked_at,draining_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			remote_host_id=COALESCE(excluded.remote_host_id,agents.remote_host_id),
 			managed_installation=CASE WHEN excluded.managed_installation<>0 THEN 1 ELSE agents.managed_installation END,
+			agent_data_dir=CASE WHEN excluded.agent_data_dir<>'' THEN excluded.agent_data_dir ELSE agents.agent_data_dir END,
 			certificate_serial=excluded.certificate_serial,certificate_not_after=excluded.certificate_not_after,
 			capabilities_json=excluded.capabilities_json,build_version=excluded.build_version,
 			protocol_min=excluded.protocol_min,protocol_max=excluded.protocol_max,platform_os=excluded.platform_os,platform_arch=excluded.platform_arch,
 			restic_version=excluded.restic_version,rsync_version=excluded.rsync_version,service_url=excluded.service_url,renewal_status=excluded.renewal_status,
 			status=excluded.status,last_heartbeat_at=excluded.last_heartbeat_at,revoked_at=excluded.revoked_at,
 			stopped_at=NULL,uninstalled_at=NULL,draining_at=excluded.draining_at`,
-		agent.ID, nullString(agent.RemoteHostID), agent.ManagedInstallation, agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), string(capabilities),
+		agent.ID, nullString(agent.RemoteHostID), agent.ManagedInstallation, agent.AgentDataDir, agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), string(capabilities),
 		agent.BuildVersion, agent.ProtocolMin, agent.ProtocolMax, agent.OS, agent.Arch, agent.ResticVersion, agent.RsyncVersion, agent.ServiceURL, agent.RenewalStatus,
 		agent.Status, nullableTime(agent.LastHeartbeatAt), formatTime(agent.CreatedAt), nullableTime(agent.RevokedAt), nullableTime(agent.DrainingAt))
 	if err != nil {
@@ -388,7 +390,7 @@ func (s *Store) EnrollAgent(ctx context.Context, agent AgentRecord) error {
 		return errors.New("Agent is already enrolled and active")
 	default:
 		_, err = tx.ExecContext(ctx, `
-			UPDATE agents SET remote_host_id=NULL,managed_installation=0,certificate_serial=?,certificate_not_after=?,capabilities_json='[]',
+			UPDATE agents SET remote_host_id=NULL,managed_installation=0,agent_data_dir='',certificate_serial=?,certificate_not_after=?,capabilities_json='[]',
 				build_version='',protocol_min=0,protocol_max=0,platform_os='',platform_arch='',restic_version='',rsync_version='',service_url='',renewal_status='',
 				status='offline',last_heartbeat_at=NULL,revoked_at=NULL,stopped_at=NULL,uninstalled_at=NULL,draining_at=NULL
 			WHERE id=?`, agent.CertificateSerial, nullableTime(agent.CertificateNotAfter), agent.ID)
@@ -656,7 +658,7 @@ func (s *Store) SavePendingAgentCertificate(ctx context.Context, agentID, serial
 
 func (s *Store) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),certificate_serial,certificate_not_after,capabilities_json,
+		SELECT id,COALESCE(remote_host_id,''),COALESCE(managed_installation,0),COALESCE(agent_data_dir,''),certificate_serial,certificate_not_after,capabilities_json,
 			build_version,protocol_min,protocol_max,platform_os,platform_arch,restic_version,rsync_version,service_url,renewal_status,
 			status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at,draining_at
 		FROM agents ORDER BY id`)
@@ -671,7 +673,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 		var managedInstallation int
 		var certificateNotAfter, heartbeat, revoked, stopped, uninstalled, draining sql.NullString
 		if err := rows.Scan(
-			&agent.ID, &agent.RemoteHostID, &managedInstallation, &agent.CertificateSerial, &certificateNotAfter, &capabilities,
+			&agent.ID, &agent.RemoteHostID, &managedInstallation, &agent.AgentDataDir, &agent.CertificateSerial, &certificateNotAfter, &capabilities,
 			&agent.BuildVersion, &agent.ProtocolMin, &agent.ProtocolMax, &agent.OS, &agent.Arch, &agent.ResticVersion, &agent.RsyncVersion, &agent.ServiceURL, &agent.RenewalStatus,
 			&agent.Status, &heartbeat, &created, &revoked, &stopped, &uninstalled, &draining,
 		); err != nil {
@@ -707,6 +709,17 @@ func (s *Store) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 		agents = append(agents, agent)
 	}
 	return agents, rows.Err()
+}
+
+func (s *Store) SetManagedAgentDataDir(ctx context.Context, agentID, dataDir string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET agent_data_dir=? WHERE id=? AND managed_installation<>0`, dataDir, agentID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) RevokeAgent(ctx context.Context, id string, at time.Time) error {

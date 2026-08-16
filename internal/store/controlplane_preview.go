@@ -213,7 +213,7 @@ func importAgents(ctx context.Context, tx *sql.Tx, items []AgentRecord) error {
 		if item.RevokedAt != nil {
 			status = "revoked"
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO agents(id,remote_host_id,managed_installation,certificate_serial,certificate_not_after,capabilities_json,status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, nullString(item.RemoteHostID), item.ManagedInstallation, item.CertificateSerial, nullableTime(item.CertificateNotAfter), "[]", status, nil, formatTime(item.CreatedAt), nullableTime(item.RevokedAt), nil, nil)
+		_, err := tx.ExecContext(ctx, `INSERT INTO agents(id,remote_host_id,managed_installation,agent_data_dir,certificate_serial,certificate_not_after,capabilities_json,status,last_heartbeat_at,created_at,revoked_at,stopped_at,uninstalled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, nullString(item.RemoteHostID), item.ManagedInstallation, item.AgentDataDir, item.CertificateSerial, nullableTime(item.CertificateNotAfter), "[]", status, nil, formatTime(item.CreatedAt), nullableTime(item.RevokedAt), nil, nil)
 		if err != nil {
 			return constraintError(err)
 		}

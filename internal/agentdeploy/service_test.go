@@ -73,12 +73,37 @@ func TestArtifactResolverDoesNotDeployLegacyWindowsBinaryUnderShadocServiceIdent
 }
 
 func TestLinuxServiceDefinitionEscapesSystemdPercentSpecifiersInURL(t *testing.T) {
-	definition, err := deploymentServiceDefinition(Platform{OS: "linux"}, DeployRequest{AgentID: "agent-a", ServiceURL: "https://service.example:9443/agent%2Fcontrol"})
+	definition, err := deploymentServiceDefinition(Platform{OS: "linux", Home: "/home/backup"}, DeployRequest{AgentID: "agent-a", ServiceURL: "https://service.example:9443/agent%2Fcontrol"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(definition), "agent%%2Fcontrol") {
 		t.Fatalf("definition=%s", definition)
+	}
+}
+
+func TestAgentServiceDefinitionUsesConfiguredDataDirectory(t *testing.T) {
+	definition, err := deploymentServiceDefinition(Platform{OS: "linux", Home: "/home/backup"}, DeployRequest{
+		AgentID: "agent-a", ServiceURL: "https://service.example:9443", DataDir: "/volume1/docker/shadoc-agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(definition)
+	if !strings.Contains(text, `--data-dir "/volume1/docker/shadoc-agent"`) || strings.Contains(text, ".local/share/shadoc-agent") {
+		t.Fatalf("definition=%s", definition)
+	}
+}
+
+func TestAgentDataDirectoryMustBeAbsoluteAndShellSafe(t *testing.T) {
+	platform := Platform{OS: "linux", Home: "/home/backup"}
+	for _, configured := range []string{"relative/path", "/", "/volume1/docker/$agent", "/volume1/docker/`id`", "/volume1/docker/agent'"} {
+		if _, err := resolveDataDir(platform, configured); err == nil {
+			t.Fatalf("unsafe data directory %q was accepted", configured)
+		}
+	}
+	if got, err := resolveDataDir(platform, "/volume1/docker/shadoc-agent"); err != nil || got != "/volume1/docker/shadoc-agent" {
+		t.Fatalf("valid data directory=%q err=%v", got, err)
 	}
 }
 
@@ -294,6 +319,7 @@ type deploymentStore struct {
 	host                      domain.RemoteHost
 	agents                    []store.AgentRecord
 	boundAgentID, boundHostID string
+	dataDir                   string
 	listAgentsHook            func([]store.AgentRecord) []store.AgentRecord
 	drainStarted, drainEnded  bool
 	activeWorkCounts          []int
@@ -314,6 +340,10 @@ func (s *deploymentStore) ListAgents(context.Context) ([]store.AgentRecord, erro
 }
 func (s *deploymentStore) BindManagedAgentRemoteHost(_ context.Context, agentID, hostID string) error {
 	s.boundAgentID, s.boundHostID = agentID, hostID
+	return nil
+}
+func (s *deploymentStore) SetManagedAgentDataDir(_ context.Context, _, dataDir string) error {
+	s.dataDir = dataDir
 	return nil
 }
 func (s *deploymentStore) BeginAgentDrain(context.Context, string, time.Time) error {
@@ -377,11 +407,11 @@ func (r *deploymentRemote) Upload(_ context.Context, file RemoteFile, content []
 	r.files[file] = append([]byte(nil), content...)
 	return nil
 }
-func (r *deploymentRemote) PrepareReenrollment(context.Context, Platform) error {
+func (r *deploymentRemote) PrepareReenrollment(context.Context, Platform, string) error {
 	r.reenrollmentPrepared = true
 	return nil
 }
-func (r *deploymentRemote) Activate(context.Context, Platform) error {
+func (r *deploymentRemote) Activate(context.Context, Platform, string) error {
 	if r.onActivate != nil {
 		r.onActivate()
 	}
@@ -389,12 +419,15 @@ func (r *deploymentRemote) Activate(context.Context, Platform) error {
 	r.activatedAfterReenrollment = r.reenrollmentPrepared
 	return r.activateErr
 }
-func (r *deploymentRemote) Finalize(context.Context, Platform) error {
+func (r *deploymentRemote) Finalize(context.Context, Platform, string) error {
 	r.finalized = true
 	return r.finalizeErr
 }
-func (r *deploymentRemote) Cleanup(context.Context, Platform) error { r.cleaned = true; return nil }
-func (*deploymentRemote) Close() error                              { return nil }
+func (r *deploymentRemote) Cleanup(context.Context, Platform, string) error {
+	r.cleaned = true
+	return nil
+}
+func (*deploymentRemote) Close() error { return nil }
 func containsSecret(commands []string, secret string) bool {
 	for _, command := range commands {
 		if command == secret {
